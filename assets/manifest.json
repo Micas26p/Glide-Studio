@@ -1,0 +1,46 @@
+{
+  "version": "1.26.1",
+  "cta": {
+    "official": ["pt", "en", "es", "fr", "ru", "de", "it", "pl"]
+  },
+  "music": {
+    "defaultGenre": "cinematic",
+    "presetFolders": ["Music/Cinematic", "Music/Ambient"],
+    "manualOverride": true,
+    "neverMixGenres": true,
+    "splitLongerThanSeconds": 600,
+    "partSeconds": 300
+  },
+  "sfx": {
+    "intro": ["subtitle_luxury_doc", "subtitle_shimmer"],
+    "subtitle": ["subtitle_shimmer", "subtitle_swipe", "subtitle_whoosh", "subtitle_zoom", "subtitle_hit", "subtitle_type", "subtitle_glitch", "subtitle_pulse", "subtitle_shake"],
+    "transition": [
+      "transition_air",
+      "transition_whoosh",
+      "transition_sweep",
+      "transition_swipe",
+      "transition_flash",
+      "transition_archive",
+      "transition_documentary",
+      "transition_vhs",
+      "transition_digital_glitch",
+      "transition_mechanical",
+      "transition_industrial",
+      "transition_money",
+      "transition_map",
+      "transition_futuristic",
+      "transition_bass_hit",
+      "transition_glass",
+      "transition_suspense"
+    ],
+    "cta": "original_audio_only"
+  }
+}
+
+
+
+
+
+
+
+

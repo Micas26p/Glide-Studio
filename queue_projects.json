@@ -1,0 +1,2481 @@
+{
+  "version": "1.29.0",
+  "updatedAt": "2026-08-19T16:38:55",
+  "projects": [
+    {
+      "id": "p_mp9oi8nq_d5ao",
+      "name": "STATIC FRONT",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "en",
+        "musicGenre": "cinematic",
+        "outputName": "STATIC FRONT",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random_documentary",
+        "zoom": "light",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "reference_dna",
+        "referenceStyleEnabled": true,
+        "referenceStyleVideo": {
+          "name": "videoplayback.mp4",
+          "path": "C:\\Users\\Micael\\Downloads\\Glide_Ultra_Local_Studio_v0_5\\Glide_Ultra_Local_Studio_v0_5\\reference_styles\\p_mp9oi8nq_d5ao\\reference.mp4",
+          "size": 46706483,
+          "updatedAt": "2026-06-27T12:18:46",
+          "analyzedAt": "2026-06-27T12:19:08",
+          "styleDna": {
+            "kind": "glide_reference_style_dna",
+            "version": "1.22.0",
+            "dnaVersion": "2.0",
+            "projectId": "p_mp9oi8nq_d5ao",
+            "sourceVideo": "videoplayback.mp4",
+            "sourceSignature": {
+              "path_name": "reference.mp4",
+              "size": 46706483,
+              "mtime_ns": 1782559126425529700,
+              "signature": "faed5927d87b19a9003907bc7010eaf01370042f060832bba29f7a7148ec7d34"
+            },
+            "analyzedAt": "2026-06-27T12:19:08",
+            "duration": 727.04,
+            "fps": 29.97,
+            "resolution": {
+              "width": 640,
+              "height": 360
+            },
+            "bitrate": {
+              "video": 415450,
+              "audio": 96004
+            },
+            "scene": {
+              "cut_count": 111,
+              "cuts_per_minute": 9.16,
+              "average_shot_seconds": 6.49,
+              "median_shot_seconds": 5.67,
+              "cut_times": [
+                2.102,
+                5.239,
+                5.439,
+                6.406,
+                7.674,
+                18.151,
+                22.155,
+                32.165,
+                34.234,
+                37.271,
+                40.474,
+                45.078,
+                47.114,
+                54.388,
+                59.86,
+                61.695,
+                71.104,
+                76.61,
+                79.813,
+                84.985,
+                89.957,
+                95.862,
+                105.739,
+                112.045,
+                114.548,
+                125.092,
+                126.727,
+                132.399,
+                136.903,
+                138.305,
+                141.875,
+                152.719,
+                159.359,
+                162.729,
+                170.971,
+                179.279,
+                181.148,
+                204.938,
+                207.14,
+                212.412,
+                215.682,
+                220.187,
+                223.123,
+                237.003,
+                257.357,
+                264.197,
+                273.807,
+                279.146,
+                317.484,
+                330.096,
+                330.297,
+                337.504,
+                343.41,
+                350.25,
+                359.893,
+                367.567,
+                382.882,
+                389.756,
+                400.2,
+                402.902,
+                410.777,
+                421.288,
+                425.358,
+                430.997,
+                437.037,
+                439.139,
+                443.176,
+                450.583,
+                457.29,
+                462.395,
+                466.433,
+                468.668,
+                471.871,
+                475.008,
+                477.877,
+                487.854,
+                498.631,
+                513.013,
+                519.352,
+                525.325,
+                531.731,
+                537.404,
+                544.377,
+                557.524,
+                564.297,
+                566.366,
+                572.272,
+                581.214,
+                587.587,
+                592.959,
+                599.866,
+                605.238,
+                609.876,
+                614.547,
+                617.217,
+                622.222,
+                627.994,
+                637.537,
+                644.911,
+                651.684,
+                662.562,
+                664.831,
+                667.667,
+                683.183,
+                685.485,
+                689.589,
+                694.027,
+                694.827,
+                700.867,
+                705.438,
+                716.082
+              ],
+              "transition_clusters": 4
+            },
+            "shot_profile": {
+              "average_seconds": 6.49,
+              "median_seconds": 5.67,
+              "short_shots": 9,
+              "long_shots": 49,
+              "rhythm": "balanced"
+            },
+            "audio": {
+              "mean_volume_db": -23.3,
+              "max_volume_db": -0.8,
+              "silences": [
+                {
+                  "start": 11.38,
+                  "end": 12.003,
+                  "duration": 0.624
+                },
+                {
+                  "start": 17.551,
+                  "end": 18.236,
+                  "duration": 0.685
+                },
+                {
+                  "start": 36.621,
+                  "end": 37.369,
+                  "duration": 0.748
+                },
+                {
+                  "start": 43.302,
+                  "end": 43.718,
+                  "duration": 0.416
+                },
+                {
+                  "start": 44.785,
+                  "end": 45.516,
+                  "duration": 0.731
+                },
+                {
+                  "start": 46.151,
+                  "end": 47.178,
+                  "duration": 1.027
+                },
+                {
+                  "start": 54.037,
+                  "end": 54.455,
+                  "duration": 0.418
+                },
+                {
+                  "start": 62.761,
+                  "end": 63.365,
+                  "duration": 0.604
+                },
+                {
+                  "start": 84.265,
+                  "end": 85.008,
+                  "duration": 0.742
+                },
+                {
+                  "start": 95.22,
+                  "end": 95.959,
+                  "duration": 0.739
+                },
+                {
+                  "start": 101.551,
+                  "end": 102.144,
+                  "duration": 0.593
+                },
+                {
+                  "start": 105.358,
+                  "end": 105.745,
+                  "duration": 0.387
+                },
+                {
+                  "start": 114.0,
+                  "end": 114.659,
+                  "duration": 0.66
+                },
+                {
+                  "start": 124.382,
+                  "end": 125.127,
+                  "duration": 0.745
+                },
+                {
+                  "start": 136.183,
+                  "end": 137.025,
+                  "duration": 0.842
+                },
+                {
+                  "start": 138.85,
+                  "end": 139.309,
+                  "duration": 0.459
+                },
+                {
+                  "start": 140.048,
+                  "end": 140.474,
+                  "duration": 0.426
+                },
+                {
+                  "start": 141.175,
+                  "end": 141.903,
+                  "duration": 0.727
+                },
+                {
+                  "start": 143.487,
+                  "end": 143.904,
+                  "duration": 0.417
+                },
+                {
+                  "start": 151.913,
+                  "end": 152.486,
+                  "duration": 0.573
+                },
+                {
+                  "start": 162.406,
+                  "end": 162.847,
+                  "duration": 0.441
+                },
+                {
+                  "start": 164.685,
+                  "end": 165.159,
+                  "duration": 0.474
+                },
+                {
+                  "start": 169.995,
+                  "end": 171.032,
+                  "duration": 1.037
+                },
+                {
+                  "start": 178.664,
+                  "end": 179.351,
+                  "duration": 0.687
+                },
+                {
+                  "start": 180.84,
+                  "end": 181.217,
+                  "duration": 0.376
+                },
+                {
+                  "start": 185.76,
+                  "end": 186.124,
+                  "duration": 0.364
+                },
+                {
+                  "start": 190.632,
+                  "end": 191.043,
+                  "duration": 0.411
+                },
+                {
+                  "start": 192.911,
+                  "end": 193.537,
+                  "duration": 0.626
+                },
+                {
+                  "start": 200.479,
+                  "end": 200.83,
+                  "duration": 0.352
+                },
+                {
+                  "start": 202.26,
+                  "end": 202.624,
+                  "duration": 0.364
+                },
+                {
+                  "start": 204.245,
+                  "end": 204.936,
+                  "duration": 0.692
+                },
+                {
+                  "start": 211.855,
+                  "end": 212.513,
+                  "duration": 0.658
+                },
+                {
+                  "start": 222.487,
+                  "end": 223.193,
+                  "duration": 0.706
+                },
+                {
+                  "start": 226.437,
+                  "end": 226.946,
+                  "duration": 0.509
+                },
+                {
+                  "start": 229.884,
+                  "end": 230.272,
+                  "duration": 0.388
+                },
+                {
+                  "start": 233.31,
+                  "end": 233.675,
+                  "duration": 0.365
+                },
+                {
+                  "start": 236.386,
+                  "end": 237.053,
+                  "duration": 0.667
+                },
+                {
+                  "start": 238.646,
+                  "end": 239.047,
+                  "duration": 0.401
+                },
+                {
+                  "start": 245.098,
+                  "end": 245.483,
+                  "duration": 0.385
+                },
+                {
+                  "start": 246.521,
+                  "end": 247.243,
+                  "duration": 0.721
+                },
+                {
+                  "start": 256.693,
+                  "end": 257.448,
+                  "duration": 0.755
+                },
+                {
+                  "start": 258.614,
+                  "end": 259.062,
+                  "duration": 0.448
+                },
+                {
+                  "start": 267.499,
+                  "end": 267.878,
+                  "duration": 0.379
+                },
+                {
+                  "start": 269.615,
+                  "end": 270.017,
+                  "duration": 0.402
+                },
+                {
+                  "start": 271.348,
+                  "end": 271.723,
+                  "duration": 0.375
+                },
+                {
+                  "start": 273.171,
+                  "end": 273.9,
+                  "duration": 0.729
+                },
+                {
+                  "start": 275.546,
+                  "end": 276.031,
+                  "duration": 0.486
+                },
+                {
+                  "start": 288.109,
+                  "end": 288.475,
+                  "duration": 0.366
+                },
+                {
+                  "start": 290.959,
+                  "end": 291.311,
+                  "duration": 0.351
+                },
+                {
+                  "start": 292.488,
+                  "end": 292.838,
+                  "duration": 0.35
+                },
+                {
+                  "start": 295.902,
+                  "end": 296.255,
+                  "duration": 0.354
+                },
+                {
+                  "start": 298.793,
+                  "end": 299.205,
+                  "duration": 0.412
+                },
+                {
+                  "start": 300.412,
+                  "end": 301.07,
+                  "duration": 0.658
+                },
+                {
+                  "start": 303.554,
+                  "end": 303.974,
+                  "duration": 0.42
+                },
+                {
+                  "start": 314.337,
+                  "end": 314.77,
+                  "duration": 0.432
+                },
+                {
+                  "start": 316.801,
+                  "end": 317.533,
+                  "duration": 0.732
+                },
+                {
+                  "start": 329.194,
+                  "end": 330.126,
+                  "duration": 0.931
+                },
+                {
+                  "start": 333.445,
+                  "end": 334.166,
+                  "duration": 0.721
+                },
+                {
+                  "start": 349.581,
+                  "end": 350.29,
+                  "duration": 0.709
+                },
+                {
+                  "start": 365.006,
+                  "end": 365.721,
+                  "duration": 0.715
+                },
+                {
+                  "start": 376.217,
+                  "end": 376.943,
+                  "duration": 0.727
+                },
+                {
+                  "start": 382.456,
+                  "end": 382.923,
+                  "duration": 0.467
+                },
+                {
+                  "start": 385.865,
+                  "end": 386.345,
+                  "duration": 0.48
+                },
+                {
+                  "start": 389.132,
+                  "end": 389.793,
+                  "duration": 0.661
+                },
+                {
+                  "start": 399.58,
+                  "end": 400.257,
+                  "duration": 0.677
+                },
+                {
+                  "start": 410.442,
+                  "end": 410.832,
+                  "duration": 0.39
+                },
+                {
+                  "start": 415.865,
+                  "end": 416.462,
+                  "duration": 0.597
+                },
+                {
+                  "start": 420.632,
+                  "end": 421.328,
+                  "duration": 0.696
+                },
+                {
+                  "start": 427.128,
+                  "end": 427.536,
+                  "duration": 0.408
+                },
+                {
+                  "start": 430.269,
+                  "end": 431.019,
+                  "duration": 0.75
+                },
+                {
+                  "start": 436.589,
+                  "end": 436.942,
+                  "duration": 0.353
+                },
+                {
+                  "start": 442.49,
+                  "end": 443.214,
+                  "duration": 0.724
+                },
+                {
+                  "start": 447.384,
+                  "end": 448.159,
+                  "duration": 0.775
+                },
+                {
+                  "start": 450.255,
+                  "end": 450.629,
+                  "duration": 0.373
+                },
+                {
+                  "start": 455.737,
+                  "end": 456.378,
+                  "duration": 0.642
+                },
+                {
+                  "start": 467.996,
+                  "end": 468.735,
+                  "duration": 0.738
+                },
+                {
+                  "start": 477.206,
+                  "end": 477.92,
+                  "duration": 0.714
+                },
+                {
+                  "start": 481.15,
+                  "end": 481.806,
+                  "duration": 0.656
+                },
+                {
+                  "start": 487.189,
+                  "end": 487.886,
+                  "duration": 0.696
+                },
+                {
+                  "start": 497.998,
+                  "end": 498.658,
+                  "duration": 0.659
+                }
+              ],
+              "silence_count": 80,
+              "silence_cut_matches": 38
+            },
+            "audio_profile": {
+              "mean_volume_db": -23.3,
+              "max_volume_db": -0.8,
+              "silence_count": 80,
+              "silence_cut_matches": 38,
+              "cut_on_silence_ratio": 0.475
+            },
+            "motion": {
+              "density": 0.246,
+              "method": "scene_change_proxy"
+            },
+            "motion_profile": {
+              "density": 0.246,
+              "burst_cut_count": 4,
+              "recommended_image_motion": "clean_documentary_motion"
+            },
+            "text": {
+              "presence": "estimated",
+              "density": 0.249,
+              "recommended_positions": [
+                "left_callout",
+                "right_callout",
+                "lower_center",
+                "upper_right",
+                "data_card"
+              ],
+              "avoid_repetition": true,
+              "method": "ritmo_de_corte_motion_proxy_sem_ocr_pesado"
+            },
+            "text_profile": {
+              "presence": "estimated",
+              "density": 0.249,
+              "recommended_positions": [
+                "left_callout",
+                "right_callout",
+                "lower_center",
+                "upper_right",
+                "data_card"
+              ],
+              "avoid_repetition": true,
+              "method": "ritmo_de_corte_motion_proxy_sem_ocr_pesado"
+            },
+            "event_style": {
+              "intensity": "balanced",
+              "transition_fx_density": 0.38,
+              "subtitle_fx_density": 1.0,
+              "image_event_fx_density": 0.46,
+              "arrow_highlight_density": 0.22,
+              "audio_loudness_hint": {
+                "mean_db": -23.3,
+                "peak_db": -0.8,
+                "fx_headroom": 0.8
+              }
+            },
+            "language_visual_hints": {
+              "text_positions": [
+                "left_callout",
+                "right_callout",
+                "lower_center",
+                "upper_right",
+                "data_card"
+              ],
+              "graphics": [
+                "arrow_draw",
+                "highlight_pulse",
+                "focus_line",
+                "data_card"
+              ],
+              "sync_target_ms": 33
+            },
+            "recommendations": {
+              "visualLanguagePackage": "dramatic_history",
+              "cutRhythm": "balanced",
+              "motionIntensity": "low",
+              "styleSource": "reference_dna",
+              "fallbackPackage": "dramatic_history"
+            }
+          }
+        },
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "modern_explainer",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "strict",
+        "adaptiveVisualFilter": true,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "white_title",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "primary": "#ffffff",
+          "outline": "#101010",
+          "size": 72,
+          "position": 44,
+          "outlineSize": 2.4,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "mixed",
+          "primary": "#ffd83d",
+          "outline": "#121212",
+          "size": 58,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "mixed",
+          "primary": "#ffd83d",
+          "outline": "#121212",
+          "size": 58,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_center",
+        "ctaOffsetX": 0,
+        "ctaOffsetY": 4
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "STATIC FRONT",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T11:15:35.000Z",
+      "updatedAt": "2026-08-19T16:38:40",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": {
+        "name": "videoplayback.mp4",
+        "path": "C:\\Users\\Micael\\Downloads\\Glide_Ultra_Local_Studio_v0_5\\Glide_Ultra_Local_Studio_v0_5\\reference_styles\\p_mp9oi8nq_d5ao\\reference.mp4",
+        "size": 46706483,
+        "updatedAt": "2026-06-27T12:18:46",
+        "analyzedAt": "2026-06-27T12:19:08",
+        "styleDna": {
+          "kind": "glide_reference_style_dna",
+          "version": "1.22.0",
+          "dnaVersion": "2.0",
+          "projectId": "p_mp9oi8nq_d5ao",
+          "sourceVideo": "videoplayback.mp4",
+          "sourceSignature": {
+            "path_name": "reference.mp4",
+            "size": 46706483,
+            "mtime_ns": 1782559126425529700,
+            "signature": "faed5927d87b19a9003907bc7010eaf01370042f060832bba29f7a7148ec7d34"
+          },
+          "analyzedAt": "2026-06-27T12:19:08",
+          "duration": 727.04,
+          "fps": 29.97,
+          "resolution": {
+            "width": 640,
+            "height": 360
+          },
+          "bitrate": {
+            "video": 415450,
+            "audio": 96004
+          },
+          "scene": {
+            "cut_count": 111,
+            "cuts_per_minute": 9.16,
+            "average_shot_seconds": 6.49,
+            "median_shot_seconds": 5.67,
+            "cut_times": [
+              2.102,
+              5.239,
+              5.439,
+              6.406,
+              7.674,
+              18.151,
+              22.155,
+              32.165,
+              34.234,
+              37.271,
+              40.474,
+              45.078,
+              47.114,
+              54.388,
+              59.86,
+              61.695,
+              71.104,
+              76.61,
+              79.813,
+              84.985,
+              89.957,
+              95.862,
+              105.739,
+              112.045,
+              114.548,
+              125.092,
+              126.727,
+              132.399,
+              136.903,
+              138.305,
+              141.875,
+              152.719,
+              159.359,
+              162.729,
+              170.971,
+              179.279,
+              181.148,
+              204.938,
+              207.14,
+              212.412,
+              215.682,
+              220.187,
+              223.123,
+              237.003,
+              257.357,
+              264.197,
+              273.807,
+              279.146,
+              317.484,
+              330.096,
+              330.297,
+              337.504,
+              343.41,
+              350.25,
+              359.893,
+              367.567,
+              382.882,
+              389.756,
+              400.2,
+              402.902,
+              410.777,
+              421.288,
+              425.358,
+              430.997,
+              437.037,
+              439.139,
+              443.176,
+              450.583,
+              457.29,
+              462.395,
+              466.433,
+              468.668,
+              471.871,
+              475.008,
+              477.877,
+              487.854,
+              498.631,
+              513.013,
+              519.352,
+              525.325,
+              531.731,
+              537.404,
+              544.377,
+              557.524,
+              564.297,
+              566.366,
+              572.272,
+              581.214,
+              587.587,
+              592.959,
+              599.866,
+              605.238,
+              609.876,
+              614.547,
+              617.217,
+              622.222,
+              627.994,
+              637.537,
+              644.911,
+              651.684,
+              662.562,
+              664.831,
+              667.667,
+              683.183,
+              685.485,
+              689.589,
+              694.027,
+              694.827,
+              700.867,
+              705.438,
+              716.082
+            ],
+            "transition_clusters": 4
+          },
+          "shot_profile": {
+            "average_seconds": 6.49,
+            "median_seconds": 5.67,
+            "short_shots": 9,
+            "long_shots": 49,
+            "rhythm": "balanced"
+          },
+          "audio": {
+            "mean_volume_db": -23.3,
+            "max_volume_db": -0.8,
+            "silences": [
+              {
+                "start": 11.38,
+                "end": 12.003,
+                "duration": 0.624
+              },
+              {
+                "start": 17.551,
+                "end": 18.236,
+                "duration": 0.685
+              },
+              {
+                "start": 36.621,
+                "end": 37.369,
+                "duration": 0.748
+              },
+              {
+                "start": 43.302,
+                "end": 43.718,
+                "duration": 0.416
+              },
+              {
+                "start": 44.785,
+                "end": 45.516,
+                "duration": 0.731
+              },
+              {
+                "start": 46.151,
+                "end": 47.178,
+                "duration": 1.027
+              },
+              {
+                "start": 54.037,
+                "end": 54.455,
+                "duration": 0.418
+              },
+              {
+                "start": 62.761,
+                "end": 63.365,
+                "duration": 0.604
+              },
+              {
+                "start": 84.265,
+                "end": 85.008,
+                "duration": 0.742
+              },
+              {
+                "start": 95.22,
+                "end": 95.959,
+                "duration": 0.739
+              },
+              {
+                "start": 101.551,
+                "end": 102.144,
+                "duration": 0.593
+              },
+              {
+                "start": 105.358,
+                "end": 105.745,
+                "duration": 0.387
+              },
+              {
+                "start": 114.0,
+                "end": 114.659,
+                "duration": 0.66
+              },
+              {
+                "start": 124.382,
+                "end": 125.127,
+                "duration": 0.745
+              },
+              {
+                "start": 136.183,
+                "end": 137.025,
+                "duration": 0.842
+              },
+              {
+                "start": 138.85,
+                "end": 139.309,
+                "duration": 0.459
+              },
+              {
+                "start": 140.048,
+                "end": 140.474,
+                "duration": 0.426
+              },
+              {
+                "start": 141.175,
+                "end": 141.903,
+                "duration": 0.727
+              },
+              {
+                "start": 143.487,
+                "end": 143.904,
+                "duration": 0.417
+              },
+              {
+                "start": 151.913,
+                "end": 152.486,
+                "duration": 0.573
+              },
+              {
+                "start": 162.406,
+                "end": 162.847,
+                "duration": 0.441
+              },
+              {
+                "start": 164.685,
+                "end": 165.159,
+                "duration": 0.474
+              },
+              {
+                "start": 169.995,
+                "end": 171.032,
+                "duration": 1.037
+              },
+              {
+                "start": 178.664,
+                "end": 179.351,
+                "duration": 0.687
+              },
+              {
+                "start": 180.84,
+                "end": 181.217,
+                "duration": 0.376
+              },
+              {
+                "start": 185.76,
+                "end": 186.124,
+                "duration": 0.364
+              },
+              {
+                "start": 190.632,
+                "end": 191.043,
+                "duration": 0.411
+              },
+              {
+                "start": 192.911,
+                "end": 193.537,
+                "duration": 0.626
+              },
+              {
+                "start": 200.479,
+                "end": 200.83,
+                "duration": 0.352
+              },
+              {
+                "start": 202.26,
+                "end": 202.624,
+                "duration": 0.364
+              },
+              {
+                "start": 204.245,
+                "end": 204.936,
+                "duration": 0.692
+              },
+              {
+                "start": 211.855,
+                "end": 212.513,
+                "duration": 0.658
+              },
+              {
+                "start": 222.487,
+                "end": 223.193,
+                "duration": 0.706
+              },
+              {
+                "start": 226.437,
+                "end": 226.946,
+                "duration": 0.509
+              },
+              {
+                "start": 229.884,
+                "end": 230.272,
+                "duration": 0.388
+              },
+              {
+                "start": 233.31,
+                "end": 233.675,
+                "duration": 0.365
+              },
+              {
+                "start": 236.386,
+                "end": 237.053,
+                "duration": 0.667
+              },
+              {
+                "start": 238.646,
+                "end": 239.047,
+                "duration": 0.401
+              },
+              {
+                "start": 245.098,
+                "end": 245.483,
+                "duration": 0.385
+              },
+              {
+                "start": 246.521,
+                "end": 247.243,
+                "duration": 0.721
+              },
+              {
+                "start": 256.693,
+                "end": 257.448,
+                "duration": 0.755
+              },
+              {
+                "start": 258.614,
+                "end": 259.062,
+                "duration": 0.448
+              },
+              {
+                "start": 267.499,
+                "end": 267.878,
+                "duration": 0.379
+              },
+              {
+                "start": 269.615,
+                "end": 270.017,
+                "duration": 0.402
+              },
+              {
+                "start": 271.348,
+                "end": 271.723,
+                "duration": 0.375
+              },
+              {
+                "start": 273.171,
+                "end": 273.9,
+                "duration": 0.729
+              },
+              {
+                "start": 275.546,
+                "end": 276.031,
+                "duration": 0.486
+              },
+              {
+                "start": 288.109,
+                "end": 288.475,
+                "duration": 0.366
+              },
+              {
+                "start": 290.959,
+                "end": 291.311,
+                "duration": 0.351
+              },
+              {
+                "start": 292.488,
+                "end": 292.838,
+                "duration": 0.35
+              },
+              {
+                "start": 295.902,
+                "end": 296.255,
+                "duration": 0.354
+              },
+              {
+                "start": 298.793,
+                "end": 299.205,
+                "duration": 0.412
+              },
+              {
+                "start": 300.412,
+                "end": 301.07,
+                "duration": 0.658
+              },
+              {
+                "start": 303.554,
+                "end": 303.974,
+                "duration": 0.42
+              },
+              {
+                "start": 314.337,
+                "end": 314.77,
+                "duration": 0.432
+              },
+              {
+                "start": 316.801,
+                "end": 317.533,
+                "duration": 0.732
+              },
+              {
+                "start": 329.194,
+                "end": 330.126,
+                "duration": 0.931
+              },
+              {
+                "start": 333.445,
+                "end": 334.166,
+                "duration": 0.721
+              },
+              {
+                "start": 349.581,
+                "end": 350.29,
+                "duration": 0.709
+              },
+              {
+                "start": 365.006,
+                "end": 365.721,
+                "duration": 0.715
+              },
+              {
+                "start": 376.217,
+                "end": 376.943,
+                "duration": 0.727
+              },
+              {
+                "start": 382.456,
+                "end": 382.923,
+                "duration": 0.467
+              },
+              {
+                "start": 385.865,
+                "end": 386.345,
+                "duration": 0.48
+              },
+              {
+                "start": 389.132,
+                "end": 389.793,
+                "duration": 0.661
+              },
+              {
+                "start": 399.58,
+                "end": 400.257,
+                "duration": 0.677
+              },
+              {
+                "start": 410.442,
+                "end": 410.832,
+                "duration": 0.39
+              },
+              {
+                "start": 415.865,
+                "end": 416.462,
+                "duration": 0.597
+              },
+              {
+                "start": 420.632,
+                "end": 421.328,
+                "duration": 0.696
+              },
+              {
+                "start": 427.128,
+                "end": 427.536,
+                "duration": 0.408
+              },
+              {
+                "start": 430.269,
+                "end": 431.019,
+                "duration": 0.75
+              },
+              {
+                "start": 436.589,
+                "end": 436.942,
+                "duration": 0.353
+              },
+              {
+                "start": 442.49,
+                "end": 443.214,
+                "duration": 0.724
+              },
+              {
+                "start": 447.384,
+                "end": 448.159,
+                "duration": 0.775
+              },
+              {
+                "start": 450.255,
+                "end": 450.629,
+                "duration": 0.373
+              },
+              {
+                "start": 455.737,
+                "end": 456.378,
+                "duration": 0.642
+              },
+              {
+                "start": 467.996,
+                "end": 468.735,
+                "duration": 0.738
+              },
+              {
+                "start": 477.206,
+                "end": 477.92,
+                "duration": 0.714
+              },
+              {
+                "start": 481.15,
+                "end": 481.806,
+                "duration": 0.656
+              },
+              {
+                "start": 487.189,
+                "end": 487.886,
+                "duration": 0.696
+              },
+              {
+                "start": 497.998,
+                "end": 498.658,
+                "duration": 0.659
+              }
+            ],
+            "silence_count": 80,
+            "silence_cut_matches": 38
+          },
+          "audio_profile": {
+            "mean_volume_db": -23.3,
+            "max_volume_db": -0.8,
+            "silence_count": 80,
+            "silence_cut_matches": 38,
+            "cut_on_silence_ratio": 0.475
+          },
+          "motion": {
+            "density": 0.246,
+            "method": "scene_change_proxy"
+          },
+          "motion_profile": {
+            "density": 0.246,
+            "burst_cut_count": 4,
+            "recommended_image_motion": "clean_documentary_motion"
+          },
+          "text": {
+            "presence": "estimated",
+            "density": 0.249,
+            "recommended_positions": [
+              "left_callout",
+              "right_callout",
+              "lower_center",
+              "upper_right",
+              "data_card"
+            ],
+            "avoid_repetition": true,
+            "method": "ritmo_de_corte_motion_proxy_sem_ocr_pesado"
+          },
+          "text_profile": {
+            "presence": "estimated",
+            "density": 0.249,
+            "recommended_positions": [
+              "left_callout",
+              "right_callout",
+              "lower_center",
+              "upper_right",
+              "data_card"
+            ],
+            "avoid_repetition": true,
+            "method": "ritmo_de_corte_motion_proxy_sem_ocr_pesado"
+          },
+          "event_style": {
+            "intensity": "balanced",
+            "transition_fx_density": 0.38,
+            "subtitle_fx_density": 1.0,
+            "image_event_fx_density": 0.46,
+            "arrow_highlight_density": 0.22,
+            "audio_loudness_hint": {
+              "mean_db": -23.3,
+              "peak_db": -0.8,
+              "fx_headroom": 0.8
+            }
+          },
+          "language_visual_hints": {
+            "text_positions": [
+              "left_callout",
+              "right_callout",
+              "lower_center",
+              "upper_right",
+              "data_card"
+            ],
+            "graphics": [
+              "arrow_draw",
+              "highlight_pulse",
+              "focus_line",
+              "data_card"
+            ],
+            "sync_target_ms": 33
+          },
+          "recommendations": {
+            "visualLanguagePackage": "dramatic_history",
+            "cutRhythm": "balanced",
+            "motionIntensity": "low",
+            "styleSource": "reference_dna",
+            "fallbackPackage": "dramatic_history"
+          }
+        }
+      },
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mp9oifuh_1moc",
+      "name": "CODED AIR",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "en",
+        "musicGenre": "cinematic",
+        "outputName": "CODED AIR",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "custom",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "fade",
+        "zoom": "off",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "strict",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "cinema_white",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "animation": "mixed",
+          "primary": "#f7f1e8",
+          "outline": "#0b0b0b",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 1.8,
+          "shadow": 1,
+          "box": false,
+          "bold": false
+        },
+        "subtitleStyle": {
+          "preset": "cinema_white",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "animation": "mixed",
+          "primary": "#f7f1e8",
+          "outline": "#0b0b0b",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 1.8,
+          "shadow": 1,
+          "box": false,
+          "bold": false
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_left",
+        "ctaOffsetX": 0,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "CODED AIR",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T11:15:35.000Z",
+      "updatedAt": "2026-08-19T16:38:41",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mpg1f7nx_hdav",
+      "name": "SEÑAL PERDIDA",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "es",
+        "musicGenre": "cinematic",
+        "outputName": "SEÑAL PERDIDA",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "whoosh",
+        "zoom": "off",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "strict",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "red_punch",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "archive",
+          "primary": "#8edbff",
+          "outline": "#1b0504",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.7,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "red_punch",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "archive",
+          "primary": "#8edbff",
+          "outline": "#1b0504",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.7,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_left",
+        "ctaOffsetX": -2,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "SEÑAL PERDIDA",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-21T22:03:36.000Z",
+      "updatedAt": "2026-08-19T16:38:42",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mp9s3mn2_h2zm",
+      "name": "PATENTE OLVIDADA",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "es",
+        "musicGenre": "cinematic",
+        "outputName": "PATENTE OLVIDADA",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random_documentary",
+        "zoom": "light",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "light",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": false,
+        "channelLearning": false,
+        "energyEditing": false,
+        "antiRepeat": false,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "blue_glow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "zoom",
+          "primary": "#8edbff",
+          "outline": "#062033",
+          "size": 64,
+          "position": 9,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "blue_glow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "zoom",
+          "primary": "#8edbff",
+          "outline": "#062033",
+          "size": 64,
+          "position": 9,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_left",
+        "ctaOffsetX": 0,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "PATENTE OLVIDADA",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T12:56:02.000Z",
+      "updatedAt": "2026-08-19T16:38:43",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mpa1ikuo_4qiv",
+      "name": "DRAGÃO VERDE",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "pt",
+        "musicGenre": "ambient",
+        "outputName": "DRAGÃO VERDE",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random_fast",
+        "zoom": "off",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "strict",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": false,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "pop",
+          "primary": "#74ff8f",
+          "outline": "#121212",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "animation": "pop",
+          "primary": "#74ff8f",
+          "outline": "#121212",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_left",
+        "ctaOffsetX": -7,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "ambient",
+      "outputName": "DRAGÃO VERDE",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T17:19:36.000Z",
+      "updatedAt": "2026-08-19T16:38:47",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mp9rxhpu_76vc",
+      "name": "MEMORIA DOMÉSTICA",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "es",
+        "musicGenre": "cinematic",
+        "outputName": "MEMORIA DOMÉSTICA",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random_cinematic",
+        "zoom": "light",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "normal",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "documentary",
+          "fontPreset": "bahnschrift",
+          "font": "Bahnschrift",
+          "animation": "typewriter",
+          "primary": "#ffd83d",
+          "outline": "#0d1813",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 1.8,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "documentary",
+          "fontPreset": "bahnschrift",
+          "font": "Bahnschrift",
+          "animation": "typewriter",
+          "primary": "#ffd83d",
+          "outline": "#0d1813",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 1.8,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_left",
+        "ctaOffsetX": -7,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "MEMORIA DOMÉSTICA",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T12:51:33.000Z",
+      "updatedAt": "2026-08-19T16:38:48",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mpa1iljf_0nke",
+      "name": "UNSEALED SKY",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": [],
+        "script_guides": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "en",
+        "musicGenre": "ambient",
+        "outputName": "UNSEALED SKY",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random",
+        "zoom": "light",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "normal",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -28,
+        "backgroundMusicPreset": "silent",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "cinema_gold",
+          "fontPreset": "georgia",
+          "font": "Georgia",
+          "primary": "#ffd36a",
+          "outline": "#090909",
+          "size": 76,
+          "position": 44,
+          "outlineSize": 2.2,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "minimal",
+          "fontPreset": "segoe",
+          "font": "Segoe UI Semibold",
+          "animation": "fade",
+          "primary": "#f4f4f4",
+          "outline": "#202020",
+          "size": 64,
+          "position": 9,
+          "outlineSize": 1.2,
+          "shadow": 1,
+          "box": false,
+          "bold": false
+        },
+        "subtitleStyle": {
+          "preset": "minimal",
+          "fontPreset": "segoe",
+          "font": "Segoe UI Semibold",
+          "animation": "fade",
+          "primary": "#f4f4f4",
+          "outline": "#202020",
+          "size": 64,
+          "position": 9,
+          "outlineSize": 1.2,
+          "shadow": 1,
+          "box": false,
+          "bold": false
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_right",
+        "ctaOffsetX": -2,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "ambient",
+      "outputName": "UNSEALED SKY",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-17T17:19:37.000Z",
+      "updatedAt": "2026-08-19T16:38:50",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    },
+    {
+      "id": "p_mpicreap_iz6v",
+      "name": "BUSH SIGNAL",
+      "status": "draft",
+      "media": {
+        "videos": [],
+        "audios": [],
+        "background_music": [],
+        "texts": [],
+        "captions": []
+      },
+      "options": {
+        "mode": "standard",
+        "selectedCta": "en",
+        "musicGenre": "cinematic",
+        "outputName": "BUSH SIGNAL",
+        "finalOutputMode": "downloads",
+        "finalOutputFolder": "",
+        "workflowPreset": "youtube_doc",
+        "exportProfile": "capcut_compact",
+        "videoBitrateKbps": 2500,
+        "ratio": "16:9",
+        "codec": "hevc",
+        "transitions": "random_documentary",
+        "zoom": "light",
+        "gpu": true,
+        "qualityBoost": true,
+        "smartVisualDirector": true,
+        "styleSource": "glide_package",
+        "referenceStyleEnabled": false,
+        "referenceStyleVideo": null,
+        "referenceStyleMode": "inspiration",
+        "visualLanguagePackage": "dark_doc",
+        "styleIntensity": "balanced",
+        "visualCleanFilter": true,
+        "visualFilterLevel": "normal",
+        "adaptiveVisualFilter": false,
+        "voiceNormalize": true,
+        "autoSoundFx": true,
+        "backgroundMusicVolumeDb": -22,
+        "backgroundMusicPreset": "immersive",
+        "backgroundMusicDucking": true,
+        "projectTone": "auto",
+        "adaptiveDucking": true,
+        "dynamicPauses": false,
+        "dynamicPauseIntensity": "disabled",
+        "strongMomentEnhance": false,
+        "renderRecovery": true,
+        "directorDecisionMode": "balanced",
+        "healthyRenderThreshold": 70,
+        "renderBudgetEnabled": true,
+        "renderBudgetTurboMultiplier": 1.35,
+        "renderBudgetEfficientMultiplier": 2.7,
+        "platformMasterProfile": "youtube_long",
+        "scoreVisualWindows": false,
+        "adaptiveQualityBoost": true,
+        "queueAutoTest": true,
+        "autoDirector": true,
+        "semanticVisualIndex": true,
+        "channelLearning": true,
+        "energyEditing": true,
+        "antiRepeat": true,
+        "continuityMatch": false,
+        "continuityOutliersOnly": true,
+        "subtitleEditorialGrammar": true,
+        "audioMastering": true,
+        "introMode": "standard",
+        "introSubtitleStyle": {
+          "preset": "white_title",
+          "fontPreset": "arial_black",
+          "font": "Arial Black",
+          "primary": "#ffffff",
+          "outline": "#101010",
+          "size": 72,
+          "position": 44,
+          "outlineSize": 2.4,
+          "shadow": 1.2,
+          "box": false,
+          "bold": true
+        },
+        "textStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "trebuchet",
+          "font": "Trebuchet MS",
+          "animation": "documentary",
+          "primary": "#8edbff",
+          "outline": "#121212",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "subtitleStyle": {
+          "preset": "bold_yellow",
+          "fontPreset": "trebuchet",
+          "font": "Trebuchet MS",
+          "animation": "documentary",
+          "primary": "#8edbff",
+          "outline": "#121212",
+          "size": 64,
+          "position": 10,
+          "outlineSize": 2.4,
+          "shadow": 1,
+          "box": false,
+          "bold": true
+        },
+        "captionStyle": {
+          "preset": "clean_two_lines",
+          "font": "Arial",
+          "size": 38,
+          "position": 10,
+          "alignment": "center",
+          "primary": "#ffffff",
+          "outline": "#111111",
+          "outline_size": 2,
+          "box": false
+        },
+        "cinematicOpeningPolicy": "auto_contextual",
+        "ctaPositionPreset": "bottom_center",
+        "ctaOffsetX": 0,
+        "ctaOffsetY": 0
+      },
+      "subtitleInfo": null,
+      "musicGenre": "cinematic",
+      "outputName": "BUSH SIGNAL",
+      "outputFile": null,
+      "outputDir": null,
+      "jobId": null,
+      "error": null,
+      "estimatedSize": 0,
+      "lastRenderSummary": null,
+      "directorState": null,
+      "timelineHistory": [],
+      "confidenceSummary": null,
+      "audioMasterSummary": null,
+      "renderGraphRun": null,
+      "createdAt": "2026-05-23T12:56:33.314Z",
+      "updatedAt": "2026-08-19T16:38:55",
+      "retryCount": 0,
+      "retryHistory": [],
+      "visualAnalysisDetails": null,
+      "referenceStyleVideo": null,
+      "captionInfo": null,
+      "scriptGuideInfo": null,
+      "scriptGuidePlan": null
+    }
+  ]
+}

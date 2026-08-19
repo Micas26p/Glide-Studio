@@ -1,0 +1,5 @@
+{
+  "defaultMode": "simple",
+  "advancedModeKeepsAllFeatures": true,
+  "advancedSections": ["preflight", "subtitles", "background_music", "intro_details"]
+}

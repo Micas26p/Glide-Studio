@@ -1,0 +1,57 @@
+{
+  "youtube_doc": {
+    "label": "YouTube documentario",
+    "ratio": "16:9",
+    "codec": "hevc",
+    "exportProfile": "capcut_compact",
+    "zoom": "light",
+    "transition": "random_documentary",
+    "intro": "standard",
+    "subtitle": "documentary",
+    "cta": "top_right"
+  },
+  "shorts": {
+    "label": "Shorts/Reels vertical",
+    "ratio": "9:16",
+    "codec": "hevc",
+    "exportProfile": "small_file",
+    "zoom": "light",
+    "transition": "random_fast",
+    "intro": "standard",
+    "subtitle": "bold_yellow",
+    "cta": "top_center"
+  },
+  "cinematic_story": {
+    "label": "Narrativa cinematic",
+    "ratio": "16:9",
+    "codec": "hevc",
+    "exportProfile": "balanced",
+    "zoom": "light",
+    "transition": "random_cinematic",
+    "intro": "cinematic",
+    "subtitle": "cinema_white",
+    "cta": "top_right"
+  },
+  "light_upload": {
+    "label": "Upload leve",
+    "ratio": "16:9",
+    "codec": "hevc",
+    "exportProfile": "small_file",
+    "zoom": "off",
+    "transition": "fade",
+    "intro": "standard",
+    "subtitle": "minimal",
+    "cta": "top_right"
+  },
+  "high_quality": {
+    "label": "Alta qualidade",
+    "ratio": "16:9",
+    "codec": "hevc",
+    "exportProfile": "high_quality",
+    "zoom": "light",
+    "transition": "random",
+    "intro": "standard",
+    "subtitle": "bold_white",
+    "cta": "top_right"
+  }
+}

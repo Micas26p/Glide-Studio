@@ -1,0 +1,28 @@
+{
+  "version": "1.28.2",
+  "global": {
+    "theme": "system",
+    "uiMode": "advanced",
+    "renderPriority": "max",
+    "uiSoundsEnabled": true,
+    "uiSoundStyle": "glass_click",
+    "uiSoundScope": "global",
+    "projectDoneSound": true,
+    "automatorSortPreferences": {
+      "srt": {
+        "criterion": "usage",
+        "direction": "asc"
+      },
+      "audio": {
+        "criterion": "name",
+        "direction": "asc"
+      },
+      "folder": {
+        "criterion": "name",
+        "direction": "asc"
+      }
+    },
+    "renderBudgetEnabled": true
+  },
+  "updatedAt": "2026-08-18T22:38:36"
+}

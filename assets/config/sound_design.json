@@ -1,0 +1,12 @@
+{
+  "policy": "automatic_mapped_events",
+  "volume_db_range": [-11.0, -4.8],
+  "mix_profile": "immersive_present_safe_peak",
+  "rules": [
+    "duck under narration",
+    "do not add synthetic CTA FX; real CTA audio is preserved",
+    "apply transition FX selectively with at least 7 seconds between hits",
+    "alternate variants instead of layering duplicates",
+    "write sound_design_map.json per render"
+  ]
+}

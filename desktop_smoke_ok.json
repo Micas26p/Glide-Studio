@@ -1,0 +1,31 @@
+{
+  "ok": true,
+  "paths": {
+    "/api/health": 200,
+    "/api/config": 200,
+    "/api/cta-assets": 200,
+    "/": 200,
+    "/favicon.ico": 200,
+    "/static/app.js": 200,
+    "/static/modules/runtime-config.js": 200,
+    "/static/style.css": 200,
+    "/assets/eagle_glide.png": 200,
+    "/assets/glide_studio.ico": 200,
+    "/assets/glide_studio_icon_32.png": 200,
+    "/assets/glide_studio_icon_48.png": 200,
+    "/assets/glide_studio_icon.png": 200,
+    "/assets/site.webmanifest": 200
+  },
+  "version": "1.29.0",
+  "visual_face_detector": {
+    "engine": "opencv_yunet",
+    "model": "face_detection_yunet_2023mar.onnx",
+    "model_available": true,
+    "model_valid": true,
+    "model_size": 232589,
+    "runtime_available": true,
+    "active": true,
+    "runtime_error": "",
+    "policy": "heuristica primeiro; YuNet somente em midia ambigua"
+  }
+}

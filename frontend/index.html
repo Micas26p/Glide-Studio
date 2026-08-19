@@ -1,0 +1,1054 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Glide Studio - App Local</title>
+  <link rel="icon" href="/assets/glide_studio.ico?v=1.29.0" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/glide_studio_icon_32.png?v=1.29.0" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/assets/glide_studio_icon_48.png?v=1.29.0" />
+  <link rel="icon" type="image/png" sizes="256x256" href="/assets/glide_studio_icon_256.png?v=1.29.0" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/assets/glide_studio_icon.png?v=1.29.0" />
+  <link rel="shortcut icon" href="/assets/glide_studio.ico?v=1.29.0" />
+  <link rel="apple-touch-icon" href="/assets/glide_studio_icon_256.png?v=1.29.0" />
+  <link rel="manifest" href="/assets/site.webmanifest?v=1.29.0" />
+  <meta name="theme-color" content="#080a09" />
+  <link rel="stylesheet" href="/static/style.css?v=1.29.0" />
+</head>
+<body data-theme="system">
+  <div class="editor-intro" id="editorIntro" aria-hidden="true">
+    <div class="editor-intro-stage">
+      <div class="editor-intro-ring"></div>
+      <span class="brand-mark editor-intro-mark"></span>
+      <div class="editor-intro-light"></div>
+      <div class="editor-intro-copy">
+        <strong>Glide Studio</strong>
+        <span>Estudio local iniciado</span>
+      </div>
+    </div>
+  </div>
+  <aside class="sidebar" id="sidebar" aria-label="Navegação principal">
+    <button type="button" class="sidebar-toggle" id="sidebarToggle" aria-label="Recolher menu lateral" aria-expanded="true" title="Recolher menu lateral">
+      <span aria-hidden="true"></span>
+    </button>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"></span>
+      <div>
+        <strong>Glide Studio</strong>
+        <span>App Local v1.29.0</span>
+      </div>
+    </div>
+    <nav>
+      <button type="button" class="nav-item" data-target="queueSection" data-short="F" title="Fila"><span>Fila</span></button>
+      <button type="button" class="nav-item active" data-target="renderSection" data-short="I" title="Importar"><span>Importar</span></button>
+      <button type="button" class="nav-item" data-target="timelineSection" data-short="T" title="Timeline"><span>Timeline</span></button>
+      <button type="button" class="nav-item" data-target="subtitleSection" data-short="X" title="Textos"><span>Textos</span></button>
+      <button type="button" class="nav-item" data-target="exportSection" data-short="E" title="Exportar"><span>Exportar</span></button>
+      <button type="button" class="nav-item" data-target="gallerySection" data-short="G" title="Galeria"><span>Galeria</span></button>
+    </nav>
+    <div class="side-card">
+      <span class="dot"></span>
+      <p><b>Motor local:</b> FFmpeg roda nesta máquina. O app pode ficar minimizado durante o render.</p>
+    </div>
+  </aside>
+
+  <main class="app">
+    <header class="topbar">
+      <div class="hero-heading">
+        <span class="brand-mark hero-mark" aria-hidden="true"></span>
+        <div>
+          <p class="eyebrow">Desktop workflow</p>
+          <h1>Editor local para clipes + narração</h1>
+          <p class="hero-subtitle">Importe mídia, ajuste a timeline e gere o MP4 com o motor local em segundo plano.</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <div class="render-time-estimate" id="renderTimeEstimate" aria-live="polite">
+          <span>Tempo estimado</span>
+          <strong>Aguardando duração do áudio</strong>
+        </div>
+        <button type="button" class="eagle-mode-button" id="eagleModeBtn" title="Diretor Visual Inteligente">
+          <span class="eagle-mode-mark" aria-hidden="true"></span>
+          <span class="eagle-mode-copy">
+          <strong>Modo Águia</strong>
+            <small id="eagleModeState">Ativo</small>
+          </span>
+        </button>
+        <button type="button" class="btn ghost small settings-button" id="settingsBtn" title="Configurações e utilitários">Config</button>
+        <div class="health" id="healthBadge">Verificando motor...</div>
+      </div>
+    </header>
+
+    <section class="queue-panel card" id="queueSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Fila de produção</p>
+          <h3>Projetos isolados</h3>
+          <p class="engine-note" id="queueSummary">Cada projeto guarda sua própria mídia, CTA, música, Textos, Legendas, nome e preset.</p>
+        </div>
+        <div class="actions-inline queue-actions">
+          <button type="button" class="btn primary small" id="newProjectBtn">Novo projeto</button>
+          <button type="button" class="btn ghost small" id="duplicateProjectBtn">Duplicar</button>
+          <button type="button" class="btn ghost small" id="removeProjectBtn">Remover</button>
+          <button type="button" class="btn ghost small queue-danger" id="clearAllProjectsBtn" title="Limpa mídias, jobs e renders da fila, mantendo nomes e presets">Limpar fila</button>
+          <button type="button" class="btn ghost small retry-failed-btn" id="retryFailedBtn" disabled title="Repete todos ou apenas projetos selecionados">Repetir fila</button>
+          <button type="button" class="btn ghost small" id="renderHealthyBtn" title="Renderiza apenas projetos completos e com confiança mínima">Renderizar saudáveis</button>
+          <button type="button" class="btn ghost small automator-btn" id="automatorBtn" title="Distribui Textos, áudio e pastas com vídeos a partir do projeto selecionado">AUTO</button>
+          <button type="button" class="btn export small" id="renderQueueBtn">Renderizar fila</button>
+        </div>
+      </div>
+      <div class="queue-tool-row">
+        <label class="queue-name-field">Nome do projeto / canal
+          <input id="projectNameInput" type="text" maxlength="80" placeholder="Ex: Canal EN documentário" />
+        </label>
+        <label>Template
+          <select id="projectTemplateSelect">
+            <option value="">Manual / manter</option>
+            <option value="documentary">Documentário</option>
+            <option value="recipe">Receita</option>
+            <option value="history">História</option>
+            <option value="curiosity">Curiosidades</option>
+            <option value="motivational">Motivacional</option>
+            <option value="short_cinema">Cinema curto</option>
+          </select>
+        </label>
+        <label>Identidade
+          <select id="identityPresetSelect">
+            <option value="default">Padrão do editor</option>
+            <option value="pt_doc">Canal PT documentário</option>
+            <option value="en_doc">Canal EN documentário</option>
+            <option value="ambient_soft">Narração calma</option>
+          </select>
+        </label>
+      </div>
+      <div class="project-queue" id="projectQueue"></div>
+    </section>
+
+    <input type="file" id="automatorSrtInput" multiple hidden accept=".srt" />
+    <input type="file" id="automatorAudioInput" multiple hidden accept="audio/*,video/mp4,video/quicktime,.mp3,.mp4,.wav,.m4a,.aac,.flac,.ogg,.webm,.m4v,.mov" />
+    <input type="file" id="automatorVideoFolderInput" webkitdirectory directory multiple hidden />
+
+    <div class="modal automation-modal" id="automatorModal" aria-hidden="true">
+      <div class="modal-card automation-card" role="dialog" aria-modal="true" aria-labelledby="automatorModalTitle">
+        <div class="report-modal-head">
+          <div>
+            <p class="eyebrow">AUTO</p>
+            <h2 id="automatorModalTitle">Distribuir ficheiros na fila</h2>
+            <p class="muted" id="automatorSubtitle">A distribuição começa no projeto selecionado e respeita a ordem escolhida.</p>
+          </div>
+          <button type="button" class="btn ghost small" id="automatorCloseBtn">Fechar</button>
+        </div>
+        <div class="automation-picker-grid">
+          <button type="button" class="automation-picker" id="automatorPickSrt">
+            <strong>Selecionar Textos (SRT)</strong>
+            <span id="automatorSrtCount">0 selecionado(s)</span>
+          </button>
+          <button type="button" class="automation-picker" id="automatorPickAudio">
+            <strong>Selecionar áudios</strong>
+            <span id="automatorAudioCount">MP3, MP4 ou WAV</span>
+          </button>
+          <button type="button" class="automation-picker" id="automatorPickFolders">
+            <strong>Adicionar pastas com vídeos</strong>
+            <span id="automatorFolderCount">0 pasta(s)</span>
+          </button>
+        </div>
+        <div class="automation-warning" id="automatorWarning" hidden></div>
+        <div class="automation-progress" id="automatorProgress" hidden>
+          <div><span id="automatorProgressText">Preparando AUTO...</span><strong id="automatorProgressValue">0%</strong></div>
+          <progress id="automatorProgressBar" max="100" value="0"></progress>
+        </div>
+        <div class="automation-preview" id="automatorPreview">
+          <p class="queue-report-empty">Selecione Textos, áudios e pastas para ver a pré-visualização. Você também pode arrastar várias pastas de vídeos para o cartão de pastas.</p>
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn ghost" id="automatorCancelBtn">Cancelar</button>
+          <button type="button" class="btn automation-confirm" id="automatorConfirmBtn" disabled>Confirmar</button>
+        </div>
+      </div>
+    </div>
+
+    <section class="grid two" id="renderSection">
+      <div class="card upload-card" id="dropZone">
+        <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+        <input type="file" id="fileInput" multiple hidden accept="video/*,image/*,audio/*,.srt,.txt,.docx,.pdf,.html,.htm,.mp3,.wav,.m4a,.aac,.flac,.ogg,.webm,.mp4,.mov,.mkv,.avi,.m4v,.mts,.m2ts,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff" />
+        <input type="file" id="videoInput" multiple hidden accept="video/*,image/*,.mp4,.mov,.mkv,.webm,.avi,.m4v,.mts,.m2ts,.jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff" />
+        <input type="file" id="audioInput" multiple hidden accept="audio/*,video/mp4,video/quicktime,.mp3,.wav,.m4a,.aac,.flac,.ogg,.webm,.mp4,.m4v,.mov" />
+        <input type="file" id="backgroundInput" multiple hidden accept="audio/*,video/mp4,video/quicktime,.mp3,.wav,.m4a,.aac,.flac,.ogg,.webm,.mp4,.m4v,.mov" />
+        <input type="file" id="subtitleInput" hidden accept=".srt" />
+        <input type="file" id="captionInput" hidden accept=".srt" />
+        <input type="file" id="scriptGuideInput" hidden accept=".txt,.docx,.pdf,.html,.htm" />
+        <div class="upload-icon">+</div>
+        <h3>Adicionar arquivos</h3>
+        <p>Envie vídeos, imagens e áudios em partes. Cada novo envio entra na timeline sem apagar o que já foi carregado.</p>
+        <div class="upload-actions">
+          <button type="button" class="btn primary" id="pickFolder">Adicionar pasta</button>
+          <button type="button" class="btn ghost" id="pickVideos">Vídeos</button>
+          <button type="button" class="btn ghost" id="pickAudios">Áudios</button>
+          <button type="button" class="btn ghost" id="pickBackground">Músicas de fundo</button>
+          <button type="button" class="btn ghost" id="pickSubtitles">Textos</button>
+          <button type="button" class="btn ghost" id="pickCaptions">Legendas</button>
+          <button type="button" class="btn ghost" id="pickScriptGuide">Roteiro</button>
+          <button type="button" class="btn ghost" id="pickFiles">Misto</button>
+        </div>
+        <div class="script-guide-card" id="scriptGuideCard">
+          <div>
+            <p class="eyebrow">Roteiro inteligente</p>
+            <strong id="scriptGuideStatus">Opcional. Anexe TXT, DOCX, PDF ou HTML para orientar capítulos, rankings e cenas.</strong>
+            <small id="scriptGuideDetails">Nenhum roteiro anexado.</small>
+          </div>
+          <div class="script-guide-actions">
+            <button type="button" class="btn ghost small" id="viewScriptGuideBtn">Ver interpretação</button>
+            <button type="button" class="btn ghost small queue-danger" id="clearScriptGuideBtn">Remover</button>
+          </div>
+        </div>
+        <div class="clear-project-panel">
+          <div>
+            <strong>Novo projeto</strong>
+            <span>Apaga timeline, uploads temporários e renders antigos, mantendo presets.</span>
+          </div>
+          <button type="button" class="btn clear-project-btn" id="clearBtn" title="Apaga timeline, uploads temporários e renders antigos, mantendo presets">Limpar projeto</button>
+        </div>
+      </div>
+
+      <div class="card options-card" id="exportSection">
+        <h3>Exportação</h3>
+        <p class="engine-note">Render segmentado de baixo uso de memória, feito pelo FFmpeg local.</p>
+        <div class="preset-switch" role="tablist">
+          <button type="button" class="preset active" data-mode="fast">FAST 720p</button>
+          <button type="button" class="preset" data-mode="standard">STANDARD 1080p</button>
+        </div>
+        <div class="option-grid">
+          <label class="wide">Nome do vídeo final
+            <input id="outputNameInput" type="text" maxlength="90" placeholder="Ex: mercedes_1114_documentario" />
+            <small class="field-hint">Vazio: o app salva em ordem numérica, como 001.mp4, 002.mp4.</small>
+          </label>
+          <label>Destino final
+            <select id="finalOutputMode">
+              <option value="downloads" selected>Downloads</option>
+              <option value="custom">Pasta definida</option>
+              <option value="browser_download">Download do navegador</option>
+            </select>
+            <small class="field-hint" id="finalOutputHint">O MP4 final aparece na pasta Downloads.</small>
+          </label>
+          <label class="advanced-only">Pasta definida
+            <input id="finalOutputFolder" type="text" placeholder="Ex: C:\\Users\\Micael\\Videos\\Glide" />
+            <small class="field-hint">Usada somente quando Destino final estiver em Pasta definida.</small>
+          </label>
+          <label class="advanced-only">Fluxo rápido
+            <select id="workflowPresetSelect">
+              <option value="custom" selected>Manual / manter ajustes</option>
+              <option value="youtube_doc">YouTube documentário</option>
+              <option value="shorts">Shorts/Reels vertical</option>
+              <option value="cinematic_story">Narrativa cinematográfica</option>
+              <option value="light_upload">Upload leve</option>
+              <option value="high_quality">Alta qualidade</option>
+            </select>
+          </label>
+          <label class="advanced-only">Ratio
+            <select id="ratioSelect">
+              <option value="16:9">16:9 Horizontal</option>
+              <option value="9:16">9:16 Shorts/Reels</option>
+            </select>
+          </label>
+          <label class="advanced-only">Codec
+            <select id="codecSelect">
+              <option value="hevc">HEVC/H.265 MP4</option>
+              <option value="h264">H.264 MP4 compatível</option>
+            </select>
+          </label>
+          <label>Perfil de tamanho
+            <select id="exportProfileSelect">
+              <option value="small_file">Arquivo pequeno</option>
+              <option value="capcut_compact" selected>Compacto CapCut - VBR</option>
+              <option value="youtube_compact">YouTube 1080p compacto</option>
+              <option value="balanced">Equilibrado</option>
+              <option value="high_quality">Qualidade alta</option>
+              <option value="compatibility">Máxima compatibilidade</option>
+              <option value="custom">Personalizado</option>
+            </select>
+          </label>
+          <label class="advanced-only" id="bitrateField">Bitrate alvo
+            <input id="videoBitrateInput" type="number" min="800" max="14000" step="100" value="2500" />
+            <small class="field-hint" id="bitrateHint">1080p HEVC compacto: 2500 kbps em VBR, estilo CapCut.</small>
+          </label>
+          <label class="advanced-only">Transições
+            <select id="transitionSelect">
+              <option value="off">Sem transição</option>
+              <option value="fade">Fade leve</option>
+              <option value="random">Aleatório balanceado</option>
+              <option value="random_soft">Aleatório suave</option>
+              <option value="random_cinematic">Aleatório cinematográfico</option>
+              <option value="random_documentary">Aleatório documentário</option>
+              <option value="random_glitch">Aleatório glitch/digital</option>
+              <option value="random_industrial">Aleatório industrial</option>
+              <option value="random_fast">Aleatório rápido</option>
+              <option value="whoosh">Dark cinematic whoosh</option>
+              <option value="swipe">Fast air swipe</option>
+              <option value="flash">Camera flash</option>
+              <option value="archive">Archive paper flip</option>
+              <option value="vhs">VHS glitch</option>
+              <option value="digital_glitch">Digital glitch cut</option>
+              <option value="mechanical">Mechanical gear swipe</option>
+              <option value="money">Money cash swipe</option>
+              <option value="map">Map travel whoosh</option>
+              <option value="futuristic">Futuristic UI swipe</option>
+              <option value="bass_hit">Deep bass title hit</option>
+              <option value="glass">Glass swipe</option>
+              <option value="industrial">Heavy industrial</option>
+              <option value="smoothleft">Smooth left</option>
+              <option value="wiperight">Wipe right</option>
+            </select>
+            <button type="button" class="btn ghost small fx-preview-btn" id="transitionFxPreviewBtn">Ouvir FX</button>
+          </label>
+          <label class="advanced-only">Zoom leve
+            <select id="zoomSelect">
+              <option value="off">Desligado</option>
+              <option value="light">Zoom in/out</option>
+            </select>
+          </label>
+        </div>
+        <div class="toggle-row advanced-only">
+          <label class="toggle"><input id="gpuToggle" type="checkbox" /> <span>Usar NVIDIA NVENC se disponível</span></label>
+          <label class="toggle"><input id="qualityBoostToggle" type="checkbox" checked /> <span>Quality Boost natural</span></label>
+          <label class="toggle director-source-toggle"><input id="smartVisualDirectorToggle" type="checkbox" checked /> <span>Diretor Visual Inteligente</span></label>
+          <label class="toggle visual-filter-level-control" title="Define a intensidade permanente do filtro visual.">
+            <span>Filtro visual</span>
+            <select id="visualFilterLevelSelect" aria-label="Intensidade do filtro visual">
+              <option value="light">Leve</option>
+              <option value="normal" selected>Normal</option>
+              <option value="strict">Rigoroso</option>
+            </select>
+          </label>
+          <label class="toggle visual-filter-adaptive"><input id="adaptiveVisualFilterToggle" type="checkbox" /> <span>Filtro adaptativo</span></label>
+          <span id="visualFilterHint" class="sr-only">Normal: filtro manual ativo em todo o vídeo; imagens permanecem rigorosas.</span>
+          <label class="toggle"><input id="voiceNormalizeToggle" type="checkbox" checked /> <span>Voz nivelada</span></label>
+          <label class="toggle"><input id="autoSoundFxToggle" type="checkbox" checked /> <span>Efeitos sonoros automáticos</span></label>
+        </div>
+        <div class="intro-panel advanced-only" id="introPanel">
+          <div class="intro-head">
+            <div>
+              <p class="eyebrow">Abertura</p>
+              <h4>Entrada do vídeo</h4>
+              <p class="engine-note" id="introStatus">Padrão: fade simples. Cinematic escolhe contextualmente entre gancho textual e fade de 3-5s.</p>
+            </div>
+            <div class="intro-head-actions">
+              <select id="introModeSelect" aria-label="Modo de abertura">
+                <option value="standard">Padrão</option>
+                <option value="cinematic">Cinematic</option>
+              </select>
+              <button type="button" class="btn ghost small fx-preview-btn" id="introFxPreviewBtn">Ouvir FX</button>
+            </div>
+          </div>
+          <div class="intro-grid">
+            <div class="intro-preview" id="introPreviewStage">
+              <div class="intro-preview-media" id="introPreviewMedia"><span>Preview intro</span></div>
+              <div class="intro-preview-text" id="introPreviewText">Gancho textual ou fade contextual</div>
+              <div class="intro-voice-badge" id="introVoiceBadge">Voz entra em 0s</div>
+            </div>
+            <div class="intro-controls">
+              <label class="control-field">Estilo intro
+                <select id="introPreset">
+                  <option value="cinema_gold">Cinema dourado</option>
+                  <option value="white_title">Titulo branco</option>
+                  <option value="dark_card">Card escuro</option>
+                  <option value="green_premiere">Verde premiere</option>
+                </select>
+              </label>
+              <label class="control-field">Fonte
+                <select id="introFontPreset">
+                  <option value="georgia">Georgia</option>
+                  <option value="arial_black">Arial Black</option>
+                  <option value="bahnschrift">Bahnschrift</option>
+                  <option value="segoe">Segoe UI</option>
+                  <option value="impact">Impact</option>
+                </select>
+              </label>
+              <label class="range-field">Tamanho
+                <span class="range-value" id="introSizeValue">76px</span>
+                <input id="introSize" type="range" min="42" max="132" value="76" />
+              </label>
+              <label class="range-field">Altura
+                <span class="range-value" id="introPositionValue">44%</span>
+                <input id="introPosition" type="range" min="25" max="68" value="44" />
+              </label>
+              <div class="color-field">
+                <div class="color-head"><span>Cor intro</span><span id="introColorHex">#FFD36A</span></div>
+                <div class="color-picker-row">
+                  <button class="color-preview-btn" type="button" data-color-open="introColor" id="introColorPreview" title="Escolher cor da intro"></button>
+                  <input id="introColor" class="native-color" type="color" value="#ffd36a" aria-label="Cor da intro" />
+                  <div class="swatch-row" data-target="introColor">
+                    <button type="button" class="color-swatch" data-color="#ffd36a" style="--swatch:#ffd36a" title="Dourado"></button>
+                    <button type="button" class="color-swatch" data-color="#ffffff" style="--swatch:#ffffff" title="Branco"></button>
+                    <button type="button" class="color-swatch" data-color="#f7f1e8" style="--swatch:#f7f1e8" title="Cinema"></button>
+                    <button type="button" class="color-swatch" data-color="#98ffb0" style="--swatch:#98ffb0" title="Verde"></button>
+                    <button type="button" class="color-swatch" data-color="#8edbff" style="--swatch:#8edbff" title="Azul"></button>
+                  </div>
+                </div>
+              </div>
+              <div class="color-field">
+                <div class="color-head"><span>Contorno intro</span><span id="introOutlineHex">#090909</span></div>
+                <div class="color-picker-row">
+                  <button class="color-preview-btn" type="button" data-color-open="introOutline" id="introOutlinePreview" title="Escolher contorno da intro"></button>
+                  <input id="introOutline" class="native-color" type="color" value="#090909" aria-label="Contorno da intro" />
+                  <div class="swatch-row" data-target="introOutline">
+                    <button type="button" class="color-swatch" data-color="#090909" style="--swatch:#090909" title="Preto"></button>
+                    <button type="button" class="color-swatch" data-color="#000000" style="--swatch:#000000" title="Preto forte"></button>
+                    <button type="button" class="color-swatch" data-color="#062412" style="--swatch:#062412" title="Verde escuro"></button>
+                    <button type="button" class="color-swatch" data-color="#3a2a08" style="--swatch:#3a2a08" title="Dourado escuro"></button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="preflight-panel card advanced-only" id="preflightPanel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Verificacao</p>
+          <h3>Pronto para render</h3>
+          <p class="engine-note">Resumo automático do projeto antes do motor local trabalhar.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="autoFixBtn">Ajustar automaticamente</button>
+      </div>
+      <div class="intelligence-panel">
+        <div class="intelligence-head">
+          <div>
+            <p class="eyebrow">Inteligencia do projeto</p>
+            <h4>Automacao segura</h4>
+          </div>
+          <label class="control-field compact">Tom
+            <select id="projectToneSelect">
+              <option value="auto">Automático</option>
+              <option value="suspense">Suspense</option>
+              <option value="emotional">Emocional</option>
+              <option value="explanatory">Explicativo</option>
+              <option value="energetic">Energetico</option>
+              <option value="historical">Histórico</option>
+              <option value="tech">Tecnologico</option>
+            </select>
+          </label>
+        </div>
+        <div class="reference-style-panel">
+          <div class="reference-style-copy">
+            <p class="eyebrow">Reference Style DNA</p>
+            <h4>Imitar este estilo</h4>
+            <p class="engine-note" id="referenceStyleStatus">Sem vídeo referência. O pacote visual do Glide será usado.</p>
+          </div>
+          <div class="reference-style-controls">
+            <label class="toggle"><input id="referenceStyleEnabledToggle" type="checkbox" /> <span>Imitar referência</span></label>
+            <label class="control-field compact">Modo
+              <select id="referenceStyleModeSelect">
+                <option value="inspiration">Inspiração</option>
+                <option value="reference">Referência</option>
+              </select>
+            </label>
+            <label class="control-field compact">Pacote Glide
+              <select id="visualLanguagePackageSelect">
+                <option value="dark_doc">Documentário sombrio</option>
+                <option value="modern_explainer">Explicativo moderno</option>
+                <option value="dramatic_history">História dramática</option>
+                <option value="tech_cyber">Tech/cyber</option>
+                <option value="finance">Financeiro</option>
+              </select>
+            </label>
+            <label class="control-field compact">Intensidade
+              <select id="styleIntensitySelect">
+                <option value="low">Baixa</option>
+                <option value="balanced" selected>Balanceada</option>
+                <option value="high">Alta</option>
+              </select>
+            </label>
+            <button type="button" class="btn ghost small" id="referenceStylePickBtn">Anexar referência</button>
+            <button type="button" class="btn ghost small" id="referenceStyleAnalyzeBtn">Analisar referência</button>
+            <button type="button" class="btn ghost small danger-soft" id="referenceStyleRemoveBtn">Remover referência</button>
+            <input id="referenceStyleInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" hidden />
+          </div>
+        </div>
+        <div class="automation-summary">
+          <span>Ducking profissional automático</span>
+          <span>Ênfases dos Textos por contexto</span>
+          <span>Cor apenas em outliers</span>
+        </div>
+        <div class="toggle-row intelligence-toggles">
+          <label class="toggle"><input id="renderRecoveryToggle" type="checkbox" checked /> <span>Recuperação automática</span></label>
+        </div>
+        <div class="intelligence-v15-grid">
+          <label class="toggle hidden"><input id="autoDirectorToggle" type="checkbox" checked /> <span>Diretor automático</span></label>
+          <label class="toggle"><input id="semanticVisualIndexToggle" type="checkbox" checked /> <span>Pesquisa visual</span></label>
+          <label class="toggle"><input id="channelLearningToggle" type="checkbox" checked /> <span>Aprender por canal</span></label>
+          <label class="toggle"><input id="energyEditingToggle" type="checkbox" checked /> <span>Ritmo pela voz</span></label>
+          <label class="toggle"><input id="antiRepeatToggle" type="checkbox" checked /> <span>Antirrepetição</span></label>
+          <label class="toggle"><input id="audioMasteringToggle" type="checkbox" checked /> <span>Master YouTube</span></label>
+        </div>
+        <div class="intelligence-v15-status">
+          <div class="intelligence-score" id="confidenceSummaryBox">
+            <span>Confiança</span><strong>--</strong><small>Aguardando verificação</small>
+          </div>
+          <div class="intelligence-score" id="semanticModelBox">
+            <span>Índice visual</span><strong>Local</strong><small>Heurísticas ativas</small>
+          </div>
+          <div class="intelligence-score graph-score" id="renderGraphBox">
+            <span>Render Graph</span><strong>Pronto</strong><small>Nenhuma execução ativa</small>
+            <div class="render-graph-nodes" id="renderGraphNodes" aria-live="polite"></div>
+          </div>
+        </div>
+        <div class="intelligence-actions">
+          <button type="button" class="btn ghost small" id="rerunDirectorBtn">Refazer direção visual</button>
+          <button type="button" class="btn ghost small" id="undoDirectorBtn">Desfazer direção visual</button>
+          <button type="button" class="btn ghost small" id="exportLearningBtn">Exportar aprendizado</button>
+          <button type="button" class="btn ghost small" id="resetLearningBtn">Zerar aprendizado</button>
+          <button type="button" class="btn ghost small" id="installVisualModelBtn">Instalar modelo local</button>
+          <input id="visualModelInput" type="file" accept=".zip,application/zip" hidden />
+        </div>
+        <div class="learning-summary" id="learningSummaryBox">O aprendizado deste canal aparece depois de três correções manuais semelhantes.</div>
+        <div class="auto-fix-plan" id="autoFixPlanBox">O plano de correção aparece aqui depois da verificação.</div>
+      </div>
+      <div class="preflight-grid" id="preflightGrid"></div>
+    </section>
+
+    <section class="subtitle-panel card advanced-only" id="subtitleSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Textos editoriais</p>
+          <h3>Textos animados</h3>
+          <p class="engine-note" id="subtitleStatus">Adicione um SRT de Textos para orientar o Águia e criar chamadas animadas.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="clearSubtitleBtn">Remover Textos</button>
+      </div>
+      <div class="subtitle-grid">
+        <div class="subtitle-controls">
+          <label class="control-field">Preset
+            <select id="subtitlePreset">
+              <option value="bold_white">Branco bold</option>
+              <option value="bold_yellow">Amarelo bold</option>
+              <option value="dark_box">Caixa escura</option>
+              <option value="cinema_white">Cinema branco</option>
+              <option value="green_neon">Verde neon</option>
+              <option value="minimal">Minimal</option>
+              <option value="impact_gold">Impacto dourado</option>
+              <option value="documentary">Documentário</option>
+              <option value="blue_glow">Azul glow</option>
+              <option value="red_punch">Vermelho punch</option>
+              <option value="soft_pink">Rosa suave</option>
+              <option value="clean_box">Caixa clean</option>
+            </select>
+          </label>
+          <label class="control-field">Fonte
+            <select id="subtitleFontPreset">
+              <option value="arial_black">Arial Black</option>
+              <option value="bahnschrift">Bahnschrift</option>
+              <option value="segoe">Segoe UI</option>
+              <option value="impact">Impact</option>
+              <option value="georgia">Georgia</option>
+              <option value="trebuchet">Trebuchet</option>
+              <option value="verdana">Verdana</option>
+              <option value="arial">Arial</option>
+            </select>
+          </label>
+          <label class="control-field">Animação
+            <select id="subtitleAnimation">
+              <option value="mixed">Auto (Variações Dinâmicas)</option>
+              <option value="random_text">Aleatório por categorias</option>
+              <option value="pop">Pop suave</option>
+              <option value="slide">Slide cinema</option>
+              <option value="zoom">Zoom elegante</option>
+              <option value="fade">Fade limpo</option>
+              <option value="cinematic">Cinemática</option>
+              <option value="pulse">Pulse neon</option>
+              <option value="glitch">Glitch digital</option>
+              <option value="typewriter">Typewriter</option>
+              <option value="shake">Shake impacto</option>
+              <option value="documentary">Luxury documentary</option>
+              <option value="archive">Archive caption</option>
+              <option value="digital">Digital typing</option>
+              <option value="stamp">Rubber stamp</option>
+              <option value="money">Money counter</option>
+              <option value="warning">Warning alert</option>
+              <option value="industrial">Industrial metal</option>
+              <option value="luxury">Luxury reveal</option>
+              <option value="none">Sem animação</option>
+            </select>
+            <button type="button" class="btn ghost small fx-preview-btn" id="subtitleFxPreviewBtn">Ouvir FX</button>
+          </label>
+          <label class="range-field">Tamanho
+            <span class="range-value" id="subtitleSizeValue">64</span>
+            <input id="subtitleSize" type="range" min="36" max="112" value="64" />
+          </label>
+          <label class="range-field">Posição vertical
+            <span class="range-value" id="subtitlePositionValue">16%</span>
+            <input id="subtitlePosition" type="range" min="8" max="30" value="16" />
+          </label>
+          <label class="range-field">Contorno
+            <span class="range-value" id="subtitleOutlineSizeValue">2.0px</span>
+            <input id="subtitleOutlineSize" type="range" min="0" max="5" step="0.1" value="2" />
+          </label>
+          <div class="color-field">
+            <div class="color-head"><span>Cor</span><span id="subtitleColorHex">#FFFFFF</span></div>
+            <div class="color-picker-row">
+              <button class="color-preview-btn" type="button" data-color-open="subtitleColor" id="subtitleColorPreview" title="Escolher cor do texto"></button>
+              <input id="subtitleColor" class="native-color" type="color" value="#ffffff" aria-label="Cor do texto" />
+              <div class="swatch-row" data-target="subtitleColor">
+                <button type="button" class="color-swatch" data-color="#ffffff" style="--swatch:#ffffff" title="Branco"></button>
+                <button type="button" class="color-swatch" data-color="#ffd83d" style="--swatch:#ffd83d" title="Amarelo"></button>
+                <button type="button" class="color-swatch" data-color="#ffd36a" style="--swatch:#ffd36a" title="Dourado"></button>
+                <button type="button" class="color-swatch" data-color="#ff6b5f" style="--swatch:#ff6b5f" title="Vermelho punch"></button>
+                <button type="button" class="color-swatch" data-color="#8edbff" style="--swatch:#8edbff" title="Azul glow"></button>
+                <button type="button" class="color-swatch" data-color="#74ff8f" style="--swatch:#74ff8f" title="Verde neon"></button>
+                <button type="button" class="color-swatch" data-color="#ffd1e8" style="--swatch:#ffd1e8" title="Rosa suave"></button>
+                <button type="button" class="color-swatch" data-color="#f7f1e8" style="--swatch:#f7f1e8" title="Cinema"></button>
+              </div>
+            </div>
+          </div>
+          <div class="color-field">
+            <div class="color-head"><span>Contorno</span><span id="subtitleOutlineHex">#111111</span></div>
+            <div class="color-picker-row">
+              <button class="color-preview-btn" type="button" data-color-open="subtitleOutline" id="subtitleOutlinePreview" title="Escolher cor do contorno"></button>
+              <input id="subtitleOutline" class="native-color" type="color" value="#111111" aria-label="Cor do contorno" />
+              <div class="swatch-row" data-target="subtitleOutline">
+                <button type="button" class="color-swatch" data-color="#111111" style="--swatch:#111111" title="Preto suave"></button>
+                <button type="button" class="color-swatch" data-color="#000000" style="--swatch:#000000" title="Preto"></button>
+                <button type="button" class="color-swatch" data-color="#052b15" style="--swatch:#052b15" title="Verde escuro"></button>
+                <button type="button" class="color-swatch" data-color="#062033" style="--swatch:#062033" title="Azul escuro"></button>
+                <button type="button" class="color-swatch" data-color="#1b0504" style="--swatch:#1b0504" title="Vermelho escuro"></button>
+                <button type="button" class="color-swatch" data-color="#2d1324" style="--swatch:#2d1324" title="Rosa escuro"></button>
+                <button type="button" class="color-swatch" data-color="#3a2a08" style="--swatch:#3a2a08" title="Dourado escuro"></button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="subtitle-preview" id="subtitlePreview">
+          <div class="preview-media" id="previewMedia">
+            <span>Preview</span>
+          </div>
+          <div class="preview-caption" id="previewCaption">Seu texto animado aparece assim</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="caption-panel card advanced-only" id="captionSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Legendas opcionais</p>
+          <h3>Legendas do vídeo</h3>
+          <p class="engine-note" id="captionStatus">Adicione um SRT para legendas limpas em até duas linhas, sem FX sonoro.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="clearCaptionBtn">Remover Legendas</button>
+      </div>
+      <div class="caption-editor">
+        <div class="caption-controls">
+          <label class="control-field">Estilo
+            <select id="captionPreset">
+              <option value="clean_two_lines">Limpo em duas linhas</option>
+              <option value="soft_box">Caixa suave</option>
+              <option value="documentary">Documentário</option>
+            </select>
+          </label>
+          <label class="control-field">Fonte
+            <select id="captionFont">
+              <option value="Arial">Arial</option>
+              <option value="Segoe UI Semibold">Segoe UI</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Verdana">Verdana</option>
+            </select>
+          </label>
+          <label class="control-field">Alinhamento
+            <select id="captionAlignment">
+              <option value="left">Esquerda</option>
+              <option value="center" selected>Centro</option>
+              <option value="right">Direita</option>
+            </select>
+          </label>
+          <label class="range-field">Tamanho <span class="range-value" id="captionSizeValue">38</span>
+            <input id="captionSize" type="range" min="24" max="72" value="38" />
+          </label>
+          <label class="range-field">Posição vertical <span class="range-value" id="captionPositionValue">10%</span>
+            <input id="captionPosition" type="range" min="5" max="40" value="10" />
+          </label>
+          <label class="range-field">Contorno <span class="range-value" id="captionOutlineValue">2.0px</span>
+            <input id="captionOutline" type="range" min="0" max="5" step="0.1" value="2" />
+          </label>
+          <label class="control-field">Cor
+            <input id="captionColor" type="color" value="#ffffff" aria-label="Cor das legendas" />
+          </label>
+          <label class="control-field">Contorno
+            <input id="captionOutlineColor" type="color" value="#111111" aria-label="Cor do contorno das legendas" />
+          </label>
+        </div>
+        <div class="layer-preview" id="layerPreview">
+          <div class="layer-preview-media" aria-label="Frame do projeto"></div>
+          <div class="layer-preview-text" id="layerPreviewText">Texto editorial</div>
+          <div class="layer-preview-caption" id="layerPreviewCaption">Legenda limpa em até duas linhas</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="cta-panel card" id="ctaSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">CTA obrigatório</p>
+          <h3>Inscrição no YouTube</h3>
+          <p class="engine-note" id="ctaStatus">Escolha um idioma. O CTA entra no início e no final com a posição definida no preview.</p>
+        </div>
+      </div>
+      <div class="cta-grid" id="ctaGrid">
+        <div class="empty">Carregando CTAs locais...</div>
+      </div>
+      <div class="cta-editor">
+        <div class="cta-preview-stage" id="ctaPreviewStage" data-ratio="16:9">
+          <div class="cta-preview-media" id="ctaPreviewMedia"><span>Preview CTA + Textos + Legendas</span></div>
+          <video class="cta-preview-video hidden" id="ctaPreviewVideo" autoplay loop muted playsinline></video>
+          <div class="cta-preview-caption" id="ctaPreviewCaption">Sua legenda aparece junto do CTA</div>
+          <div class="cta-sound-actions">
+            <button type="button" class="btn ghost small hidden" id="ctaPreviewSoundBtn">Ouvir CTA</button>
+          </div>
+        </div>
+        <div class="cta-controls">
+          <label class="control-field">Posição CTA
+            <select id="ctaPositionPreset">
+              <option value="top_left">Superior esquerdo</option>
+              <option value="top_center">Superior centro</option>
+              <option value="top_right" selected>Superior direito</option>
+              <option value="middle_left">Meio esquerdo</option>
+              <option value="center">Centro</option>
+              <option value="middle_right">Meio direito</option>
+              <option value="bottom_left">Inferior esquerdo</option>
+              <option value="bottom_center">Inferior centro</option>
+              <option value="bottom_right">Inferior direito</option>
+            </select>
+          </label>
+          <label class="range-field">Ajuste X
+            <span class="range-value" id="ctaOffsetXValue">0%</span>
+            <input id="ctaOffsetX" type="range" min="-25" max="25" value="0" />
+          </label>
+          <label class="range-field">Ajuste Y
+            <span class="range-value" id="ctaOffsetYValue">0%</span>
+            <input id="ctaOffsetY" type="range" min="-25" max="25" value="0" />
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="stats-row">
+      <div class="stat"><span id="videoCount">0</span><small>clipes de vídeo</small></div>
+      <div class="stat"><span id="audioCount">0</span><small>áudios</small></div>
+      <div class="stat"><span id="audioTotal">00:00</span><small>duração da narração</small></div>
+      <div class="stat"><span id="videoEstimate">00:00</span><small>estimativa final</small></div>
+    </section>
+
+    <section class="timeline-section card" id="timelineSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Timeline</p>
+          <h3>Vídeos em ordem</h3>
+        </div>
+        <div class="actions-inline">
+          <button type="button" class="btn ghost small" id="sortNumericBtn">Ordenar por número</button>
+        </div>
+      </div>
+      <div class="timeline" id="videoTimeline">
+        <div class="empty">Os clipes aparecem aqui.</div>
+      </div>
+    </section>
+
+    <section class="timeline-section card small-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Narração</p>
+          <h3>Áudios em ordem</h3>
+        </div>
+      </div>
+      <div class="audio-lane" id="audioTimeline">
+        <div class="empty">A narração aparece aqui.</div>
+      </div>
+    </section>
+
+    <section class="timeline-section card small-card advanced-only" id="backgroundSection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Música de fundo</p>
+          <h3>Trilha automática</h3>
+            <p class="engine-note" id="backgroundSummary">Padrão: biblioteca Cinematic sorteada automaticamente quando você não adicionar músicas manuais.</p>
+        </div>
+        <div class="music-settings">
+          <div class="music-library">
+            <div class="music-genre-switch" id="musicGenreSwitch" role="group" aria-label="Gênero da biblioteca musical">
+              <button type="button" data-music-genre="cinematic">Cinematic</button>
+              <button type="button" data-music-genre="ambient">Ambiente</button>
+            </div>
+            <small class="field-hint" id="presetMusicStatus">Verificando biblioteca musical...</small>
+            <div class="music-library-shelf" id="musicLibraryShelf"></div>
+          </div>
+          <label>Volume
+            <select id="backgroundVolumePreset">
+              <option value="immersive">Imersivo (-22 dB)</option>
+              <option value="silent">Silencioso (-28 dB)</option>
+              <option value="custom">Personalizado</option>
+            </select>
+          </label>
+          <label id="backgroundVolumeField">dB
+            <input id="backgroundVolumeDb" type="number" min="-42" max="-10" step="1" value="-22" />
+            <small class="field-hint">Imersivo: base -22 dB e picos nas pausas até -13.5 dB. Silencioso: base -28 dB.</small>
+          </label>
+          <p class="field-hint">A música usa ducking profissional automático para preservar a narração.</p>
+        </div>
+      </div>
+      <div class="audio-lane music-lane" id="backgroundTimeline">
+        <div class="empty">Músicas de fundo aparecem aqui. Elas não entram como narração.</div>
+      </div>
+    </section>
+
+    <section class="timeline-section card gallery-panel advanced-only" id="gallerySection">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Galeria</p>
+          <h3>Vídeos finalizados</h3>
+          <p class="engine-note">Resumo dos renders recentes com tamanho, lote e pasta de saída.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="refreshGalleryBtn">Atualizar galeria</button>
+      </div>
+      <div class="render-gallery" id="renderGallery">
+        <div class="empty">Os renders finalizados aparecem aqui.</div>
+      </div>
+    </section>
+
+    <section class="render-dock glass">
+      <div>
+        <strong>Pronto para exportar</strong>
+        <span id="dockSummary">Importe vídeos e áudios para liberar o render.</span>
+      </div>
+      <button type="button" class="btn export" id="renderBtn" disabled>Renderizar MP4</button>
+    </section>
+  </main>
+
+  <div class="modal settings-modal" id="settingsModal" aria-hidden="true">
+    <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
+      <div class="report-modal-head">
+        <div>
+          <p class="eyebrow">Configurações</p>
+          <h2 id="settingsModalTitle">Centro do Glide</h2>
+          <p>Modos, tema, backups, lote e utilitários avançados ficam aqui para manter a fila limpa.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="closeSettingsModal">Fechar</button>
+      </div>
+      <div class="settings-grid">
+        <label class="theme-control" title="Modo de trabalho">
+          <span>Modo</span>
+          <select id="uiModeSelect" aria-label="Modo de trabalho">
+            <option value="simple">Simples</option>
+            <option value="advanced">Avançado</option>
+          </select>
+        </label>
+        <label class="theme-control" title="Tema da interface">
+          <span>Tema</span>
+          <select id="themeSelect" aria-label="Tema da interface">
+            <option value="system">Sistema</option>
+            <option value="dark">Escuro</option>
+            <option value="light">Claro</option>
+          </select>
+        </label>
+        <label class="theme-control render-priority-control" title="Perfil global para todos os projetos da fila. Turbo prioriza velocidade, Eficiente equilibra qualidade e tempo, Qualidade Máxima libera recursos premium.">
+          <span>Render global</span>
+          <select id="renderPrioritySelect" aria-label="Modo de render">
+            <option value="max">Turbo Produção</option>
+            <option value="balanced">Eficiente Inteligente</option>
+            <option value="quality">Qualidade Máxima</option>
+          </select>
+        </label>
+        <label class="toggle compact" title="Quando ativo, o Glide interrompe renders que passam muito do limite do modo. Desative se preferir concluir renders que ultrapassem um pouco o tempo previsto.">
+          <input type="checkbox" id="renderBudgetToggle" checked />
+          <span>Proteção de tempo</span>
+        </label>
+        <label class="theme-control" title="Confiança mínima usada por Renderizar saudáveis">
+          <span>Saudável acima de</span>
+          <input id="healthyThresholdInput" type="number" min="40" max="95" step="1" value="70" />
+        </label>
+        <label class="theme-control" title="Perfil final de masterização">
+          <span>Master</span>
+          <select id="platformMasterProfileSelect" aria-label="Perfil de masterização">
+            <option value="youtube_long">YouTube longo</option>
+            <option value="shorts">Shorts</option>
+            <option value="documentary">Documentário</option>
+            <option value="clean_voice">Narração limpa</option>
+          </select>
+        </label>
+        <label class="toggle compact" title="Analisa janelas internas para usar apenas o melhor trecho de cada clipe quando necessário">
+          <input type="checkbox" id="scoreVisualWindowsToggle" checked />
+          <span>Score por segundo</span>
+        </label>
+        <label class="toggle compact" title="Aplica Quality Boost completo apenas nos trechos que realmente precisam">
+          <input type="checkbox" id="adaptiveQualityBoostToggle" checked />
+          <span>Boost adaptativo</span>
+        </label>
+        <label class="toggle compact" title="Roda mini-render técnico antes de iniciar a fila para evitar falhas tardias">
+          <input type="checkbox" id="queueAutoTestToggle" checked />
+          <span>Auto-teste da fila</span>
+        </label>
+      </div>
+      <div class="ui-sound-card">
+        <div>
+          <p class="eyebrow">Interface</p>
+          <h3>Sons do Glide</h3>
+          <p>Cliques curtos e discretos para botões, seletores e pequenas ações.</p>
+        </div>
+        <label class="toggle compact">
+          <input type="checkbox" id="uiSoundsToggle" />
+          <span>Ativar sons da interface</span>
+        </label>
+        <label class="theme-control">
+          <span>Estilo</span>
+          <select id="uiSoundStyleSelect" aria-label="Estilo dos sons da interface">
+            <option value="soft_tick">Soft Tick</option>
+            <option value="glass_click">Glass Click</option>
+            <option value="neon_pop">Neon Pop</option>
+            <option value="deep_tap">Deep Tap</option>
+          </select>
+        </label>
+        <label class="theme-control">
+          <span>Salvar por</span>
+          <select id="uiSoundScopeSelect" aria-label="Escopo da preferência sonora">
+            <option value="global">Global</option>
+            <option value="theme">Tema</option>
+            <option value="identity">Identidade</option>
+          </select>
+        </label>
+        <label class="toggle compact">
+          <input type="checkbox" id="uiProjectDoneSoundToggle" />
+          <span>Som ao concluir projeto</span>
+        </label>
+        <div class="ui-sound-previews" aria-label="Preview dos sons da interface">
+          <button type="button" class="btn ghost small" data-ui-sound-preview="soft_tick">Soft Tick</button>
+          <button type="button" class="btn ghost small" data-ui-sound-preview="glass_click">Glass Click</button>
+          <button type="button" class="btn ghost small" data-ui-sound-preview="neon_pop">Neon Pop</button>
+          <button type="button" class="btn ghost small" data-ui-sound-preview="deep_tap">Deep Tap</button>
+        </div>
+      </div>
+      <div class="settings-actions">
+        <button type="button" class="btn primary small" id="saveSettingsBtn">Salvar configurações</button>
+        <button type="button" class="btn ghost small" id="safeRenderBtn" title="Renderiza o projeto ativo com automações arriscadas suspensas apenas nesta execução">Render seguro</button>
+        <button type="button" class="btn ghost small" id="spaceManagerBtn">Gerenciar espaço</button>
+        <button type="button" class="btn ghost small" id="openExportsBtn">Abrir exports</button>
+        <button type="button" class="btn ghost small" id="sampleRenderBtn">Amostra por blocos</button>
+        <button type="button" class="btn ghost small" id="queueReportsBtn" disabled>Relatórios</button>
+        <button type="button" class="btn ghost small" id="saveProjectsBackupBtn" title="Baixa um backup JSON com todos os projetos, nomes e presets">Salvar backup</button>
+        <input type="file" id="projectsBackupInput" hidden accept="application/json,.json" />
+        <button type="button" class="btn ghost small" id="importProjectsBackupBtn" title="Importa um backup e mescla com os projetos atuais">Importar backup</button>
+        <input type="file" id="batchFolderInput" webkitdirectory directory multiple hidden />
+        <button type="button" class="btn ghost small" id="pickBatchFolderBtn">Importar lote</button>
+      </div>
+      <div class="space-manager hidden" id="spaceManagerBox">
+        <div class="space-summary" id="spaceSummary">Calculando espaço usado pelo Glide...</div>
+        <div class="settings-actions">
+          <button type="button" class="btn ghost small" data-space-clean="temporaries">Limpar temporários</button>
+          <button type="button" class="btn ghost small" data-space-clean="old_cache">Limpar cache antigo</button>
+          <button type="button" class="btn ghost small" data-space-clean="old_exports">Limpar exports antigos</button>
+          <button type="button" class="btn ghost small" data-space-clean="old_logs">Limpar logs antigos</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal report-modal" id="scriptGuideModal" aria-hidden="true">
+    <div class="modal-card report-modal-card" role="dialog" aria-modal="true" aria-labelledby="scriptGuideModalTitle">
+      <div class="report-modal-head">
+        <div>
+          <p class="eyebrow">Roteiro inteligente</p>
+          <h2 id="scriptGuideModalTitle">Interpretação do roteiro</h2>
+          <p>Blocos, palavras-chave e alertas usados como guia editorial. O timing final continua vindo dos Textos/SRT e do áudio.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="closeScriptGuideModal">Fechar</button>
+      </div>
+      <div class="report-modal-body" id="scriptGuideModalBody"></div>
+    </div>
+  </div>
+
+  <div class="modal report-modal" id="reportModal" aria-hidden="true">
+    <div class="modal-card report-modal-card" role="dialog" aria-modal="true" aria-labelledby="reportModalTitle">
+      <div class="report-modal-head">
+        <div>
+          <p class="eyebrow">Relatório de produção</p>
+          <h2 id="reportModalTitle">Resumo do projeto</h2>
+          <p id="reportModalSubtitle">Dados do último render concluído.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="closeReportModal" aria-label="Fechar relatório">Fechar</button>
+      </div>
+      <div class="report-scope-switch">
+        <button type="button" class="btn ghost small active" id="reportProjectViewBtn">Projeto</button>
+        <button type="button" class="btn ghost small" id="reportQueueViewBtn">Todos os projetos</button>
+      </div>
+      <div class="report-modal-body" id="reportModalBody"></div>
+    </div>
+  </div>
+
+  <div class="modal retry-modal" id="retryModal" aria-hidden="true">
+    <div class="modal-card retry-card" role="dialog" aria-modal="true" aria-labelledby="retryModalTitle">
+      <div class="report-modal-head">
+        <div>
+          <p class="eyebrow">Repetir fila</p>
+          <h2 id="retryModalTitle">Escolha os projetos</h2>
+          <p>Projetos sem vídeos, narração, Textos ou CTA ficam desativados.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="closeRetryModal">Fechar</button>
+      </div>
+      <div class="retry-options">
+        <label><input type="radio" name="retryMode" id="retryModeAll" value="all" checked /> Repetir todos os elegíveis</label>
+        <label><input type="radio" name="retryMode" id="retryModeSelected" value="selected" /> Repetir apenas selecionados</label>
+      </div>
+      <div class="retry-list" id="retryProjectList"></div>
+      <div class="modal-actions">
+        <button type="button" class="btn export" id="confirmRetryBtn">Repetir fila</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal render-panel" id="renderModal" aria-hidden="true">
+    <div class="modal-card">
+      <div class="render-logo">
+        <span class="render-eagle" aria-hidden="true"></span>
+        <span id="eyePercent">0%</span>
+      </div>
+      <h2 id="renderTitle">Preparando render</h2>
+      <p class="render-project-meta" id="renderProjectMeta">Projeto: aguardando início</p>
+      <p id="renderMsg">Preparando arquivos</p>
+      <p class="render-eta" id="renderEta">Tempo restante: calculando...</p>
+      <div class="progress"><div id="progressBar"></div></div>
+      <div class="render-steps" id="renderSteps">
+        <span data-stage="preparing">Preparando</span>
+        <span data-stage="uploading">Copiando</span>
+        <span data-stage="audio">Áudio</span>
+        <span data-stage="rendering">Clipes</span>
+        <span data-stage="cta">CTA + Textos + Legendas</span>
+        <span data-stage="muxing">Finalizando</span>
+      </div>
+      <button type="button" class="btn ghost small" id="toggleLogBtn">Detalhes técnicos</button>
+      <section class="render-showcase" id="renderShowcase" data-stage="preparing" aria-live="polite">
+        <div class="render-showcase-art" id="renderShowcaseArt" aria-hidden="true"></div>
+        <div class="render-showcase-copy">
+          <span id="renderShowcaseTitle">Organizando o projeto</span>
+          <small id="renderShowcaseText">Preparando arquivos, cache e verificações antes do render.</small>
+        </div>
+      </section>
+      <pre class="hidden" id="renderLog"></pre>
+      <p class="output-path hidden" id="outputPath"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost small hidden" id="pauseQueueBtn">Pausar fila</button>
+        <a class="btn primary hidden" id="downloadBtn" href="#">Baixar MP4</a>
+        <button type="button" class="btn primary hidden" id="openOutputBtn">Abrir pasta</button>
+        <button type="button" class="btn ghost queue-danger hidden" id="stopRenderBtn">Parar render</button>
+        <button type="button" class="btn ghost" id="closeModal">Fechar</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/modules/runtime-config.js?v=1.29.0"></script>
+  <script src="/static/app.js?v=1.29.0"></script>
+</body>
+</html>
+
+
+
+
+
+

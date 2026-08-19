@@ -1,0 +1,26 @@
+{
+  "small_file": {
+    "label": "Arquivo pequeno",
+    "intent": "Menor tamanho para upload rapido"
+  },
+  "capcut_compact": {
+    "label": "Compacto CapCut - VBR",
+    "intent": "1080p leve com boa qualidade perceptiva"
+  },
+  "youtube_compact": {
+    "label": "YouTube 1080p compacto",
+    "intent": "Equilibrio para videos narrados"
+  },
+  "balanced": {
+    "label": "Equilibrado",
+    "intent": "Qualidade e tamanho moderados"
+  },
+  "high_quality": {
+    "label": "Qualidade alta",
+    "intent": "Prioriza definicao visual"
+  },
+  "compatibility": {
+    "label": "Maxima compatibilidade",
+    "intent": "H.264/MP4 para leitores antigos"
+  }
+}

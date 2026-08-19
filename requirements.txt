@@ -1,0 +1,6 @@
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+numpy>=1.26,<3
+opencv-python-headless>=4.10,<5
+pypdf>=4.3,<6
