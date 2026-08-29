@@ -1,7 +1,7 @@
 {
   "name": "Glide Studio",
   "short_name": "Glide Studio",
-  "version": "1.28.2",
+  "version": "1.31.0",
   "start_url": "/?desktop=1",
   "display": "standalone",
   "background_color": "#ffffff",

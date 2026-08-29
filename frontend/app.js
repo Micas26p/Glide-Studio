@@ -1,5 +1,5 @@
 const state = {
-  version: '1.29.0',
+  version: '1.31.0',
   mode: 'fast',
   projects: [],
   activeProjectId: null,
@@ -122,8 +122,6 @@ const uiModeSelect = $('#uiModeSelect');
 const renderPrioritySelect = $('#renderPrioritySelect');
 const renderBudgetToggle = $('#renderBudgetToggle');
 const settingsBtn = $('#settingsBtn');
-const eagleModeBtn = $('#eagleModeBtn');
-const eagleModeState = $('#eagleModeState');
 const settingsModal = $('#settingsModal');
 const closeSettingsModal = $('#closeSettingsModal');
 const uiSoundsToggle = $('#uiSoundsToggle');
@@ -227,6 +225,7 @@ const adaptiveVisualFilterToggle = $('#adaptiveVisualFilterToggle');
 const visualFilterHint = $('#visualFilterHint');
 const voiceNormalizeToggle = $('#voiceNormalizeToggle');
 const autoSoundFxToggle = $('#autoSoundFxToggle');
+const allowAudioTrimToggle = $('#allowAudioTrimToggle');
 const preflightGrid = $('#preflightGrid');
 const autoFixBtn = $('#autoFixBtn');
 const projectToneSelect = $('#projectToneSelect');
@@ -299,6 +298,8 @@ const automatorModal = $('#automatorModal');
 const automatorCloseBtn = $('#automatorCloseBtn');
 const automatorCancelBtn = $('#automatorCancelBtn');
 const automatorConfirmBtn = $('#automatorConfirmBtn');
+const automatorConfirmHealthyBtn = $('#automatorConfirmHealthyBtn');
+const automatorConfirmAndRenderBtn = $('#automatorConfirmAndRenderBtn');
 const automatorPickSrt = $('#automatorPickSrt');
 const automatorPickAudio = $('#automatorPickAudio');
 const automatorPickFolders = $('#automatorPickFolders');
@@ -668,7 +669,7 @@ function projectReadiness(project){
   const activeFallback = project?.id === state.activeProjectId;
   const cta = options.selectedCta || options.ctaLanguage || (activeFallback ? state.selectedCta : '');
   const checks = [
-    {key: 'videos', ok: (files.videos || []).some(file => !isImage(file) && isVideo(file)), label: 'vídeos'},
+    {key: 'videos', ok: (files.videos || []).length > 0, label: 'mídia visual'},
     {key: 'audios', ok: (files.audios || []).length > 0, label: 'narração'},
     {key: 'subtitles', ok: (files.subtitles || []).length > 0, label: 'Textos'},
     {key: 'cta', ok: Boolean(cta), label: 'CTA'},
@@ -863,6 +864,7 @@ function captureControlSnapshot(includeSubtitle = true){
     adaptiveVisualFilter: Boolean(adaptiveVisualFilterToggle?.checked),
     voiceNormalize: voiceNormalizeToggle ? voiceNormalizeToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
+    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
     backgroundMusicVolumeDb: backgroundVolumeValue(),
     backgroundMusicPreset: backgroundVolumePreset?.value || 'immersive',
     backgroundMusicDucking: true,
@@ -929,6 +931,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(adaptiveVisualFilterToggle) adaptiveVisualFilterToggle.checked = Boolean(options.adaptiveVisualFilter);
   if(voiceNormalizeToggle) voiceNormalizeToggle.checked = options.voiceNormalize !== false;
   if(autoSoundFxToggle) autoSoundFxToggle.checked = options.autoSoundFx !== false;
+  if(allowAudioTrimToggle) allowAudioTrimToggle.checked = options.allowAudioTrim !== false;
   if(backgroundVolumePreset) backgroundVolumePreset.value = options.backgroundMusicPreset || 'immersive';
   if(backgroundVolumeDb) backgroundVolumeDb.value = String(options.backgroundMusicVolumeDb ?? -25);
   if(backgroundDuckingToggle) backgroundDuckingToggle.checked = options.backgroundMusicDucking !== false;
@@ -1157,10 +1160,7 @@ function updateReferenceStyleUi(){
         ? `DNA reutilizado (${Number(ref.styleDna?.scene?.cuts_per_minute || 0).toFixed(1)} cortes/min, ${ref.styleDna?.event_style?.intensity || 'ritmo balanceado'}).`
         : 'Análise pendente; o pacote Glide fica como fallback.';
       const turboNote = turbo && enabled ? ' Suspenso para análise pesada no Turbo; DNA cacheado pode orientar apenas decisões leves.' : '';
-      const eagleNote = requestedMode === 'reference' && eagleActive && enabled
-        ? ' Referência precisa suspensa no Modo Águia; usando DNA apenas como inspiração criativa.'
-        : '';
-      referenceStyleStatus.textContent = `${source}. ${ref.name || 'Vídeo referência'} - ${extra}${turboNote}${eagleNote}`;
+      referenceStyleStatus.textContent = `${source}. ${ref.name || 'Vídeo referência'} - ${extra}${turboNote}`;
     }else{
       referenceStyleStatus.textContent = 'Sem vídeo referência. O pacote visual do Glide será usado.';
     }
@@ -1256,7 +1256,11 @@ function mediaSummary(project){
   const retry = Number(project.retryCount || 0) > 0 ? `, retomada ${Number(project.retryCount)}` : '';
   const readiness = projectReadiness(project);
   const missing = readiness.ok ? 'pronto' : `falta ${readiness.missing.join(', ')}`;
-  return `${(files.videos || []).length} vid | ${(files.audios || []).length} aud | ${(files.subtitles || []).length} Textos | ${(files.captions || []).length} Legendas | ${formatTime(duration)} | ${missing}${retry}`;
+  const vList = files.videos || [];
+  const vCount = vList.filter(isVideo).length;
+  const iCount = vList.filter(isImage).length;
+  const mediaLabel = (vCount && iCount) ? `${vCount} vid + ${iCount} foto` : (iCount ? `${iCount} foto` : `${vCount} vid`);
+  return `${mediaLabel} | ${(files.audios || []).length} aud | ${(files.subtitles || []).length} Textos | ${(files.captions || []).length} Legendas | ${formatTime(duration)} | ${missing}${retry}`;
 }
 function projectVisualReport(project){
   const report = project?.lastRenderSummary || {};
@@ -2789,52 +2793,15 @@ function applyVisualFilterUi(){
 }
 
 function renderPriorityLabel(value = state.renderPriority){
-  const priority = normalizedRenderPriority(value);
-  if(priority === 'max') return 'Turbo Produção';
-  if(priority === 'quality') return 'Qualidade Máxima';
-  return 'Eficiente Inteligente';
+  return '1080p Ultra Performance';
 }
 
 function applyRenderPriorityUi(){
-  state.renderPriority = normalizedRenderPriority(state.renderPriority);
-  if(renderPrioritySelect) renderPrioritySelect.value = state.renderPriority;
-  document.body.classList.toggle('render-priority-turbo', state.renderPriority === 'max');
-  document.body.classList.toggle('render-priority-quality', state.renderPriority === 'quality');
-  document.body.classList.toggle('render-priority-balanced', state.renderPriority === 'balanced');
-  const directorRequested = smartVisualDirectorToggle ? smartVisualDirectorToggle.checked : true;
-  const directorSuspended = state.renderPriority === 'max';
-  document.body.classList.toggle('director-active', directorRequested && !directorSuspended);
-  document.body.classList.toggle('director-suspended', directorRequested && directorSuspended);
-  document.body.classList.toggle('director-off', !directorRequested);
-  if(eagleModeBtn){
-    eagleModeBtn.disabled = directorSuspended;
-    eagleModeBtn.setAttribute('aria-pressed', String(directorRequested && !directorSuspended));
-    eagleModeBtn.title = directorSuspended
-      ? 'Diretor Visual Inteligente fica suspenso no Turbo Produção para priorizar velocidade.'
-      : 'Diretor Visual Inteligente: organiza clipes e imagens pelo contexto da narração.';
-  }
-  if(eagleModeState){
-    eagleModeState.textContent = directorSuspended
-      ? 'Turbo suspendeu'
-      : (directorRequested ? 'Olho ativo' : 'Desligado');
-  }
+  state.renderPriority = 'max';
+  if(renderPrioritySelect) renderPrioritySelect.value = 'max';
+  document.body.classList.add('render-priority-unified');
+  document.body.classList.remove('render-priority-turbo', 'render-priority-quality', 'render-priority-balanced');
   applyVisualFilterUi();
-  const suspendedControls = [
-    $('#transitionSelect')?.closest('label'),
-    $('#zoomSelect')?.closest('label'),
-    qualityBoostToggle?.closest('label'),
-    smartVisualDirectorToggle?.closest('label'),
-    dynamicPausesToggle?.closest('label'),
-    strongMomentToggle?.closest('label'),
-  ].filter(Boolean);
-  suspendedControls.forEach(control => {
-    control.classList.toggle('turbo-suspended-control', state.renderPriority === 'max');
-    if(state.renderPriority === 'max'){
-      control.title = 'Configuração preservada, mas suspensa somente durante o Turbo Produção.';
-    }else if(control.title === 'Configuração preservada, mas suspensa somente durante o Turbo Produção.'){
-      control.removeAttribute('title');
-    }
-  });
 }
 
 function currentTimelineDuration(){
@@ -2875,6 +2842,7 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     continuityOutliersOnly: true,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
+    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
     zoom: $('#zoomSelect')?.value || 'off',
     transitions: $('#transitionSelect')?.value || 'off',
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
@@ -3160,10 +3128,10 @@ function projectChecks(){
   return [
     {
       state: state.videos.length ? (invalidVideos ? 'warn' : 'ok') : 'bad',
-      title: 'Vídeos',
+      title: 'Mídia Visual',
       text: state.videos.length
-        ? `${state.videos.length} clip(s). ${invalidVideos ? `${invalidVideos} suspeito(s) podem ser pulados.` : 'Lista pronta.'}`
-        : 'Adicione clipes de vídeo.',
+        ? `${state.videos.length} arquivo(s) de mídia. ${invalidVideos ? `${invalidVideos} suspeito(s) podem ser pulados.` : 'Lista pronta.'}`
+        : 'Adicione vídeos ou imagens.',
     },
     {
       state: state.audios.length && audioTotal > 0 ? audioHealth.state : 'bad',
@@ -3555,7 +3523,7 @@ async function finalizeImportedMedia({projectId, token, entries, unsupported = 0
         state.thumbs.set(r, URL.createObjectURL(file));
       }catch(_){}
     }
-    setVideoStatus(file, 'image', 'Imagem pronta. O render aplica fundo blur e movimento suave.');
+    setVideoStatus(file, 'image', 'Imagem pronta. Ritmo saudável (3-5s), Ken Burns suave e Background Blur.');
   });
   const needsDuration = entries.filter(({file}) => !state.durations.has(rel(file)));
   const durationJobs = [
@@ -4147,23 +4115,26 @@ function updateStats(){
 
   const ctaOk = Boolean(state.selectedCta);
   const textsOk = state.subtitles.length > 0;
-  const ok = state.videos.some(file => !isImage(file) && isVideo(file)) && state.audios.length > 0 && textsOk && ctaOk;
+  const ok = state.videos.length > 0 && state.audios.length > 0 && textsOk && ctaOk;
   const invalidVideos = state.videos.filter(file => videoStatusOf(file).kind === 'invalid').length;
   renderBtn.disabled = !ok || state.queueRendering;
   if(ok){
     const musicText = backgroundCount ? ` + ${backgroundCount} música(s) baixa(s)` : '';
-    const invalidText = invalidVideos ? ` ${invalidVideos} clip(s) serao pulados se continuarem invalidos.` : '';
-    dockSummary.textContent = `${state.videos.length} clipe(s) + ${state.audios.length} áudio(s)${musicText}. Final aproximado: ${formatTime(audioTotal || videoTotal)}.${invalidText}`;
+    const invalidText = invalidVideos ? ` ${invalidVideos} item(ns) serao pulados se continuarem invalidos.` : '';
+    const vCount = state.videos.filter(isVideo).length;
+    const iCount = state.videos.filter(isImage).length;
+    const mediaBreakdown = (vCount && iCount) ? `${vCount} vídeo(s) e ${iCount} foto(s)` : (iCount ? `${iCount} foto(s)` : `${vCount} vídeo(s)`);
+    dockSummary.textContent = `${mediaBreakdown} + ${state.audios.length} áudio(s)${musicText}. Final aproximado: ${formatTime(audioTotal || videoTotal)}.${invalidText}`;
   }else if(state.videos.length && state.audios.length && !textsOk){
     dockSummary.textContent = 'Adicione Textos em SRT para orientar a edição e liberar o render.';
   }else if(state.videos.length && state.audios.length && !ctaOk){
     dockSummary.textContent = 'Escolha um CTA de inscricao para liberar o render.';
   }else if(state.videos.length){
-    dockSummary.textContent = `${state.videos.length} vídeo(s) carregado(s). Adicione áudio para liberar o render.`;
+    dockSummary.textContent = `${state.videos.length} arquivo(s) de mídia carregado(s). Adicione áudio para liberar o render.`;
   }else if(state.audios.length){
-    dockSummary.textContent = `${state.audios.length} áudio(s) carregado(s). Adicione vídeos para liberar o render.`;
+    dockSummary.textContent = `${state.audios.length} áudio(s) carregado(s). Adicione vídeos ou imagens para liberar o render.`;
   }else{
-    dockSummary.textContent = 'Importe vídeos e áudios em qualquer ordem.';
+    dockSummary.textContent = 'Importe vídeos, imagens e áudios em qualquer ordem.';
   }
   renderProjectChecks();
   renderProjectQueue();
@@ -4227,7 +4198,7 @@ function renderLists({updatePreview = true} = {}){
     videoTimeline.dataset.ready = '1';
     videoTimeline.dataset.complete = '0';
     if(!state.videos.length){
-      videoTimeline.innerHTML = '<div class="empty">Os clipes aparecem aqui. Arraste para mudar a ordem antes do render.</div>';
+      videoTimeline.innerHTML = '<div class="empty">Os clipes e imagens aparecem aqui. Arraste para mudar a ordem antes do render.</div>';
       videoTimeline.dataset.complete = '1';
     }else{
       videoTimeline.innerHTML = '';
@@ -5011,6 +4982,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     adaptiveVisualFilter: Boolean(optionValue('adaptiveVisualFilter', adaptiveVisualFilterToggle?.checked || false)),
     voiceNormalize: optionValue('voiceNormalize', voiceNormalizeToggle ? voiceNormalizeToggle.checked : true) !== false,
     autoSoundFx: optionValue('autoSoundFx', autoSoundFxToggle ? autoSoundFxToggle.checked : true) !== false,
+    allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : true) !== false,
     videoOrder: sourceVideos.map(rel),
     imageOrder: sourceVideos.filter(isImage).map(rel),
     imageDefaultDurationSeconds: Number(optionValue('imageDefaultDurationSeconds', 4)) || 4,
@@ -5108,10 +5080,10 @@ async function startRender(context = {}){
     captions: state.captions,
   };
   const checkCta = projectSnapshot?.options?.ctaLanguage || projectSnapshot?.options?.selectedCta || state.selectedCta;
-  const hasRealVideo = (checkFiles.videos || []).some(file => !isImage(file) && isVideo(file));
-  if(!hasRealVideo || !(checkFiles.audios || []).length || !(checkFiles.subtitles || []).length || !checkCta){
+  const hasVisualMedia = (checkFiles.videos || []).length > 0;
+  if(!hasVisualMedia || !(checkFiles.audios || []).length || !(checkFiles.subtitles || []).length || !checkCta){
     updateStats();
-    throw new Error('Projeto incompleto: vídeos, narração, Textos e CTA são obrigatórios para renderizar.');
+    throw new Error('Projeto incompleto: mídia visual (vídeos ou imagens), narração, Textos e CTA são obrigatórios para renderizar.');
   }
   if(!projectSnapshot) captureActiveProject();
   state.renderCancelRequested = false;
@@ -5713,12 +5685,16 @@ function automatorFolderGroups(fileList){
   const rootFiles = new Map();
   const childFiles = new Map();
   const roots = new Set();
+  const looseFiles = [];
   Array.from(fileList || []).forEach(file => {
     const kind = kindOfFile(file, 'video');
-    if(kind !== 'video') return;
+    if(kind !== 'video' && kind !== 'image') return;
     const path = file._autoRelativePath || file.webkitRelativePath || file.name || '';
     const parts = path.split(/[\\/]/).filter(Boolean);
-    if(parts.length < 2) return;
+    if(parts.length < 2){
+      looseFiles.push(file);
+      return;
+    }
     const root = parts[0];
     roots.add(root);
     if(!rootFiles.has(root)) rootFiles.set(root, []);
@@ -5731,12 +5707,13 @@ function automatorFolderGroups(fileList){
   const directRootVideoCount = Array.from(fileList || []).filter(file => {
     const kind = kindOfFile(file, 'video');
     const parts = String(file._autoRelativePath || file.webkitRelativePath || file.name || '').split(/[\\/]/).filter(Boolean);
-    return kind === 'video' && parts.length === 2;
+    return (kind === 'video' || kind === 'image') && parts.length === 2;
   }).length;
   const shouldSplitSingleParent = roots.size === 1 && directRootVideoCount === 0 && childFiles.size > 1;
   const sourceGroups = shouldSplitSingleParent ? childFiles : rootFiles;
-  return Array.from(sourceGroups.entries()).map(([name, files]) => {
+  const result = Array.from(sourceGroups.entries()).map(([name, files]) => {
     const visibleName = name.split('/').filter(Boolean).pop() || name || 'Pasta';
+    files.sort((a, b) => naturalCompare(a._autoRelativePath || a.webkitRelativePath || a.name, b._autoRelativePath || b.webkitRelativePath || b.name));
     let totalSize = 0;
     let newest = 0;
     files.forEach(file => {
@@ -5756,6 +5733,31 @@ function automatorFolderGroups(fileList){
       _autoUsageIndex: 0,
     };
   }).filter(group => group.files.length);
+
+  if(looseFiles.length){
+    looseFiles.sort((a, b) => naturalCompare(a._autoRelativePath || a.webkitRelativePath || a.name, b._autoRelativePath || b.webkitRelativePath || b.name));
+    let totalSize = 0;
+    let newest = 0;
+    looseFiles.forEach(file => {
+      totalSize += Number(file.size || 0);
+      newest = Math.max(newest, Number(file.lastModified || 0));
+    });
+    const first = looseFiles[0]?.name || '';
+    const last = looseFiles[looseFiles.length - 1]?.name || '';
+    const name = 'Mídia Avulsa';
+    const signature = `${name}|${looseFiles.length}|${totalSize}|${newest}|${first}|${last}`;
+    result.push({
+      name,
+      sourceName: name,
+      signature,
+      files: looseFiles,
+      _autoImportedAt: Date.now(),
+      _autoSelectionIndex: 0,
+      _autoUsageIndex: 0,
+    });
+  }
+
+  return result;
 }
 
 function appendAutomatorFolders(fileList){
@@ -5831,6 +5833,26 @@ function automatorItems(type){
   return [];
 }
 
+function removeAutomatorItem(type, index){
+  const numIndex = Number(index);
+  if(isNaN(numIndex) || numIndex < 0) return;
+  if(type === 'srt' && numIndex < state.automator.srts.length){
+    state.automator.srts.splice(numIndex, 1);
+  }else if(type === 'audio' && numIndex < state.automator.audios.length){
+    state.automator.audios.splice(numIndex, 1);
+  }else if(type === 'folder' && numIndex < state.automator.folders.length){
+    state.automator.folders.splice(numIndex, 1);
+  }
+  updateAutomatorPreview();
+}
+
+function clearAutomatorList(type){
+  if(type === 'srt') state.automator.srts = [];
+  else if(type === 'audio') state.automator.audios = [];
+  else if(type === 'folder') state.automator.folders = [];
+  updateAutomatorPreview();
+}
+
 function automatorItemLabel(item, type){
   if(!item) return '-';
   if(type === 'folder') return `${item.name || 'Pasta'} (${Number(item.files?.length || 0)} ficheiro(s))`;
@@ -5841,6 +5863,7 @@ function renderAutomatorList(type, title, items){
   const empty = type === 'folder' ? 'Nenhuma pasta selecionada' : 'Nenhum ficheiro selecionado';
   const preference = automatorSortPreference(type);
   const selected = value => preference.criterion === value ? ' selected' : '';
+  const clearBtnHtml = items.length ? `<button type="button" class="automation-sort-clear" data-automator-clear="${type}" title="Limpar todos os ${escapeHtml(title)}">Limpar</button>` : '';
   return `
     <section class="automation-sort-list" data-automator-list="${type}">
       <div class="automation-sort-head">
@@ -5855,13 +5878,15 @@ function renderAutomatorList(type, title, items){
         </select>
         <button type="button" class="automation-sort-direction" data-automator-direction="${type}" title="Inverter direção">${automatorSortPreference(type).direction === 'desc' ? '↓' : '↑'}</button>
         <button type="button" class="automation-sort-reverse" data-automator-reverse="${type}" title="Inverter lista">⇅</button>
+        ${clearBtnHtml}
       </div>
       <div class="automation-sort-items">
         ${items.length ? items.map((item, index) => `
           <button type="button" class="automation-sort-item" data-automator-type="${type}" data-automator-index="${index}" title="Arraste para alterar a ordem">
             <span class="automation-sort-grip" aria-hidden="true">::</span>
             <span class="automation-sort-number">${String(index + 1).padStart(2, '0')}</span>
-            <span class="automation-sort-name">${escapeHtml(automatorItemLabel(item, type))}</span>
+            <span class="automation-sort-name" title="${escapeHtml(automatorItemLabel(item, type))}">${escapeHtml(automatorItemLabel(item, type))}</span>
+            <span class="automation-item-remove" role="button" tabindex="0" data-automator-remove-type="${type}" data-automator-remove-index="${index}" title="Remover este item">✕</span>
           </button>
         `).join('') : `<p class="automation-sort-empty">${empty}</p>`}
       </div>
@@ -5892,15 +5917,51 @@ function refreshAutomatorListOrder(type){
   });
 }
 
+function automatorRowHealth(row){
+  const files = row.folder?.files || [];
+  const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
+  const iCount = files.filter(f => kindOfFile(f, 'video') === 'image').length;
+  const totalItems = vCount + iCount;
+  if(!row.audio && !totalItems) return {tag: '<span class="health-tag tag-neutral">Vazio</span>', ready: false};
+  if(!row.audio) return {tag: '<span class="health-tag tag-short">Sem áudio</span>', ready: false};
+  if(totalItems === 0) return {tag: '<span class="health-tag tag-short">Sem mídia</span>', ready: false};
+
+  const audioDur = (row.audio && state.durations.get(rel(row.audio))) || (row.audio ? Math.max(10, row.audio.size / 16000) : 0);
+  const mediaDur = (vCount * 5.0) + (iCount * 4.0);
+  const ratio = audioDur > 0 ? (mediaDur / audioDur) : 1;
+
+  if(ratio >= 0.98){
+    return {tag: '<span class="health-tag tag-ready" title="Mídia suficiente com folga">🟢 Pronto</span>', ready: true};
+  }
+  if(ratio >= 0.65){
+    return {tag: '<span class="health-tag tag-auto" title="Pequena falta: compensada automaticamente com fotos ou desaceleração suave">🟡 Ajuste Automático</span>', ready: true};
+  }
+  return {tag: `<span class="health-tag tag-short" title="Falta crítica de mídia (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🔴 Mídia Curta</span>`, ready: false};
+}
+
 function automatorTableRowsHtml(rows){
-  return rows.map(row => `
+  return rows.map(row => {
+    const files = row.folder?.files || [];
+    const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
+    const iCount = files.filter(f => kindOfFile(f, 'video') === 'image').length;
+    let detail = `${files.length} arquivo(s)`;
+    if(vCount > 0 && iCount > 0){
+      detail = `${vCount} vídeo(s), ${iCount} imagem(ns)`;
+    }else if(iCount > 0){
+      detail = `${iCount} imagem(ns)`;
+    }else if(vCount > 0){
+      detail = `${vCount} vídeo(s)`;
+    }
+    const health = automatorRowHealth(row);
+    return `
     <tr class="${row.occupied ? 'automation-row-blocked' : ''}">
       <td>${escapeHtml(row.project?.name || 'Projeto')}${row.occupied ? ' <small>ocupado</small>' : ''}</td>
       <td>${escapeHtml(row.srt?.name || '-')}</td>
       <td>${escapeHtml(row.audio?.name || '-')}</td>
-      <td>${escapeHtml(row.folder?.name || '-')} <small>${Number(row.folder?.files?.length || 0)} ficheiro(s)</small></td>
+      <td>${escapeHtml(row.folder?.name || '-')} <small>${detail}</small></td>
+      <td>${health.tag}</td>
     </tr>
-  `).join('');
+  `}).join('');
 }
 
 function refreshAutomatorPlanAfterReorder(){
@@ -5909,7 +5970,10 @@ function refreshAutomatorPlanAfterReorder(){
     automatorWarning.hidden = !plan.warnings.length;
     automatorWarning.textContent = plan.warnings.join(' ');
   }
+  const hasHealthy = plan.rows.some(r => automatorRowHealth(r).ready);
   if(automatorConfirmBtn) automatorConfirmBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
+  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || Boolean(plan.warnings.length);
+  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
   const tbody = automatorPreview?.querySelector('.automation-table tbody');
   if(tbody) tbody.innerHTML = automatorTableRowsHtml(plan.rows);
 }
@@ -5918,7 +5982,7 @@ function applyAutomatorFilesToProject(project, row){
   if(!project || !row) return [];
   const visualEntries = (row.folder?.files || [])
     .map(file => ({file, kind: kindOfFile(file, 'video')}))
-    .filter(item => item.kind === 'video');
+    .filter(item => item.kind === 'video' || item.kind === 'image');
   const audioEntries = row.audio ? [{file: row.audio, kind: 'audio'}] : [];
   const subtitleEntries = row.srt ? [{file: row.srt, kind: 'subtitle'}] : [];
   const entries = [...visualEntries, ...audioEntries, ...subtitleEntries];
@@ -6003,9 +6067,9 @@ function automatorPlan(){
   if(!state.projects.length) warnings.push('Crie pelo menos um projeto na fila.');
   if(!state.automator.srts.length) warnings.push('Selecione os Textos em SRT.');
   if(!state.automator.audios.length) warnings.push('Selecione arquivos de áudio.');
-  if(!state.automator.folders.length) warnings.push('Selecione pastas com vídeos.');
+  if(!state.automator.folders.length) warnings.push('Selecione pastas com mídia (vídeos e imagens).');
   if(targetCount && requiredCounts.some(count => count !== targetCount)){
-    warnings.push(`Quantidade diferente: ${state.automator.srts.length} Textos, ${state.automator.audios.length} áudio(s), ${state.automator.folders.length} pasta(s) com vídeos.`);
+    warnings.push(`Quantidade diferente: ${state.automator.srts.length} Textos, ${state.automator.audios.length} áudio(s), ${state.automator.folders.length} pasta(s) de mídia.`);
   }
   if(targetCount > available){
     warnings.push('Não existem projetos suficientes a partir do projeto selecionado para distribuir todos os ficheiros. Reduza a quantidade ou selecione outro projeto.');
@@ -6042,7 +6106,10 @@ function updateAutomatorPreview(){
     automatorWarning.hidden = !plan.warnings.length;
     automatorWarning.textContent = plan.warnings.join(' ');
   }
+  const hasHealthy = plan.rows.some(r => automatorRowHealth(r).ready);
   if(automatorConfirmBtn) automatorConfirmBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
+  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || Boolean(plan.warnings.length);
+  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
   if(!automatorPreview) return;
   const hasAnySelection = state.automator.srts.length || state.automator.audios.length || state.automator.folders.length;
   if(!hasAnySelection){
@@ -6065,16 +6132,18 @@ function updateAutomatorPreview(){
     ${listsHtml}
     <div class="automation-table-wrap">
       <table class="automation-table">
-        <thead><tr><th>Projeto</th><th>Textos</th><th>Áudio</th><th>Pasta com vídeos</th></tr></thead>
+        <thead><tr><th>Projeto</th><th>Textos</th><th>Áudio</th><th>Pasta com vídeos e imagens</th><th>Saúde do Lote</th></tr></thead>
         <tbody>${automatorTableRowsHtml(plan.rows)}</tbody>
       </table>
     </div>
   `;
 }
 
-async function applyAutomatorDistribution(){
+async function applyAutomatorDistribution(options = {}){
   const plan = automatorPlan();
-  if(plan.warnings.length || !plan.rows.length){
+  const onlyHealthy = Boolean(options?.onlyHealthy);
+  const rowsToApply = onlyHealthy ? plan.rows.filter(r => automatorRowHealth(r).ready) : plan.rows;
+  if(plan.warnings.length || !rowsToApply.length){
     updateAutomatorPreview();
     return;
   }
@@ -6084,6 +6153,14 @@ async function applyAutomatorDistribution(){
   if(automatorConfirmBtn){
     automatorConfirmBtn.disabled = true;
     automatorConfirmBtn.textContent = 'Preparando...';
+  }
+  if(automatorConfirmHealthyBtn){
+    automatorConfirmHealthyBtn.disabled = true;
+    automatorConfirmHealthyBtn.textContent = 'Preparando...';
+  }
+  if(automatorConfirmAndRenderBtn){
+    automatorConfirmAndRenderBtn.disabled = true;
+    automatorConfirmAndRenderBtn.textContent = 'Preparando...';
   }
   const previousActive = state.activeProjectId;
   const progress = (value, text) => {
@@ -6102,7 +6179,7 @@ async function applyAutomatorDistribution(){
       state.automatorSessionId = '';
     }
     const fileSpecs = [];
-    const sessionRows = plan.rows.map((row, rowIndex) => {
+    const sessionRows = rowsToApply.map((row, rowIndex) => {
       const projectId = row.project.id;
       const add = (file, kind, lane, relValue, suffix) => {
         if(!file) return;
@@ -6121,7 +6198,7 @@ async function applyAutomatorDistribution(){
       };
       (row.folder?.files || []).forEach((file, index) => {
         const kind = kindOfFile(file, 'video');
-        if(kind === 'video') add(file, 'video', 'folder', rel(file), index);
+        if(kind === 'video' || kind === 'image') add(file, kind, 'folder', rel(file), index);
       });
       add(row.audio, 'audio', 'audio', row.audio?.name, 0);
       add(row.srt, 'subtitle', 'srt', row.srt?.name, 0);
@@ -6170,9 +6247,15 @@ async function applyAutomatorDistribution(){
     const committed = await commitResponse.json();
     progress(97, 'Verificando projetos persistidos...');
     const expectedByProject = new Map(committed.projects.map(item => [item.projectId, item.counts]));
-    for(const row of plan.rows){
+    for(const row of rowsToApply){
       const counts = expectedByProject.get(row.project.id);
-      if(!counts || counts.videos < 1 || counts.audios !== 1 || counts.texts !== 1){
+      const expectedAudios = row.audio ? 1 : 0;
+      const expectedTexts = row.srt ? 1 : 0;
+      const expectedVisuals = (row.folder?.files || []).filter(f => {
+        const k = kindOfFile(f, 'video');
+        return k === 'video' || k === 'image';
+      }).length;
+      if(!counts || (expectedVisuals > 0 && counts.videos !== expectedVisuals) || counts.audios !== expectedAudios || counts.texts !== expectedTexts){
         throw new Error(`Verificação falhou em ${row.project.name}: contagens incompletas.`);
       }
     }
@@ -6181,10 +6264,10 @@ async function applyAutomatorDistribution(){
     loadProject(state.activeProjectId || state.projects[0]?.id, {capture: false, force: true});
     renderProjectQueue();
     updateStats();
-    progress(100, `${plan.rows.length} projeto(s) distribuído(s) e verificado(s).`);
+    progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`);
     state.automatorApplying = false;
     closeAutomator();
-    if(dockSummary) dockSummary.textContent = `AUTO concluído: ${plan.rows.length} projeto(s) receberam mídia com persistência verificada.`;
+    if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
   }catch(error){
     const cancelled = error?.name === 'AbortError';
     const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
@@ -6197,6 +6280,14 @@ async function applyAutomatorDistribution(){
     if(automatorConfirmBtn){
       automatorConfirmBtn.textContent = 'Confirmar';
       automatorConfirmBtn.disabled = Boolean(automatorPlan().warnings.length);
+    }
+    if(automatorConfirmHealthyBtn){
+      automatorConfirmHealthyBtn.textContent = 'Renderizar Saudáveis';
+      automatorConfirmHealthyBtn.disabled = !plan.rows.some(r => automatorRowHealth(r).ready) || Boolean(automatorPlan().warnings.length);
+    }
+    if(automatorConfirmAndRenderBtn){
+      automatorConfirmAndRenderBtn.textContent = 'Confirmar & Renderizar Agora';
+      automatorConfirmAndRenderBtn.disabled = Boolean(automatorPlan().warnings.length);
     }
   }
 }
@@ -7076,19 +7167,6 @@ if(renderBudgetToggle){
     }
   });
 }
-if(eagleModeBtn){
-  eagleModeBtn.addEventListener('click', () => {
-    if(state.renderPriority === 'max'){
-      if(dockSummary) dockSummary.textContent = 'Modo Águia fica suspenso no Turbo Produção para renderizar mais rápido.';
-      applyRenderPriorityUi();
-      return;
-    }
-    if(!smartVisualDirectorToggle) return;
-    smartVisualDirectorToggle.checked = !smartVisualDirectorToggle.checked;
-    smartVisualDirectorToggle.dispatchEvent(new Event('change', {bubbles: true}));
-    playUiSound('toggle');
-  });
-}
 if(sidebarToggle){
   sidebarToggle.addEventListener('click', () => {
     state.sidebarCollapsed = !state.sidebarCollapsed;
@@ -7661,6 +7739,7 @@ if(automatorPreview){
 
   automatorPreview.addEventListener('pointerdown', event => {
     if(event.button !== 0) return;
+    if(event.target.closest('button,a,input,select,textarea,.automation-item-remove,.automation-sort-clear,[data-no-drag]')) return;
     const item = event.target.closest('.automation-sort-item');
     if(!item) return;
     event.preventDefault();
@@ -7684,6 +7763,81 @@ if(automatorPreview){
       placeAfter: false,
     };
     item.setPointerCapture?.(event.pointerId);
+  });
+
+  automatorPreview.addEventListener('click', event => {
+    const removeBtn = event.target.closest('.automation-item-remove');
+    if(removeBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const type = removeBtn.dataset.automatorRemoveType;
+      const index = Number(removeBtn.dataset.automatorRemoveIndex);
+      removeAutomatorItem(type, index);
+      return;
+    }
+    const clearBtn = event.target.closest('.automation-sort-clear');
+    if(clearBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const type = clearBtn.dataset.automatorClear;
+      clearAutomatorList(type);
+      return;
+    }
+  });
+
+  ['dragenter', 'dragover'].forEach(type => {
+    automatorPreview.addEventListener(type, event => {
+      event.preventDefault();
+      const listEl = event.target.closest('[data-automator-list]');
+      automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => {
+        el.classList.toggle('automation-drop-active', Boolean(listEl && el === listEl));
+      });
+    });
+  });
+  ['dragleave', 'drop'].forEach(type => {
+    automatorPreview.addEventListener(type, event => {
+      if(type !== 'drop') automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => el.classList.remove('automation-drop-active'));
+    });
+  });
+  automatorPreview.addEventListener('drop', async event => {
+    event.preventDefault();
+    automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => el.classList.remove('automation-drop-active'));
+    const listEl = event.target.closest('[data-automator-list]');
+    const files = await automatorFilesFromDrop(event.dataTransfer).catch(() => []);
+    if(!files.length) return;
+    const targetType = listEl?.dataset.automatorList;
+    if(targetType === 'folder'){
+      const added = appendAutomatorFolders(files);
+      if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
+      if(added) sortAutomatorItems('folder');
+      else updateAutomatorPreview();
+    }else if(targetType === 'srt'){
+      const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
+      if(srtFiles.length){
+        state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
+        sortAutomatorItems('srt');
+      }
+    }else if(targetType === 'audio'){
+      const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
+      if(audioFiles.length){
+        state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
+        sortAutomatorItems('audio');
+        hydrateAutomatorDurations('audio', state.automator.audios);
+      }
+    }else{
+      const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
+      const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
+      const folderAdded = appendAutomatorFolders(files);
+      if(srtFiles.length) state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
+      if(audioFiles.length){
+        state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
+        hydrateAutomatorDurations('audio', state.automator.audios);
+      }
+      if(srtFiles.length) sortAutomatorItems('srt');
+      if(audioFiles.length) sortAutomatorItems('audio');
+      if(folderAdded) sortAutomatorItems('folder');
+      else updateAutomatorPreview();
+    }
   });
 
   automatorPreview.addEventListener('pointermove', event => {
@@ -7732,28 +7886,52 @@ if(automatorPreview){
 if(automatorPickSrt) automatorPickSrt.addEventListener('click', () => automatorSrtInput?.click());
 if(automatorPickAudio) automatorPickAudio.addEventListener('click', () => automatorAudioInput?.click());
 if(automatorPickFolders) automatorPickFolders.addEventListener('click', () => automatorVideoFolderInput?.click());
-if(automatorPickFolders){
+
+function bindAutomatorPickerDrop(element, handler){
+  if(!element) return;
   ['dragenter', 'dragover'].forEach(type => {
-    automatorPickFolders.addEventListener(type, event => {
+    element.addEventListener(type, event => {
       event.preventDefault();
-      automatorPickFolders.classList.add('automation-drop-active');
+      element.classList.add('automation-drop-active');
     });
   });
   ['dragleave', 'drop'].forEach(type => {
-    automatorPickFolders.addEventListener(type, event => {
-      if(type !== 'drop') automatorPickFolders.classList.remove('automation-drop-active');
+    element.addEventListener(type, event => {
+      if(type !== 'drop') element.classList.remove('automation-drop-active');
     });
   });
-  automatorPickFolders.addEventListener('drop', async event => {
+  element.addEventListener('drop', async event => {
     event.preventDefault();
-    automatorPickFolders.classList.remove('automation-drop-active');
+    element.classList.remove('automation-drop-active');
     const files = await automatorFilesFromDrop(event.dataTransfer).catch(() => []);
-    const added = appendAutomatorFolders(files);
-    if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
-    if(added) sortAutomatorItems('folder');
-    else updateAutomatorPreview();
+    if(!files.length) return;
+    handler(files);
   });
 }
+
+bindAutomatorPickerDrop(automatorPickFolders, files => {
+  const added = appendAutomatorFolders(files);
+  if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
+  if(added) sortAutomatorItems('folder');
+  else updateAutomatorPreview();
+});
+
+bindAutomatorPickerDrop(automatorPickSrt, files => {
+  const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
+  if(srtFiles.length){
+    state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
+    sortAutomatorItems('srt');
+  }
+});
+
+bindAutomatorPickerDrop(automatorPickAudio, files => {
+  const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
+  if(audioFiles.length){
+    state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
+    sortAutomatorItems('audio');
+    hydrateAutomatorDurations('audio', state.automator.audios);
+  }
+});
 if(automatorSrtInput) automatorSrtInput.addEventListener('change', event => {
   state.automator.srts = annotateAutomatorItems(
     Array.from(event.target.files || []).filter(file => kindOfFile(file, 'subtitle') === 'subtitle')
@@ -7778,6 +7956,26 @@ if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
   applyAutomatorDistribution().catch(error => {
     if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
   });
+});
+if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.addEventListener('click', async () => {
+  try{
+    await applyAutomatorDistribution({onlyHealthy: true});
+    renderQueue().catch(err => {
+      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
+    });
+  }catch(error){
+    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
+  }
+});
+if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.addEventListener('click', async () => {
+  try{
+    await applyAutomatorDistribution();
+    renderQueue().catch(err => {
+      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
+    });
+  }catch(error){
+    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
+  }
 });
 if(retryFailedBtn) retryFailedBtn.addEventListener('click', retryFailedRenders);
 if(safeRenderBtn) safeRenderBtn.addEventListener('click', renderSafeCurrentProject);

@@ -33,7 +33,7 @@ _boot_smoke_trace("boot:uvicorn-ready")
 
 HOST = "127.0.0.1"
 SERVER_READY_TIMEOUT = 20
-APP_VERSION = "1.29.0"
+APP_VERSION = "1.31.0"
 DATA_ROOT: Path | None = None
 BACKEND_APP = None
 _INSTANCE_MUTEX = None
@@ -529,7 +529,7 @@ def smoke_test(runtime: DesktopRuntime):
         "/static/app.js",
         "/static/modules/runtime-config.js",
         "/static/style.css",
-        "/assets/eagle_glide.png",
+        "/assets/glide_studio_icon_256.png",
         "/assets/glide_studio.ico",
         "/assets/glide_studio_icon_32.png",
         "/assets/glide_studio_icon_48.png",

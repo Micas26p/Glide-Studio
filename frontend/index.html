@@ -4,16 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Glide Studio - App Local</title>
-  <link rel="icon" href="/assets/glide_studio.ico?v=1.29.0" sizes="any" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/assets/glide_studio_icon_32.png?v=1.29.0" />
-  <link rel="icon" type="image/png" sizes="48x48" href="/assets/glide_studio_icon_48.png?v=1.29.0" />
-  <link rel="icon" type="image/png" sizes="256x256" href="/assets/glide_studio_icon_256.png?v=1.29.0" />
-  <link rel="icon" type="image/png" sizes="512x512" href="/assets/glide_studio_icon.png?v=1.29.0" />
-  <link rel="shortcut icon" href="/assets/glide_studio.ico?v=1.29.0" />
-  <link rel="apple-touch-icon" href="/assets/glide_studio_icon_256.png?v=1.29.0" />
-  <link rel="manifest" href="/assets/site.webmanifest?v=1.29.0" />
+  <link rel="icon" href="/assets/glide_studio.ico?v=1.31.0" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/glide_studio_icon_32.png?v=1.31.0" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/assets/glide_studio_icon_48.png?v=1.31.0" />
+  <link rel="icon" type="image/png" sizes="256x256" href="/assets/glide_studio_icon_256.png?v=1.31.0" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/assets/glide_studio_icon.png?v=1.31.0" />
+  <link rel="shortcut icon" href="/assets/glide_studio.ico?v=1.31.0" />
+  <link rel="apple-touch-icon" href="/assets/glide_studio_icon_256.png?v=1.31.0" />
+  <link rel="manifest" href="/assets/site.webmanifest?v=1.31.0" />
   <meta name="theme-color" content="#080a09" />
-  <link rel="stylesheet" href="/static/style.css?v=1.29.0" />
+  <link rel="stylesheet" href="/static/style.css?v=1.31.0" />
 </head>
 <body data-theme="system">
   <div class="editor-intro" id="editorIntro" aria-hidden="true">
@@ -35,7 +35,7 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <div>
         <strong>Glide Studio</strong>
-        <span>App Local v1.29.0</span>
+        <span>App Local v1.31.0</span>
       </div>
     </div>
     <nav>
@@ -67,13 +67,6 @@
           <span>Tempo estimado</span>
           <strong>Aguardando duração do áudio</strong>
         </div>
-        <button type="button" class="eagle-mode-button" id="eagleModeBtn" title="Diretor Visual Inteligente">
-          <span class="eagle-mode-mark" aria-hidden="true"></span>
-          <span class="eagle-mode-copy">
-          <strong>Modo Águia</strong>
-            <small id="eagleModeState">Ativo</small>
-          </span>
-        </button>
         <button type="button" class="btn ghost small settings-button" id="settingsBtn" title="Configurações e utilitários">Config</button>
         <div class="health" id="healthBadge">Verificando motor...</div>
       </div>
@@ -148,7 +141,7 @@
             <span id="automatorAudioCount">MP3, MP4 ou WAV</span>
           </button>
           <button type="button" class="automation-picker" id="automatorPickFolders">
-            <strong>Adicionar pastas com vídeos</strong>
+            <strong>Adicionar pastas com vídeos e imagens</strong>
             <span id="automatorFolderCount">0 pasta(s)</span>
           </button>
         </div>
@@ -158,11 +151,13 @@
           <progress id="automatorProgressBar" max="100" value="0"></progress>
         </div>
         <div class="automation-preview" id="automatorPreview">
-          <p class="queue-report-empty">Selecione Textos, áudios e pastas para ver a pré-visualização. Você também pode arrastar várias pastas de vídeos para o cartão de pastas.</p>
+          <p class="queue-report-empty">Selecione Textos, áudios e pastas para ver a pré-visualização. Você pode arrastar pastas com vídeos e imagens, soltar arquivos nas listas e remover qualquer item no botão ✕ sem reiniciar.</p>
         </div>
         <div class="modal-actions">
           <button type="button" class="btn ghost" id="automatorCancelBtn">Cancelar</button>
           <button type="button" class="btn automation-confirm" id="automatorConfirmBtn" disabled>Confirmar</button>
+          <button type="button" class="btn export" id="automatorConfirmHealthyBtn" disabled title="Aplica apenas nos projetos com mídia e áudio saudáveis e inicia a renderização imediatamente">Renderizar Saudáveis</button>
+          <button type="button" class="btn primary" id="automatorConfirmAndRenderBtn" disabled title="Aplica a distribuição nos projetos e inicia a renderização da fila imediatamente">Confirmar &amp; Renderizar Agora</button>
         </div>
       </div>
     </div>
@@ -182,7 +177,7 @@
         <p>Envie vídeos, imagens e áudios em partes. Cada novo envio entra na timeline sem apagar o que já foi carregado.</p>
         <div class="upload-actions">
           <button type="button" class="btn primary" id="pickFolder">Adicionar pasta</button>
-          <button type="button" class="btn ghost" id="pickVideos">Vídeos</button>
+          <button type="button" class="btn ghost" id="pickVideos">Vídeos e Imagens</button>
           <button type="button" class="btn ghost" id="pickAudios">Áudios</button>
           <button type="button" class="btn ghost" id="pickBackground">Músicas de fundo</button>
           <button type="button" class="btn ghost" id="pickSubtitles">Textos</button>
@@ -323,6 +318,7 @@
           <span id="visualFilterHint" class="sr-only">Normal: filtro manual ativo em todo o vídeo; imagens permanecem rigorosas.</span>
           <label class="toggle"><input id="voiceNormalizeToggle" type="checkbox" checked /> <span>Voz nivelada</span></label>
           <label class="toggle"><input id="autoSoundFxToggle" type="checkbox" checked /> <span>Efeitos sonoros automáticos</span></label>
+          <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render."><input id="allowAudioTrimToggle" type="checkbox" checked /> <span>Sacrificar áudio se faltar mídia</span></label>
         </div>
         <div class="intro-panel advanced-only" id="introPanel">
           <div class="intro-head">
@@ -849,14 +845,10 @@
             <option value="light">Claro</option>
           </select>
         </label>
-        <label class="theme-control render-priority-control" title="Perfil global para todos os projetos da fila. Turbo prioriza velocidade, Eficiente equilibra qualidade e tempo, Qualidade Máxima libera recursos premium.">
-          <span>Render global</span>
-          <select id="renderPrioritySelect" aria-label="Modo de render">
-            <option value="max">Turbo Produção</option>
-            <option value="balanced">Eficiente Inteligente</option>
-            <option value="quality">Qualidade Máxima</option>
-          </select>
-        </label>
+        <div class="theme-control render-priority-control" title="Motor único de alta performance: 1080p Full HD com aceleração por hardware GPU e máxima fidelidade visual.">
+          <span>Motor de Render</span>
+          <strong style="color:var(--accent,#10b981);font-size:0.88rem;">1080p Ultra Performance</strong>
+        </div>
         <label class="toggle compact" title="Quando ativo, o Glide interrompe renders que passam muito do limite do modo. Desative se preferir concluir renders que ultrapassem um pouco o tempo previsto.">
           <input type="checkbox" id="renderBudgetToggle" checked />
           <span>Proteção de tempo</span>
@@ -1042,8 +1034,8 @@
     </div>
   </div>
 
-  <script src="/static/modules/runtime-config.js?v=1.29.0"></script>
-  <script src="/static/app.js?v=1.29.0"></script>
+  <script src="/static/modules/runtime-config.js?v=1.31.0"></script>
+  <script src="/static/app.js?v=1.31.0"></script>
 </body>
 </html>
 
