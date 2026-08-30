@@ -13859,7 +13859,7 @@ def _needs_interleaving(pairs: list[tuple[Path, float]]) -> bool:
 def find_smart_sentence_snap(
     srt_path: Path | str | None,
     max_duration: float,
-    min_duration: float = 10.0,
+    min_duration: float = 6.0,
 ) -> float | None:
     """Localiza o fim da última frase completa (. ! ?) no SRT antes de max_duration para um fechamento semântico perfeito."""
     if not srt_path:
@@ -13897,18 +13897,14 @@ def find_smart_sentence_snap(
     if not candidates:
         return None
 
-    # Prioridade 1: frases com pontuação final (. ! ?) nos últimos 28s antes do limite
-    sentence_ends = [c[0] for c in candidates if c[1] and c[0] >= (max_duration - 28.0)]
+    # Prioridade 1: frases com pontuação final (. ! ?) antes do limite
+    sentence_ends = [c[0] for c in candidates if c[1]]
     if sentence_ends:
         snap = min(max_duration, sentence_ends[-1] + 0.6)
         return round(snap, 3)
 
-    # Prioridade 2: qualquer legenda final nos últimos 15s
-    recent = [c[0] for c in candidates if c[0] >= (max_duration - 15.0)]
-    if recent:
-        return round(min(max_duration, recent[-1] + 0.5), 3)
-
-    return None
+    # Prioridade 2: qualquer legenda antes do limite
+    return round(min(max_duration, candidates[-1][0] + 0.5), 3)
 
 
 def build_segment_plan(
@@ -13961,7 +13957,7 @@ def build_segment_plan(
             max_achievable = (T_v * setpts_factor) + (N_i * img_dur)
             
             # Smart Sentence Snap: alinhar ao ponto final (. ! ?) mais próximo do SRT
-            snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=12.0)
+            snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=6.0)
             if snapped and snapped <= max_achievable:
                 audio_total = max(8.0, min(orig_audio_total, snapped))
                 smart_snapped = True
