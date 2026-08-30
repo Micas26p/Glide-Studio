@@ -994,6 +994,7 @@ class Job:
     audio_master_summary: dict[str, Any] = field(default_factory=dict)
     learning_summary: dict[str, Any] = field(default_factory=dict)
     subtitle_cues: list["SubtitleCue"] = field(default_factory=list)
+    srt_path: Path | str | None = None
     work: Path | None = None
     export_dir: Path | None = None
     thread_started: bool = False
@@ -14317,6 +14318,7 @@ def make_segments_smart(
     codec: str,
     gpu: bool,
     work: Path,
+    subtitles: list[Path] | None = None,
 ) -> list[Path]:
     if not video_files:
         raise RuntimeError("Nenhum video encontrado. Envie clipes reais para a timeline.")
@@ -14400,7 +14402,16 @@ def make_segments_smart(
                 })
         performance_stop(job, "visual_windows")
     allow_audio_trim = bool(job.options.get("allowAudioTrim", True))
-    srt_file = job.srt_path if job.srt_path and Path(str(job.srt_path)).exists() else None
+    srt_file = None
+    if subtitles:
+        srt_file = subtitles[0] if Path(str(subtitles[0])).exists() else None
+    if not srt_file and hasattr(job, "upload_paths"):
+        for p in job.upload_paths.values():
+            if str(p).lower().endswith(".srt") and p.exists():
+                srt_file = p
+                break
+    if not srt_file and getattr(job, "srt_path", None) and Path(str(job.srt_path)).exists():
+        srt_file = Path(str(job.srt_path))
     plans, summary = build_segment_plan(video_files, video_durs, audio_total, min_speed=min_speed, source_offsets=source_offsets, allow_audio_trim=allow_audio_trim, srt_path=srt_file)
     if summary.get("audio_trimmed"):
         audio_total = float(summary["audio_duration"])
@@ -17035,6 +17046,7 @@ def render_worker(job_id: str):
                 codec=job.options.get("codec", "hevc"),
                 gpu=bool(job.options.get("gpu", False)),
                 work=job.work,
+                subtitles=subtitles,
             )
             graph.commit(
                 stage="segments",
