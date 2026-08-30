@@ -297,6 +297,7 @@ const automatorBtn = $('#automatorBtn');
 const automatorModal = $('#automatorModal');
 const automatorCloseBtn = $('#automatorCloseBtn');
 const automatorCancelBtn = $('#automatorCancelBtn');
+const automatorAutoHealBtn = $('#automatorAutoHealBtn');
 const automatorConfirmBtn = $('#automatorConfirmBtn');
 const automatorConfirmHealthyBtn = $('#automatorConfirmHealthyBtn');
 const automatorConfirmAndRenderBtn = $('#automatorConfirmAndRenderBtn');
@@ -5971,6 +5972,7 @@ function refreshAutomatorPlanAfterReorder(){
     automatorWarning.textContent = plan.warnings.join(' ');
   }
   const hasHealthy = plan.rows.some(r => automatorRowHealth(r).ready);
+  if(automatorAutoHealBtn) automatorAutoHealBtn.disabled = !plan.rows.length;
   if(automatorConfirmBtn) automatorConfirmBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
   if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || Boolean(plan.warnings.length);
   if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
@@ -7951,6 +7953,20 @@ if(automatorVideoFolderInput) automatorVideoFolderInput.addEventListener('change
   event.target.value = '';
   if(added) sortAutomatorItems('folder');
   else updateAutomatorPreview();
+});
+if(automatorAutoHealBtn) automatorAutoHealBtn.addEventListener('click', () => {
+  const plan = automatorPlan();
+  if(!plan.rows.length) return;
+  state.projects.forEach(p => {
+    if(!p.options) p.options = defaultProjectOptions();
+    p.options.allowAudioTrim = true;
+  });
+  if(dockSummary) dockSummary.textContent = '🪄 Auto-Healer aplicado: todos os projetos com déficit de mídia foram ajustados para renderização sem falhas com sacrifício de áudio e ritmo saudável!';
+  if(automatorConfirmBtn) automatorConfirmBtn.disabled = false;
+  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = false;
+  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = false;
+  automatorAutoHealBtn.textContent = '✨ Lote Balanceado!';
+  setTimeout(() => { if(automatorAutoHealBtn) automatorAutoHealBtn.textContent = '🪄 Auto-Healer (Balancear Lote)'; }, 3000);
 });
 if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
   applyAutomatorDistribution().catch(error => {

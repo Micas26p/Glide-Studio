@@ -8577,6 +8577,10 @@ def mix_voiceover_with_background(
     adaptive = True
     base_db = background_volume_db(job.options)
     pause_ceiling = background_pause_ceiling_db(job.options)
+    act1_end = min(12.0, max(3.0, audio_total * 0.10))
+    act3_start = max(act1_end + 5.0, audio_total * 0.85)
+    act_curve = f",volume=volume='if(lt(t\\,{act1_end:.1f})\\,1.20\\,if(gt(t\\,{act3_start:.1f})\\,1.18\\,1.0))':eval=frame"
+
     if intro_seconds > 0:
         intro_db = intro_music_db(job.options)
         target_db = background_volume_db(job.options)
@@ -8584,7 +8588,7 @@ def mix_voiceover_with_background(
         intro_fade = clamp_float(job.options.get("introMusicFade"), 0.65, 0.2, 1.5)
         intro_out = max(0.0, intro_seconds - intro_fade)
         music_shape = (
-            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={intro_db:.1f}dB[music_raw];"
+            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={intro_db:.1f}dB{act_curve}[music_raw];"
             "[music_raw]asplit=2[mintro_src][mmain_src];"
             f"[mintro_src]atrim=0:{intro_seconds:.3f},asetpts=PTS-STARTPTS,"
             f"afade=t=in:st=0:d={intro_fade:.3f},"
@@ -8606,22 +8610,22 @@ def mix_voiceover_with_background(
                 + music_shape +
                 "[voice][music_raw2]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
             )
-        mix_message = "Mixando intro Cinematic: música abre e baixa suavemente quando a narração entra"
+        mix_message = "Mixando intro Cinematic: música abre e baixa suavemente com curva de 3 atos"
     elif ducking:
         mix_filter = (
             f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB[music_raw];"
+            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB{act_curve}[music_raw];"
             f"[music_raw][voice]sidechaincompress=threshold=0.032:ratio=4.0:attack=45:release=650:makeup=1.0,alimiter=limit=0.92[music];"
             f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
-        mix_message = "Mixando narração com música de fundo dinâmica e respiro suave em pausas"
+        mix_message = "Mixando narração com música dinâmica, curva de 3 atos e respiro suave em pausas"
     else:
         mix_filter = (
             f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB[music];"
+            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB{act_curve}[music];"
             f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
-        mix_message = "Mixando narração com música de fundo baixa"
+        mix_message = "Mixando narração com música de fundo e curva de 3 atos"
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
         "-i", str(voiceover_file),
@@ -13852,6 +13856,61 @@ def _needs_interleaving(pairs: list[tuple[Path, float]]) -> bool:
     return False
 
 
+def find_smart_sentence_snap(
+    srt_path: Path | str | None,
+    max_duration: float,
+    min_duration: float = 10.0,
+) -> float | None:
+    """Localiza o fim da última frase completa (. ! ?) no SRT antes de max_duration para um fechamento semântico perfeito."""
+    if not srt_path:
+        return None
+    p = Path(str(srt_path))
+    if not p.exists() or p.stat().st_size <= 0:
+        return None
+    try:
+        content = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return None
+
+    blocks = re.findall(
+        r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]*?)(?=\n\n|\Z)",
+        content,
+    )
+    if not blocks:
+        return None
+
+    def parse_srt_ts(ts: str) -> float:
+        ts = ts.replace(",", ".")
+        parts = ts.split(":")
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        return 0.0
+
+    candidates = []
+    for start_str, end_str, text in blocks:
+        end_sec = parse_srt_ts(end_str)
+        cleaned_text = re.sub(r"<[^>]+>", "", text).strip()
+        has_sentence_end = bool(re.search(r"[\.!\?]['\"»”]?\s*$", cleaned_text))
+        if min_duration <= end_sec <= max_duration:
+            candidates.append((end_sec, has_sentence_end, cleaned_text))
+
+    if not candidates:
+        return None
+
+    # Prioridade 1: frases com pontuação final (. ! ?) nos últimos 28s antes do limite
+    sentence_ends = [c[0] for c in candidates if c[1] and c[0] >= (max_duration - 28.0)]
+    if sentence_ends:
+        snap = min(max_duration, sentence_ends[-1] + 0.6)
+        return round(snap, 3)
+
+    # Prioridade 2: qualquer legenda final nos últimos 15s
+    recent = [c[0] for c in candidates if c[0] >= (max_duration - 15.0)]
+    if recent:
+        return round(min(max_duration, recent[-1] + 0.5), 3)
+
+    return None
+
+
 def build_segment_plan(
     video_files: list[Path],
     video_durs: list[float],
@@ -13859,6 +13918,7 @@ def build_segment_plan(
     min_speed: float = MIN_VIDEO_SPEED,
     source_offsets: dict[str, float] | None = None,
     allow_audio_trim: bool = True,
+    srt_path: Path | str | None = None,
 ) -> tuple[list[SegmentPlan], dict[str, Any]]:
     import math
 
@@ -13889,18 +13949,25 @@ def build_segment_plan(
     # PASSO 6 & 7: Comparar duração visual com duração da narração e classificar cenário
     orig_audio_total = audio_total
     audio_trimmed = False
+    smart_snapped = False
     ratio = T_total / max(0.1, audio_total)
 
     # CENÁRIO: Falta Crítica de Mídia (T_total < 65% da narração)
     if ratio < 0.65 and T_total < (audio_total - 12.0):
         if allow_audio_trim:
-            # Estratégia de Sacrifício de Áudio:
-            # 1. Estende a mídia disponível até o limite saudável (fotos até 5.5s, vídeos até 1.15x)
-            # 2. Encurta a narração e o áudio total ao tamanho da mídia disponível com corte suave
+            # Estratégia de Sacrifício de Áudio Inteligente com SRT Smart Sentence Snap:
             img_dur = 5.5 if N_i > 0 else base_img_dur
             setpts_factor = 1.15 if T_v > 0 else 1.0
             max_achievable = (T_v * setpts_factor) + (N_i * img_dur)
-            audio_total = max(8.0, min(orig_audio_total, max_achievable))
+            
+            # Smart Sentence Snap: alinhar ao ponto final (. ! ?) mais próximo do SRT
+            snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=12.0)
+            if snapped and snapped <= max_achievable:
+                audio_total = max(8.0, min(orig_audio_total, snapped))
+                smart_snapped = True
+            else:
+                audio_total = max(8.0, min(orig_audio_total, max_achievable))
+                
             audio_trimmed = True
             ratio = 1.0
         else:
@@ -13943,10 +14010,10 @@ def build_segment_plan(
                 img_dur = max(3.0, min(5.0, round((audio_total - T_v) / N_i, 3)))
 
     # PASSO 9: Cumprimento rigoroso da ordem natural da pasta (fidelidade 100% à sequência)
-    # Se houver 10 vídeos seguidos ou 20 imagens seguidas, essa ordem exata é estritamente mantida.
     ordered_items = list(pairs)
 
-    # PASSO 10: Montagem da timeline
+    # PASSO 10: Montagem da timeline com Organic Micro-Pace Oscillation
+    PACE_HARMONICS = [0.92, 1.08, 0.95, 1.05, 1.00]
     plans: list[SegmentPlan] = []
     remaining = audio_total
     image_counter = 0
@@ -13956,7 +14023,11 @@ def build_segment_plan(
             break
         is_img = is_image_path(src)
         if is_img:
-            target = min(img_dur, remaining)
+            # Organic Micro-Pace: cadência harmônica áurea para evitar ritmo métrico robótico
+            pace_factor = PACE_HARMONICS[image_counter % len(PACE_HARMONICS)]
+            target_candidate = round(img_dur * pace_factor, 3)
+            target = max(2.5, min(6.0, target_candidate))
+            target = min(target, remaining)
             motion = IMAGE_MOTIONS[image_counter % len(IMAGE_MOTIONS)]
             image_counter += 1
             if target >= 0.08:
@@ -14001,10 +14072,12 @@ def build_segment_plan(
         raise RuntimeError("Nenhum segmento pôde ser gerado para a timeline.")
 
     playback_speed = 1.0 / setpts_factor
+    actual_duration = sum(p.target_duration for p in plans)
     summary = {
         "audio_duration": round(audio_total, 3),
         "original_audio_duration": round(orig_audio_total, 3),
         "audio_trimmed": audio_trimmed,
+        "smart_snapped": smart_snapped,
         "raw_video_duration": round(T_v, 3),
         "raw_image_potential": round(T_i, 3),
         "total_available_media_duration": round(T_total, 3),
@@ -14014,19 +14087,19 @@ def build_segment_plan(
         "min_speed": min_speed,
         "applied_image_duration": round(img_dur, 2),
         "segments": len(plans),
+        "planned_duration": actual_duration,
         "video_segments": sum(1 for plan in plans if plan.media_kind == "video"),
         "image_segments": sum(1 for plan in plans if plan.media_kind == "image"),
         "images_used": len({plan.source_index for plan in plans if plan.media_kind == "image"}),
         "unique_clips_used": len({plan.source_index for plan in plans}),
         "dropped_clips": max(0, len(ordered_items) - len(plans)),
-        "reused_segments": 0,
-        "quality_boost": True,
-        "planned_duration": round(sum(plan.target_duration for plan in plans), 3),
         "image_motion_summary": {
             motion: sum(1 for plan in plans if plan.image_motion == motion)
             for motion in IMAGE_MOTIONS
             if any(plan.image_motion == motion for plan in plans)
         },
+        "reused_segments": 0,
+        "quality_boost": True,
     }
     return plans, summary
 
@@ -14331,10 +14404,14 @@ def make_segments_smart(
                 })
         performance_stop(job, "visual_windows")
     allow_audio_trim = bool(job.options.get("allowAudioTrim", True))
-    plans, summary = build_segment_plan(video_files, video_durs, audio_total, min_speed=min_speed, source_offsets=source_offsets, allow_audio_trim=allow_audio_trim)
+    srt_file = job.srt_path if job.srt_path and Path(str(job.srt_path)).exists() else None
+    plans, summary = build_segment_plan(video_files, video_durs, audio_total, min_speed=min_speed, source_offsets=source_offsets, allow_audio_trim=allow_audio_trim, srt_path=srt_file)
     if summary.get("audio_trimmed"):
         audio_total = float(summary["audio_duration"])
-        _append_log(job, f"Ajuste de Mídia: Áudio sacrificado/encurtado de {summary.get('original_audio_duration', 0):.1f}s para {audio_total:.1f}s com fade suave para respeitar a mídia disponível sem repetições.")
+        if summary.get("smart_snapped"):
+            _append_log(job, f"SRT Smart Sentence Snap: Áudio ajustado ao ponto final da frase em {audio_total:.1f}s (reduzido de {summary.get('original_audio_duration', 0):.1f}s) com fade suave e encerramento semântico perfeito.")
+        else:
+            _append_log(job, f"Ajuste de Mídia: Áudio sacrificado/encurtado de {summary.get('original_audio_duration', 0):.1f}s para {audio_total:.1f}s com fade suave para respeitar a mídia disponível sem repetições.")
     job.timeline_summary = summary
     summary["original_clip_count"] = original_video_count
     summary["valid_clip_count"] = len(video_files)
