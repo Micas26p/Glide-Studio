@@ -14325,34 +14325,28 @@ def build_image_filter_complex(
 
     fx, fy = focal_point if focal_point else probe_image_focal_anchor(image_path)
 
-    # Smart Dynamic Zoom Anchor: movimento orgânico convergindo ou partindo do centróide real da foto
+    # Movimento cinematográfico contínuo, fluido e sem tremor subpixel
     if motion == "zoom_in":
-        z_expr = f"min(1.000+0.055*{progress},1.055)"
+        z_expr = f"min(1.000+0.100*{progress},1.100)"
         x_expr = f"(iw-iw/zoom)*{fx:.3f}"
         y_expr = f"(ih-ih/zoom)*{fy:.3f}"
     elif motion == "zoom_out":
-        z_expr = f"max(1.055-0.055*{progress},1.000)"
+        z_expr = f"max(1.100-0.100*{progress},1.000)"
         x_expr = f"(iw-iw/zoom)*{fx:.3f}"
         y_expr = f"(ih-ih/zoom)*{fy:.3f}"
     elif motion == "pan_right":
-        z_expr = "1.055"
-        start_x = max(0.10, fx - 0.20)
-        end_x = min(0.90, fx + 0.20)
-        span_x = end_x - start_x
-        x_expr = f"(iw-iw/zoom)*({start_x:.3f}+{span_x:.3f}*{progress})"
+        z_expr = "1.100"
+        x_expr = f"(iw-iw/zoom)*{progress}"
         y_expr = f"(ih-ih/zoom)*{fy:.3f}"
     else:  # pan_left
-        z_expr = "1.055"
-        start_x = min(0.90, fx + 0.20)
-        end_x = max(0.10, fx - 0.20)
-        span_x = start_x - end_x
-        x_expr = f"(iw-iw/zoom)*({start_x:.3f}-{span_x:.3f}*{progress})"
+        z_expr = "1.100"
+        x_expr = f"(iw-iw/zoom)*(1.0-{progress})"
         y_expr = f"(ih-ih/zoom)*{fy:.3f}"
 
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
     filmic_chain = f",{filmic_grade}" if filmic_grade else ""
 
-    # Micro-fade cinematográfico (0.28s suave) ou fade out suave de encerramento
+    # Micro-fade cinematográfico suave
     fade_dur = min(0.8 if is_outro else 0.28, max(0.12, target_duration * (0.35 if is_outro else 0.08)))
     fade_out_st = max(0.0, target_duration - fade_dur)
     fade_filters = f",fade=t=in:st=0:d={min(0.28, fade_dur):.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
@@ -14375,7 +14369,7 @@ def build_image_filter_complex(
         # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor e supersampling 2.5K
         return (
             f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
-            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={w}x{h}:fps=30,"
+            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
             f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
@@ -14385,7 +14379,7 @@ def build_image_filter_complex(
         f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
         f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
-        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={w}x{h}:fps=30,"
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
         f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
     )
@@ -14929,7 +14923,6 @@ def make_segments_low_memory(
             filter_complex = build_image_filter_complex(w, h, target, image_motion_for(src, idx), src, style_profile)
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
-                "-loop", "1", "-framerate", "30", "-t", f"{target + 0.25:.4f}",
                 "-i", str(src),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]",
@@ -15198,7 +15191,6 @@ def make_segments_smart(
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
-                "-loop", "1", "-framerate", "30", "-t", f"{plan.target_duration + 0.25:.4f}",
                 "-i", str(plan.source),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]",
