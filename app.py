@@ -551,12 +551,15 @@ YUNET_LOCK = threading.RLock()
 YUNET_DETECTOR: Any | None = None
 YUNET_RUNTIME_ERROR = ""
 SUBTITLE_ANIMATIONS = {
-    "mixed", "pop", "slide", "zoom", "fade", "cinematic", "pulse", "glitch", "typewriter", "shake", "none",
+    "mixed", "pop", "spring", "kinetic", "blur_rise", "slide", "zoom", "fade", "cinematic", "pulse", "glitch", "typewriter", "shake", "none",
     "random_text", "documentary", "archive", "digital", "stamp", "money", "warning", "industrial", "luxury",
 }
 SUBTITLE_SFX_POOLS: dict[str, list[str]] = {
     "fade": ["subtitle_shimmer", "subtitle_air", "subtitle_luxury_doc"],
-    "pop": ["subtitle_title_slam", "subtitle_bullet_pop", "subtitle_hit"],
+    "pop": ["subtitle_bullet_pop", "subtitle_title_slam", "subtitle_hit"],
+    "spring": ["subtitle_bullet_pop", "subtitle_hit", "subtitle_pulse"],
+    "kinetic": ["subtitle_swipe", "subtitle_air", "subtitle_click"],
+    "blur_rise": ["subtitle_luxury_doc", "subtitle_air", "subtitle_shimmer"],
     "slide": ["subtitle_swipe", "subtitle_whoosh"],
     "zoom": ["subtitle_zoom", "subtitle_air"],
     "cinematic": ["subtitle_luxury_doc", "subtitle_shimmer", "subtitle_air"],
@@ -573,23 +576,26 @@ SUBTITLE_SFX_POOLS: dict[str, list[str]] = {
     "warning": ["subtitle_warning_alert", "subtitle_hit"],
     "industrial": ["subtitle_industrial_metal", "subtitle_hit"],
     "luxury": ["subtitle_luxury_doc", "subtitle_shimmer"],
-    "mixed": ["subtitle_air", "subtitle_swipe", "subtitle_zoom", "subtitle_shimmer", "subtitle_title_slam", "subtitle_archive_caption"],
+    "mixed": ["subtitle_bullet_pop", "subtitle_air", "subtitle_swipe", "subtitle_zoom", "subtitle_shimmer", "subtitle_luxury_doc"],
     "none": [],
 }
 SUBTITLE_VARIANT_SFX: dict[str, tuple[str, float, float, str]] = {
-    "fade": ("subtitle_shimmer", 0.000, 0.02, "inicio"),
-    "rise": ("subtitle_air", -0.010, -0.08, "inicio"),
-    "slide_left": ("subtitle_swipe", 0.000, 0.12, "inicio"),
-    "slide_right": ("subtitle_swipe", 0.000, 0.12, "inicio"),
-    "pop": ("subtitle_title_slam", 0.000, 0.28, "pico"),
-    "pop_soft": ("subtitle_bullet_pop", 0.000, 0.08, "pico"),
-    "zoom_in": ("subtitle_zoom", -0.008, 0.10, "inicio"),
+    "fade": ("subtitle_shimmer", 0.000, 0.00, "inicio"),
+    "rise": ("subtitle_air", 0.000, -0.05, "inicio"),
+    "blur_rise": ("subtitle_luxury_doc", 0.000, 0.00, "inicio"),
+    "spring": ("subtitle_bullet_pop", 0.000, 0.12, "inicio"),
+    "kinetic": ("subtitle_swipe", 0.000, 0.10, "inicio"),
+    "slide_left": ("subtitle_swipe", 0.000, 0.08, "inicio"),
+    "slide_right": ("subtitle_swipe", 0.000, 0.08, "inicio"),
+    "pop": ("subtitle_bullet_pop", 0.000, 0.12, "inicio"),
+    "pop_soft": ("subtitle_bullet_pop", 0.000, 0.05, "inicio"),
+    "zoom_in": ("subtitle_zoom", 0.000, 0.06, "inicio"),
     "zoom_soft": ("subtitle_zoom", 0.000, 0.00, "inicio"),
-    "cinema_drop": ("subtitle_luxury_doc", -0.010, 0.00, "inicio"),
-    "pulse_in": ("subtitle_pulse", 0.000, 0.10, "pico"),
-    "glitch": ("subtitle_glitch_reveal", 0.000, 0.18, "inicio"),
-    "typewriter": ("subtitle_type_classic", 0.000, 0.04, "inicio"),
-    "shake": ("subtitle_shake", 0.000, 0.15, "pico"),
+    "cinema_drop": ("subtitle_luxury_doc", 0.000, 0.00, "inicio"),
+    "pulse_in": ("subtitle_pulse", 0.000, 0.08, "inicio"),
+    "glitch": ("subtitle_glitch_reveal", 0.000, 0.12, "inicio"),
+    "typewriter": ("subtitle_type_classic", 0.000, 0.02, "inicio"),
+    "shake": ("subtitle_shake", 0.000, 0.10, "inicio"),
 }
 TRANSITION_SFX_POOLS: dict[str, list[str]] = {
     "fade": ["transition_air", "transition_whoosh"],
@@ -9373,37 +9379,36 @@ def intro_subtitle_tags(
     outline_size: float,
     tone: str = "explanatory",
 ) -> list[str]:
-    out_start = max(900, duration_ms - 520)
+    out_start = max(900, duration_ms - 440)
     tone = str(tone or "explanatory").lower()
     if tone in {"tech", "energetic"}:
         return [
             "\\an5",
             f"\\pos({x},{y})",
-            "\\alpha&H66&\\fscx88\\fscy88\\blur1",
-            "\\t(0,240,\\alpha&H00&\\fscx104\\fscy104\\blur0)",
-            "\\t(240,420,\\fscx100\\fscy100)",
-            f"\\t({out_start},{duration_ms},\\alpha&H80&\\blur1)",
-            "\\fad(100,260)",
+            "\\alpha&H40&\\fscx88\\fscy116",
+            "\\t(0,140,\\alpha&H00&\\fscx106\\fscy94)",
+            "\\t(140,260,\\fscx98\\fscy102)",
+            "\\t(260,360,\\fscx100\\fscy100)",
+            f"\\t({out_start},{duration_ms},\\alpha&H80&\\blur1.5)",
+            "\\fad(120,240)",
         ]
-    if tone in {"emotional"}:
+    if tone in {"emotional", "suspense"}:
         return [
             "\\an5",
-            f"\\move({x},{y + 14},{x},{y},0,620)",
-            "\\alpha&H66&\\blur3",
-            "\\t(0,620,\\alpha&H00&\\blur0)",
-            f"\\t({out_start},{duration_ms},\\alpha&H80&\\blur3)",
-            "\\fad(320,440)",
+            f"\\move({x},{y + 10},{x},{y},0,420)",
+            "\\alpha&H45&\\blur3.5",
+            "\\t(0,340,\\alpha&H00&\\blur0)",
+            f"\\t({out_start},{duration_ms},\\alpha&H80&\\blur2.5)",
+            "\\fad(240,360)",
         ]
     return [
         "\\an5",
         f"\\pos({x},{y})",
-        "\\alpha&H55&",
-        "\\fscx94\\fscy94",
-        "\\blur3",
-        "\\t(0,520,\\alpha&H00&\\fscx102\\fscy102\\blur0)",
-        "\\t(520,760,\\fscx100\\fscy100)",
-        f"\\t({out_start},{duration_ms},\\alpha&H70&\\blur2\\bord{outline_size + 0.8:.1f})",
-        "\\fad(220,360)",
+        "\\alpha&H35&\\fscx92\\fscy110\\blur2",
+        "\\t(0,180,\\alpha&H00&\\fscx104\\fscy97\\blur0)",
+        "\\t(180,320,\\fscx100\\fscy100)",
+        f"\\t({out_start},{duration_ms},\\alpha&H75&\\blur2)",
+        "\\fad(180,300)",
     ]
 
 
@@ -9420,30 +9425,36 @@ def subtitle_animation_tags(
     forced_outro: str | None = None,
 ) -> list[str]:
     intro_map = {
-        "fade": ["fade"],
-        "pop": ["pop", "pop_soft"],
+        "fade": ["fade", "blur_rise"],
+        "pop": ["spring", "pop_soft"],
+        "spring": ["spring", "pop_soft"],
+        "kinetic": ["kinetic", "slide_left", "slide_right"],
+        "blur_rise": ["blur_rise", "rise"],
         "slide": ["rise", "slide_left", "slide_right"],
         "zoom": ["zoom_in", "zoom_soft"],
-        "cinematic": ["cinema_drop", "rise"],
-        "pulse": ["pulse_in", "pop_soft"],
+        "cinematic": ["blur_rise", "cinema_drop"],
+        "pulse": ["pulse_in", "spring"],
         "glitch": ["glitch"],
         "typewriter": ["typewriter"],
         "shake": ["shake"],
         "none": ["none"],
-        "random_text": ["fade", "rise", "pop", "zoom_in", "slide_left", "slide_right", "cinema_drop", "pulse_in", "glitch", "typewriter"],
-        "documentary": ["cinema_drop", "rise", "typewriter"],
-        "archive": ["typewriter", "slide_left", "rise"],
-        "digital": ["glitch", "typewriter", "pulse_in"],
-        "stamp": ["pop", "shake"],
-        "money": ["typewriter", "pulse_in"],
-        "warning": ["shake", "pop"],
+        "random_text": ["spring", "blur_rise", "kinetic", "zoom_in", "slide_left", "slide_right", "cinema_drop", "glitch"],
+        "documentary": ["blur_rise", "cinema_drop", "typewriter"],
+        "archive": ["typewriter", "slide_left", "blur_rise"],
+        "digital": ["glitch", "typewriter", "kinetic"],
+        "stamp": ["spring", "shake"],
+        "money": ["spring", "kinetic"],
+        "warning": ["shake", "spring"],
         "industrial": ["shake", "cinema_drop"],
-        "luxury": ["cinema_drop", "fade", "rise"],
-        "mixed": ["fade", "rise", "pop", "zoom_in", "slide_left", "slide_right", "cinema_drop", "pulse_in"],
+        "luxury": ["blur_rise", "fade", "cinema_drop"],
+        "mixed": ["spring", "blur_rise", "kinetic", "zoom_soft", "slide_left", "slide_right", "cinema_drop"],
     }
     outro_map = {
         "fade": ["fade"],
         "pop": ["shrink", "glow_fade"],
+        "spring": ["shrink", "soft_blur"],
+        "kinetic": ["quick_dim", "float_fade"],
+        "blur_rise": ["soft_blur", "float_fade"],
         "slide": ["float_fade", "shrink"],
         "zoom": ["shrink", "fade"],
         "cinematic": ["soft_blur", "float_fade"],
@@ -9468,63 +9479,74 @@ def subtitle_animation_tags(
     intro = forced_intro or intros[stable_index(f"{job_id}:intro:{idx}:{cue.text}", len(intros))]
     outro = forced_outro or outros[stable_index(f"{job_id}:outro:{idx}:{cue.text}", len(outros))]
     tags = ["\\an2"]
-    fade_in = 180
-    fade_out = 260
+    fade_in = 140
+    fade_out = 220
 
     if intro == "none":
         tags.append(f"\\pos({x},{y})")
-    elif intro == "rise":
-        tags.append(f"\\move({x},{y + 34},{x},{y},0,430)")
-        tags.append("\\alpha&H25&")
-        tags.append("\\t(0,360,\\alpha&H00&)")
-    elif intro == "slide_left":
-        tags.append(f"\\move({x - 90},{y},{x},{y},0,420)")
-    elif intro == "slide_right":
-        tags.append(f"\\move({x + 90},{y},{x},{y},0,420)")
-    elif intro == "pop":
+    elif intro in {"spring", "pop"}:
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx82\\fscy82", "\\t(0,260,\\fscx106\\fscy106)", "\\t(260,430,\\fscx100\\fscy100)"])
+        # Efeito elastico moderno em 3 estagios (squash & stretch elastico)
+        tags.extend([
+            "\\fscx90\\fscy114\\alpha&H25&",
+            "\\t(0,130,\\fscx108\\fscy94\\alpha&H00&)",
+            "\\t(130,240,\\fscx98\\fscy102)",
+            "\\t(240,320,\\fscx100\\fscy100)",
+        ])
     elif intro == "pop_soft":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx92\\fscy92", "\\t(0,330,\\fscx100\\fscy100)"])
+        tags.extend(["\\fscx94\\fscy94\\alpha&H20&", "\\t(0,220,\\fscx104\\fscy104\\alpha&H00&)", "\\t(220,320,\\fscx100\\fscy100)"])
+    elif intro in {"blur_rise", "rise"}:
+        # Subida suave com blur optico estilo documentario
+        tags.append(f"\\move({x},{y + 12},{x},{y},0,280)")
+        tags.extend(["\\blur3.5\\alpha&H35&", "\\t(0,240,\\blur0\\alpha&H00&)"])
+    elif intro == "kinetic":
+        tags.append(f"\\move({x - 35},{y},{x},{y},0,160)")
+        tags.extend(["\\alpha&H40&", "\\t(0,120,\\alpha&H00&)"])
+    elif intro == "slide_left":
+        tags.append(f"\\move({x - 45},{y},{x},{y},0,240)")
+        tags.extend(["\\alpha&H30&", "\\t(0,180,\\alpha&H00&)"])
+    elif intro == "slide_right":
+        tags.append(f"\\move({x + 45},{y},{x},{y},0,240)")
+        tags.extend(["\\alpha&H30&", "\\t(0,180,\\alpha&H00&)"])
     elif intro == "zoom_in":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx112\\fscy112\\alpha&H45&", "\\t(0,380,\\fscx100\\fscy100\\alpha&H00&)"])
+        tags.extend(["\\fscx108\\fscy108\\blur2\\alpha&H35&", "\\t(0,280,\\fscx100\\fscy100\\blur0\\alpha&H00&)"])
     elif intro == "zoom_soft":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx105\\fscy105", "\\t(0,420,\\fscx100\\fscy100)"])
+        tags.extend(["\\fscx104\\fscy104\\alpha&H20&", "\\t(0,260,\\fscx100\\fscy100\\alpha&H00&)"])
     elif intro == "cinema_drop":
-        tags.append(f"\\move({x},{y - 24},{x},{y},0,460)")
-        tags.extend(["\\blur2", "\\t(0,360,\\blur0)"])
+        tags.append(f"\\move({x},{y - 12},{x},{y},0,280)")
+        tags.extend(["\\blur2.5\\alpha&H30&", "\\t(0,240,\\blur0\\alpha&H00&)"])
     elif intro == "pulse_in":
         tags.append(f"\\pos({x},{y})")
-        tags.extend([f"\\bord{outline_size + 1.2:.1f}", f"\\t(0,360,\\bord{outline_size:.1f})"])
+        tags.extend([f"\\bord{outline_size + 0.8:.1f}", f"\\t(0,240,\\bord{outline_size:.1f})"])
     elif intro == "glitch":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\alpha&H55&", "\\t(0,70,\\alpha&H00&)", "\\t(70,130,\\fscx104\\fscy96)", "\\t(130,210,\\fscx98\\fscy103)", "\\t(210,300,\\fscx100\\fscy100)"])
+        tags.extend(["\\alpha&H45&", "\\t(0,60,\\alpha&H00&)", "\\t(60,120,\\fscx104\\fscy96)", "\\t(120,180,\\fscx98\\fscy102)", "\\t(180,260,\\fscx100\\fscy100)"])
     elif intro == "typewriter":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\alpha&H35&", "\\t(0,420,\\alpha&H00&)"])
+        tags.extend(["\\alpha&H25&", "\\t(0,240,\\alpha&H00&)"])
     elif intro == "shake":
         tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx104\\fscy104", "\\t(0,80,\\fscx96\\fscy104)", "\\t(80,160,\\fscx104\\fscy96)", "\\t(160,280,\\fscx100\\fscy100)"])
+        tags.extend(["\\fscx103\\fscy103", "\\t(0,60,\\fscx97\\fscy103)", "\\t(60,120,\\fscx103\\fscy97)", "\\t(120,220,\\fscx100\\fscy100)"])
     else:
         tags.append(f"\\pos({x},{y})")
 
     if intro != "none" and outro != "none":
         tags.append(f"\\fad({fade_in},{fade_out})")
 
-    out_start = max(0, duration_ms - 520)
+    out_start = max(0, duration_ms - 420)
     if outro == "float_fade":
         tags.append(f"\\t({out_start},{duration_ms},\\alpha&H85&)")
     elif outro == "shrink":
-        tags.append(f"\\t({out_start},{duration_ms},\\fscx94\\fscy94\\alpha&H70&)")
+        tags.append(f"\\t({out_start},{duration_ms},\\fscx95\\fscy95\\alpha&H70&)")
     elif outro == "soft_blur":
-        tags.append(f"\\t({out_start},{duration_ms},\\blur3\\alpha&H80&)")
+        tags.append(f"\\t({out_start},{duration_ms},\\blur2.5\\alpha&H80&)")
     elif outro == "glow_fade":
-        tags.append(f"\\t({out_start},{duration_ms},\\bord{outline_size + 1.6:.1f}\\alpha&H70&)")
+        tags.append(f"\\t({out_start},{duration_ms},\\bord{outline_size + 1.2:.1f}\\alpha&H70&)")
     elif outro == "quick_dim":
-        tags.append(f"\\t({max(0, duration_ms - 330)},{duration_ms},\\alpha&H75&)")
+        tags.append(f"\\t({max(0, duration_ms - 220)},{duration_ms},\\alpha&H75&)")
     return tags
 
 
@@ -10881,7 +10903,7 @@ def build_auto_sfx_events(job: Job, audio_total: float, segments: list[Path], wo
     last_subtitle_fx = -99.0
     last_subtitle_effect = ""
     for idx, cue in enumerate(cues):
-        if cue.start < 0.25 or cue.start >= audio_total - 0.2:
+        if cue.start < 0.20 or cue.start >= audio_total - 0.2:
             continue
         timeline_item = subtitle_timeline.get(idx)
         layers = sfx_effect_layers_for_subtitle(
@@ -10893,42 +10915,41 @@ def build_auto_sfx_events(job: Job, audio_total: float, segments: list[Path], wo
         )
         if layers:
             effect, offset, emphasis = layers[0]
-            tight = cue.start - last_subtitle_fx < 0.48
-            if tight:
-                emphasis -= 1.35
-                duration = min(sfx_duration(effect), 0.22)
-            else:
-                duration = 0.0
-            if effect == last_subtitle_effect and not tight:
+            # Anti-Fatigue SFX Throttle: espacamento minimo de 1.35s entre efeitos sonoros de texto,
+            # permitindo maior frequencia apenas em frases enfaticas (!, ?, :, —)
+            is_emphatic = any(p in cue.text for p in ["!", "?", ":", "—", "..."])
+            spacing = cue.start - last_subtitle_fx
+            if spacing < (0.90 if is_emphatic else 1.35):
+                continue
+
+            if effect == last_subtitle_effect:
                 pool = SUBTITLE_SFX_POOLS.get(animation, SUBTITLE_SFX_POOLS["mixed"])
                 alternates = [item for item in pool if item != effect]
                 if alternates:
                     effect = alternates[stable_index(f"{job.id}:subtitle_alt:{idx}:{cue.text}", len(alternates))]
-            anchor_name = sfx_effect_anchor(effect)
-            target_time = event_anchor_time(timeline_item, anchor_name, cue.start)
+
+            # Sincronizacao exata no frame 0 da cue (zero latency)
+            target_time = round(cue.start, 3)
             add(
                 target_time,
                 effect,
                 "subtitle",
-                duration,
+                0.0,
                 sfx_volume_db(job, effect, emphasis),
                 f"{job.id}:subtitle:{idx}:{animation}:{cue.text}",
-                anchor=anchor_name,
-                offset=offset,
+                anchor="inicio",
+                offset=0.0,
                 meta={
                     "subtitle_index": idx,
                     "subtitle_animation": animation,
                     "subtitle_variant": (timeline_item or {}).get("subtitle_variant"),
-                    "tight": tight,
-                    "visual_start_frame": (timeline_item or {}).get("visual_start_frame"),
-                    "impact_frame": (timeline_item or {}).get("impact_frame"),
-                    "sound_peak_frame": (timeline_item or {}).get("sound_peak_frame"),
+                    "is_emphatic": is_emphatic,
                 },
             )
             last_subtitle_fx = cue.start
             last_subtitle_effect = effect
     if cues and animation != "none" and not any(item["reason"] == "subtitle" for item in events):
-        cue = next((item for item in cues if 0.25 <= item.start < audio_total - 0.2), cues[0])
+        cue = next((item for item in cues if 0.20 <= item.start < audio_total - 0.2), cues[0])
         timeline_item = subtitle_timeline.get(0)
         layers = sfx_effect_layers_for_subtitle(
             job,
@@ -10939,16 +10960,15 @@ def build_auto_sfx_events(job: Job, audio_total: float, segments: list[Path], wo
         )
         if layers:
             effect, offset, emphasis = layers[0]
-            anchor_name = sfx_effect_anchor(effect)
             add(
-                event_anchor_time(timeline_item, anchor_name, cue.start),
+                round(cue.start, 3),
                 effect,
                 "subtitle",
                 0.0,
                 sfx_volume_db(job, effect, emphasis),
                 f"{job.id}:subtitle:fallback:{animation}",
-                anchor=anchor_name,
-                offset=offset,
+                anchor="inicio",
+                offset=0.0,
                 meta={
                     "subtitle_index": 0,
                     "subtitle_animation": animation,
