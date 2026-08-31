@@ -10697,8 +10697,14 @@ def compose_final_visuals(
     w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
     target_w = cta_scale_width(job, w)
     preset, x_expr, y_expr = cta_position_expr(job)
-    out = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
-    filter_args = ["-threads", "4", "-filter_threads", "2", "-filter_complex_threads", "2"]
+    logical_cpus = max(2, int(os.cpu_count() or 4))
+    comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
+    comp_filter_threads = max(2, min(8, logical_cpus // 2))
+    filter_args = [
+        "-threads", str(comp_threads),
+        "-filter_threads", str(comp_filter_threads),
+        "-filter_complex_threads", str(comp_filter_threads),
+    ]
     cmd: list[str] = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         *filter_args,
@@ -13931,8 +13937,8 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
         if hardware_encoder.endswith("_nvenc"):
             args = [
                 "-c:v", hardware_encoder,
-                "-preset", "p3" if fast else "p4",
-                "-tune", "ll" if fast else "hq",
+                "-preset", "p3",
+                "-tune", "ll",
                 "-rc", "vbr",
                 "-cq", "20",
                 "-b:v", target,
@@ -13943,7 +13949,7 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
                 "-forced-idr", "1",
                 "-threads", "4",
             ]
-            label = f"NVIDIA {hardware_encoder.upper()} fluido e térmico"
+            label = f"NVIDIA {hardware_encoder.upper()} fluido e de alta velocidade"
         elif hardware_encoder.endswith("_qsv"):
             args = [
                 "-c:v", hardware_encoder, "-preset", "faster",
@@ -14227,20 +14233,11 @@ FILMIC_GRADE_PRESETS: dict[str, dict[str, Any]] = {
 def filmic_grade_filter_for(options: dict[str, Any] | None = None, tone: str = "explanatory") -> str:
     opts = options or {}
     explicit = str(opts.get("colorGradePreset") or opts.get("filmicGrade") or "").strip().lower()
+    if explicit in {"off", "none", "", "natural_balanced", "default"}:
+        return ""
     if explicit in FILMIC_GRADE_PRESETS:
         return FILMIC_GRADE_PRESETS[explicit]["filter"]
-    if explicit == "off":
-        return ""
-    tone = str(tone or "explanatory").strip().lower()
-    if tone in {"historical", "archive"}:
-        return FILMIC_GRADE_PRESETS["vintage_archive"]["filter"]
-    if tone in {"suspense", "action", "energetic"}:
-        return FILMIC_GRADE_PRESETS["teal_orange"]["filter"]
-    if tone in {"tech"}:
-        return FILMIC_GRADE_PRESETS["vibrant_modern"]["filter"]
-    if tone in {"emotional"}:
-        return FILMIC_GRADE_PRESETS["cinema_warm"]["filter"]
-    return FILMIC_GRADE_PRESETS["natural_balanced"]["filter"]
+    return ""
 
 
 def build_video_filter(
