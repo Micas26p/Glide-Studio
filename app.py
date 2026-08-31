@@ -1041,6 +1041,8 @@ class SegmentPlan:
     media_kind: str = "video"
     image_motion: str = ""
     source_offset: float = 0.0
+    is_reversed: bool = False
+    is_outro: bool = False
 
 
 @dataclass
@@ -13952,8 +13954,13 @@ def build_video_filter(
     quality_boost: bool = True,
     intro_fade: float = 0.0,
     continuity_filter: str = "",
+    is_reversed: bool = False,
+    is_outro: bool = False,
 ) -> str:
-    vf = (
+    vf = ""
+    if is_reversed:
+        vf += "reverse,"
+    vf += (
         f"fps=30,scale={w}:{h}:force_original_aspect_ratio=increase,"
         f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
     )
@@ -13977,7 +13984,11 @@ def build_video_filter(
     if idx > 1 and intro_fade > 0 and target_duration > 0.25:
         fade_d = min(float(intro_fade), max(0.08, target_duration / 2.0))
         vf += f",fade=t=in:st=0:d={fade_d:.3f}"
-    if transitions not in {"off", "none", ""} and target_duration > 0.55:
+    if is_outro and target_duration > 0.6:
+        fade_out_d = min(0.8, target_duration * 0.4)
+        fade_out_st = max(0.0, target_duration - fade_out_d)
+        vf += f",fade=t=out:st={fade_out_st:.3f}:d={fade_out_d:.3f}"
+    elif transitions not in {"off", "none", ""} and target_duration > 0.55:
         mode = str(transitions or "").lower()
         fade_cap = 0.16
         if mode in {"random_fast", "swipe", "flash", "digital_glitch", "vhs", "money", "map", "futuristic"}:
@@ -14002,6 +14013,7 @@ def build_image_filter_complex(
     motion: str,
     image_path: Path | str | None = None,
     style_profile: dict[str, Any] | None = None,
+    is_outro: bool = False,
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
     progress = f"(on/{frames})"
@@ -14026,10 +14038,10 @@ def build_image_filter_complex(
 
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
 
-    # Micro-fade cinematográfico (0.28s suave) para eliminar corte seco em fotos
-    fade_dur = min(0.28, max(0.12, target_duration * 0.08))
+    # Micro-fade cinematográfico (0.28s suave) ou fade out suave de encerramento
+    fade_dur = min(0.8 if is_outro else 0.28, max(0.12, target_duration * (0.35 if is_outro else 0.08)))
     fade_out_st = max(0.0, target_duration - fade_dur)
-    fade_filters = f",fade=t=in:st=0:d={fade_dur:.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
+    fade_filters = f",fade=t=in:st=0:d={min(0.28, fade_dur):.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
 
     # Detectar se a proporção da imagem é compatível com o projeto (Caso A/C) ou precisa de background blur (Caso B)
     target_ratio = float(w) / float(max(1, h))
@@ -14261,23 +14273,24 @@ def build_segment_plan(
             )
 
     # PASSO 8: Aplicar estratégia apropriada de ritmo saudável
+    auto_healing_applied: list[str] = []
     if not audio_trimmed:
         img_dur = base_img_dur
         setpts_factor = 1.0
 
         if ratio < 0.98:
-            # Pequena falta de mídia (0.65 <= ratio < 0.98): compensar suavemente
+            # Pequena falta de mídia (0.65 <= ratio < 0.98): compensar suavemente (Camada 1 Auto-Healing)
             deficit = audio_total - T_total
-            # Prioridade 1: aumentar moderadamente a duração das imagens (até ~5.5s)
             if N_i > 0:
                 max_img_boost = N_i * 1.5
                 img_boost = min(deficit, max_img_boost)
                 img_dur = round(base_img_dur + (img_boost / N_i), 3)
                 deficit -= img_boost
-            # Prioridade 2: reduzir levemente a velocidade dos clipes (sutil e imperceptível)
+                auto_healing_applied.append(f"camada_1_micro_dilation_img_{img_dur:.2f}s")
             if deficit > 0 and T_v > 0:
                 setpts_factor = min(1.15, (T_v + deficit) / T_v)
                 deficit = max(0.0, deficit - (T_v * (setpts_factor - 1.0)))
+                auto_healing_applied.append(f"camada_1_micro_dilation_video_setpts_{setpts_factor:.2f}")
         elif ratio > 1.10:
             # Excesso de mídia: NÃO acelerar clipes! Manter velocidade natural 1.0x e imagens em 4.0s
             setpts_factor = 1.0
@@ -14342,10 +14355,66 @@ def build_segment_plan(
                 )
                 remaining -= target
 
-    # Ajuste fino final para precisão perfeita de milissegundos
-    if remaining > 0.01 and plans:
-        plans[-1].target_duration += remaining
-        remaining = 0.0
+    # -------------------------------------------------------------
+    # AUTO-HEALING EDITORIAL EM 3 CAMADAS (Tratamento de Déficit Residual)
+    # -------------------------------------------------------------
+    if remaining > 0.08 and plans:
+        # CAMADA 1: Organic Micro-Dilation (distribuição elástica imperceptível)
+        max_dilation_per_plan = 0.65
+        possible_dilation = len(plans) * max_dilation_per_plan
+        if remaining <= possible_dilation:
+            per_plan_boost = round(remaining / len(plans), 4)
+            for p in plans:
+                p.target_duration += per_plan_boost
+            auto_healing_applied.append(f"camada_1_micro_dilation_+{per_plan_boost:.2f}s_por_clipe")
+            remaining = 0.0
+        else:
+            for p in plans:
+                p.target_duration += max_dilation_per_plan
+            remaining = max(0.0, remaining - possible_dilation)
+            auto_healing_applied.append("camada_1_micro_dilation_max")
+
+        # CAMADA 2: Reverse-Motion Mirroring (Espelhamento cinematográfico de B-roll curtos)
+        if remaining >= 1.5:
+            v_candidates = [
+                p for p in plans
+                if p.media_kind == "video" and p.raw_duration >= 2.0 and not p.is_reversed
+            ]
+            for cand in reversed(v_candidates):
+                if remaining < 0.5:
+                    break
+                mirror_dur = min(cand.raw_duration * 0.9, remaining)
+                if mirror_dur >= 1.5:
+                    plans.append(
+                        SegmentPlan(
+                            source=cand.source,
+                            raw_duration=cand.raw_duration,
+                            target_duration=round(mirror_dur, 3),
+                            source_offset=0.0,
+                            source_index=cand.source_index,
+                            cycle=cand.cycle + 1,
+                            media_kind="video",
+                            image_motion="",
+                            is_reversed=True,
+                        )
+                    )
+                    remaining -= mirror_dur
+                    auto_healing_applied.append(f"camada_2_reverse_mirroring_{cand.source.name}_{mirror_dur:.1f}s")
+
+        # CAMADA 3: Outro Brand Card & Cinematic Fade Tail
+        if remaining > 0.01:
+            if remaining <= 2.5 and plans:
+                plans[-1].target_duration += remaining
+                plans[-1].is_outro = True
+                auto_healing_applied.append("camada_3_outro_fade_tail")
+                remaining = 0.0
+            else:
+                share = remaining / len(plans)
+                for p in plans:
+                    p.target_duration += share
+                plans[-1].is_outro = True
+                auto_healing_applied.append(f"camada_3_outro_tail_extended_{remaining:.1f}s")
+                remaining = 0.0
 
     if not plans:
         raise RuntimeError("Nenhum segmento pôde ser gerado para a timeline.")
@@ -14357,6 +14426,7 @@ def build_segment_plan(
         "original_audio_duration": round(orig_audio_total, 3),
         "audio_trimmed": audio_trimmed,
         "smart_snapped": smart_snapped,
+        "auto_healing": auto_healing_applied,
         "raw_video_duration": round(T_v, 3),
         "raw_image_potential": round(T_i, 3),
         "total_available_media_duration": round(T_total, 3),
@@ -14797,6 +14867,7 @@ def make_segments_smart(
                 plan.image_motion or image_motion_for(plan.source, segment_no),
                 plan.source,
                 style_profile,
+                is_outro=plan.is_outro,
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
@@ -14828,6 +14899,8 @@ def make_segments_smart(
                 ),
                 intro_fade=0.0,
                 continuity_filter=continuity_filters.get(str(plan.source), ""),
+                is_reversed=plan.is_reversed,
+                is_outro=plan.is_outro,
             )
             input_limit = max(0.5, (plan.target_duration / max(0.08, float(summary.get("setpts_factor", 1.0)))) + 1.25)
             seek_args = []
