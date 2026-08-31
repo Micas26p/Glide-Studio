@@ -4515,25 +4515,25 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     # Evita 100% de saturação da CPU e estrangulamento térmico (90°C -> 58-65°C), mantendo clocks turbo máximos
     # sustentados sem travamentos nem aceleração barulhenta das ventoinhas.
     if priority == "max":
-        workers = 3 if (hardware_active and logical_cpus >= 16 and ram_gb >= 16) else 2
-        cpu_thread_budget = max(2, min(8, int(logical_cpus * 0.50)))
+        workers = 4 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (3 if (hardware_active and logical_cpus >= 8) else 2)
+        cpu_thread_budget = max(4, min(14, int(logical_cpus * 0.75)))
         filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
         complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
     elif priority == "quality":
-        workers = 2 if (logical_cpus >= 8 and ram_gb >= 8) else 1
-        cpu_thread_budget = max(2, min(6, int(logical_cpus * 0.45)))
+        workers = 3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 8 else 1)
+        cpu_thread_budget = max(3, min(10, int(logical_cpus * 0.60)))
         filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
         complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
     else:  # balanced
-        workers = 2 if (logical_cpus >= 6 and ram_gb >= 6) else 1
-        cpu_thread_budget = max(2, min(6, int(logical_cpus * 0.45)))
+        workers = 3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 6 else 1)
+        cpu_thread_budget = max(3, min(10, int(logical_cpus * 0.60)))
         filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
         complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
 
     if segment_count > 0:
         workers = max(1, min(workers, segment_count))
 
-    segment_thread_limit = max(1, min(3, cpu_thread_budget // max(1, workers)))
+    segment_thread_limit = max(1, min(4, cpu_thread_budget // max(1, workers)))
 
     return {
         "priority": priority,
@@ -14368,7 +14368,7 @@ def make_segments_smart(
                 continue
             window_cache_key = visual_clean_cache_key(src, dur, cwd=work, scope="windows_v3_batch")
             cached_window = VISUAL_CLEAN_CACHE.get(window_cache_key)
-            if turbo_enabled(job) and not isinstance(cached_window, dict):
+            if (turbo_enabled(job) or len(valid_pairs) > 40) and not isinstance(cached_window, dict):
                 visual_window_summary["budget_skipped"] += 1
                 if "visual_windows_cache_only_turbo" not in job.render_budget_fallbacks:
                     job.render_budget_fallbacks.append("visual_windows_cache_only_turbo")
@@ -14530,9 +14530,11 @@ def make_segments_smart(
                 intro_fade=0.0,
                 continuity_filter=continuity_filters.get(str(plan.source), ""),
             )
+            input_limit = max(0.5, (plan.target_duration / max(0.08, float(summary.get("setpts_factor", 1.0)))) + 1.25)
             seek_args = []
             if plan.source_offset > 0.0:
-                seek_args = ["-ss", f"{plan.source_offset:.3f}"]
+                seek_args.extend(["-ss", f"{plan.source_offset:.3f}"])
+            seek_args.extend(["-t", f"{input_limit:.3f}"])
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
                 *seek_args,
