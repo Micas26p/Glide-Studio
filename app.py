@@ -142,6 +142,9 @@ SAFE_STARTUP_LOG_PATTERNS = (
     "desktop_smoke*.json",
     "desktop_smoke*.log",
     "desktop_smoke*.trace.log",
+    "qa_server*.log",
+    "*.err.log",
+    "*.out.log",
     "*.trace.log",
 )
 SAFE_SHUTDOWN_LOG_PATTERNS = (
@@ -149,14 +152,18 @@ SAFE_SHUTDOWN_LOG_PATTERNS = (
     "smoke_*.log",
     "desktop_smoke*.log",
     "desktop_smoke*.trace.log",
+    "qa_server*.log",
+    "*.err.log",
+    "*.out.log",
     "*.trace.log",
 )
 SAFE_STARTUP_DIR_NAMES = {
     ".verification-artifacts",
+    ".pytest_cache",
 }
 SAFE_AGED_DIR_POLICIES = {
-    "__pycache__": 24 * 60 * 60,
-    "build": 7 * 24 * 60 * 60,
+    "__pycache__": 12 * 60 * 60,
+    "build": 24 * 60 * 60,
 }
 SAFE_OLD_PROFILE_DIR_NAMES = {
     "webview_profile",
@@ -178,6 +185,7 @@ SAFE_SHUTDOWN_EMPTY_ROOT_NAMES = {
 }
 SAFE_SHUTDOWN_REMOVE_DIR_NAMES = {
     ".verification-artifacts",
+    ".pytest_cache",
     "__pycache__",
     "build",
 }
@@ -190,6 +198,8 @@ for folder in (
     RENDER_GRAPH_CACHE_ROOT,
     MODEL_PACK_ROOT,
     AUTOMATOR_STAGING_ROOT,
+    DROPZONE_ROOT,
+    DROPZONE_OUTPUT_ROOT,
 ):
     folder.mkdir(parents=True, exist_ok=True)
 
@@ -211,6 +221,8 @@ def _maintenance_safe_child(path: Path) -> Path | None:
     protected_roots = {
         PROJECT_MEDIA_ROOT.resolve(),
         EXPORT_ROOT.resolve(),
+        DROPZONE_ROOT.resolve(),
+        DROPZONE_OUTPUT_ROOT.resolve(),
         ASSETS.resolve(),
         FRONTEND.resolve(),
         MODEL_PACK_ROOT.parent.resolve(),
@@ -4749,25 +4761,29 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     hardware_encoder = None if force_cpu else best_hardware_encoder("h264")
     hardware_active = bool(hardware_encoder) and (bool(gpu) or priority in {"balanced", "max", "quality"})
 
-    # Orçamento térmico inteligente:
-    # 2 workers em paralelo é o ponto ideal de vazão contínua do NVENC/QSV e do pipeline de decodificação.
-    # Evita 100% de saturação da CPU e estrangulamento térmico (90°C -> 58-65°C), mantendo clocks turbo máximos
-    # sustentados sem travamentos nem aceleração barulhenta das ventoinhas.
+    # Orçamento dinâmico de alta performance com auto-calibração de hardware
     if priority == "max":
-        workers = 4 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (3 if (hardware_active and logical_cpus >= 8) else 2)
-        cpu_thread_budget = max(4, min(14, int(logical_cpus * 0.75)))
-        filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
+        if hardware_active and logical_cpus >= 16 and ram_gb >= 16:
+            workers = 5
+        elif hardware_active and logical_cpus >= 12 and ram_gb >= 12:
+            workers = 4
+        elif hardware_active and logical_cpus >= 8:
+            workers = 3
+        else:
+            workers = 2
+        cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.85)))
+        filter_threads = max(1, min(4, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(4, cpu_thread_budget // max(1, workers)))
     elif priority == "quality":
         workers = 3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 8 else 1)
-        cpu_thread_budget = max(3, min(10, int(logical_cpus * 0.60)))
-        filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
+        cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.70)))
+        filter_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
     else:  # balanced
-        workers = 3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 6 else 1)
-        cpu_thread_budget = max(3, min(10, int(logical_cpus * 0.60)))
-        filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
+        workers = 4 if (hardware_active and logical_cpus >= 16 and ram_gb >= 16) else (3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 6 else 1))
+        cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.75)))
+        filter_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
 
     if segment_count > 0:
         workers = max(1, min(workers, segment_count))
