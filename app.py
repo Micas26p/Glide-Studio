@@ -1052,6 +1052,7 @@ class Job:
     cta_summary: dict[str, Any] = field(default_factory=dict)
     intro_summary: dict[str, Any] = field(default_factory=dict)
     audio_health_summary: dict[str, Any] = field(default_factory=dict)
+    audio_analysis: dict[str, Any] = field(default_factory=dict)
     sound_fx_summary: dict[str, Any] = field(default_factory=dict)
     preflight_summary: dict[str, Any] = field(default_factory=dict)
     auto_fix_summary: dict[str, Any] = field(default_factory=dict)
@@ -15153,10 +15154,17 @@ def make_segments_smart(
         f"descartados={summary.get('dropped_clips', 0)} | resolução={w}x{h} | quality_boost={'on' if summary.get('quality_boost') else 'off'}."
     ))
 
-    tone = str((job.audio_analysis or {}).get("tone") or job.options.get("tone") or "explanatory")
+    tone = str(
+        getattr(job, "audio_analysis", {}).get("tone")
+        or getattr(job, "emotion_summary", {}).get("tone")
+        or getattr(job, "audio_health_summary", {}).get("tone")
+        or (job.options or {}).get("projectTone")
+        or (job.options or {}).get("tone")
+        or "explanatory"
+    )
     filmic_grade = filmic_grade_filter_for(job.options, tone)
     summary["filmic_grade"] = filmic_grade
-    summary["filmic_grade_preset"] = str(job.options.get("colorGradePreset") or tone)
+    summary["filmic_grade_preset"] = str((job.options or {}).get("colorGradePreset") or tone)
 
     rendered_duration = 0.0
     next_segment_no = 1
