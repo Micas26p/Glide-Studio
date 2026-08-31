@@ -10697,6 +10697,7 @@ def compose_final_visuals(
     w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
     target_w = cta_scale_width(job, w)
     preset, x_expr, y_expr = cta_position_expr(job)
+    out = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
     logical_cpus = max(2, int(os.cpu_count() or 4))
     comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
     comp_filter_threads = max(2, min(8, logical_cpus // 2))
