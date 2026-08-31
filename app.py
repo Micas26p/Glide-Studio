@@ -5276,11 +5276,12 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
     if not FFMPEG or duration <= 0:
         return {"visible": False, "reason": "sem ffmpeg/duracao", "samples": []}
     sample_points = [0.12]
-    if duration > 0.55:
-        sample_points.append(min(max(duration * 0.35, 0.25), max(0.18, duration - 0.18)))
-    if duration > 1.3:
-        sample_points.append(min(max(duration * 0.72, 0.5), max(0.25, duration - 0.25)))
+    if duration > 0.8:
+        sample_points.append(min(max(duration * 0.35, 0.40), max(0.25, duration - 0.25)))
+    if duration > 1.8:
+        sample_points.append(min(max(duration * 0.72, 0.90), max(0.40, duration - 0.25)))
     samples: list[dict[str, Any]] = []
+    first_visible_offset = 0.0
     for at in sample_points:
         cmd = [
             FFMPEG, "-hide_banner", "-v", "error",
@@ -5301,7 +5302,8 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
         yavg = float(stats["yavg"])
         yrange = float(stats["yrange"])
         ymax = float(stats["ymax"])
-        visible = not (yavg <= VIDEO_BLACK_YAVG_MAX and ymax <= VIDEO_BLACK_YMAX_MAX and yrange < VIDEO_VISIBLE_RANGE_MIN)
+        # Detecta telas escuras ou títulos estáticos com fundo preto
+        visible = not (yavg <= 22.0 and ymax <= 36.0 and yrange < 24.0)
         sample = {
             "at": round(at, 3),
             "visible": visible,
@@ -5310,8 +5312,18 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
             "yrange": round(yrange, 2),
         }
         samples.append(sample)
-        if visible:
-            return {"visible": True, "reason": "frame visivel", "samples": samples}
+        if visible and first_visible_offset == 0.0:
+            first_visible_offset = at
+
+    has_any_visible = any(s.get("visible") for s in samples)
+    if has_any_visible:
+        suggested_offset = first_visible_offset if (not samples[0].get("visible") and first_visible_offset > 0.3) else 0.0
+        return {
+            "visible": True,
+            "suggested_offset": round(suggested_offset, 3),
+            "reason": "frame visivel",
+            "samples": samples,
+        }
     return {"visible": False, "reason": "amostras pretas/sem conteudo visual", "samples": samples}
 
 
@@ -5330,20 +5342,81 @@ def probe_video_render_health(path: Path, duration: float, cwd: Path | None = No
     }
     if duration <= 0.08:
         summary.update({"valid": False, "reason": "sem duracao legivel"})
-    elif size_mb <= VIDEO_TINY_FILE_MB:
+    else:
         visual = probe_visible_video_frame(path, duration, cwd=cwd)
         summary.update({
             "visual_checked": True,
             "visible_frame": bool(visual.get("visible")),
+            "suggested_offset": float(visual.get("suggested_offset") or 0.0),
             "visual_samples": visual.get("samples") or [],
         })
         if not visual.get("visible"):
             summary.update({
                 "valid": False,
-                "reason": f"arquivo muito leve ({size_mb:.2f} MB) com tela preta/sem frames visiveis",
+                "reason": f"arquivo com tela preta/sem frames visiveis ({size_mb:.2f} MB)",
             })
     VIDEO_HEALTH_CACHE[key] = dict(summary)
     return summary
+
+
+def enforce_clean_opening_protocol(
+    job: Job,
+    valid_pairs: list[tuple[Path, float]],
+    work: Path,
+    max_opening_slots: int = 10,
+) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
+    """Garante que os primeiros 10 clipes sejam estritamente B-roll limpos (sem telas escuras, sem legendas gravadas e sem avatar falante)."""
+    if len(valid_pairs) <= 3:
+        return valid_pairs, {"enforced": False, "swapped": 0}
+
+    opening_count = min(len(valid_pairs), max_opening_slots)
+    clean_pool_indices: list[int] = []
+    polluted_indices_in_opening: list[int] = []
+
+    for idx, (path, dur) in enumerate(valid_pairs):
+        is_opening = idx < opening_count
+        analysis = probe_visual_clean_health(path, dur, "normal", cwd=work)
+        category = str(analysis.get("category") or "clean")
+        action = str(analysis.get("action") or "keep")
+
+        # Poluição visual: tela preta, apresentador/avatar ou texto/legenda gravada
+        is_polluted = category in {"black_screen", "presenter", "text_dominant", "low_quality"} or action == "hard_reject"
+
+        if is_opening and is_polluted:
+            polluted_indices_in_opening.append(idx)
+        elif not is_opening and not is_polluted:
+            clean_pool_indices.append(idx)
+
+    reordered = list(valid_pairs)
+    swapped_count = 0
+    swapped_details: list[dict[str, Any]] = []
+
+    for bad_idx in polluted_indices_in_opening:
+        if not clean_pool_indices:
+            break
+        good_idx = clean_pool_indices.pop(0)
+        bad_item = reordered[bad_idx]
+        good_item = reordered[good_idx]
+        reordered[bad_idx] = good_item
+        reordered[good_idx] = bad_item
+        swapped_count += 1
+        swapped_details.append({
+            "polluted_file": bad_item[0].name,
+            "replaced_by": good_item[0].name,
+            "opening_slot": bad_idx + 1,
+        })
+        _append_log(
+            job,
+            f"Clean Opening Protocol: Slot #{bad_idx + 1} protegido. Clipes com poluição visual '{bad_item[0].name}' substituído por B-roll limpo '{good_item[0].name}'.",
+        )
+
+    summary = {
+        "enforced": True,
+        "opening_slots_checked": opening_count,
+        "swapped": swapped_count,
+        "swapped_details": swapped_details,
+    }
+    return reordered, summary
 
 
 def visual_clean_enabled(options: dict[str, Any]) -> bool:
@@ -9048,6 +9121,65 @@ def apply_timing_adjustments(cues: list[SubtitleCue], adjustments: list[dict[str
     return shifted
 
 
+def split_cue_into_single_lines(cue: SubtitleCue, max_chars: int = 40) -> list[SubtitleCue]:
+    """Divide blocos de legendas longos em frases elegantes de 1 linha sem quebrar contexto."""
+    raw_text = re.sub(r"\s+", " ", cue.text).strip()
+    if not raw_text:
+        return []
+    dur = max(0.1, cue.end - cue.start)
+    if len(raw_text) <= max_chars and len(raw_text.split()) <= 7:
+        return [SubtitleCue(cue.start, cue.end, raw_text)]
+
+    def _find_best_split(text: str) -> tuple[str, str]:
+        mid = len(text) // 2
+
+        # 1. Ponto de corte por pontuação forte/média próxima ao meio
+        punct_matches = list(re.finditer(r"[\.!\?;:,—–]\s+", text))
+        if punct_matches:
+            best_p = min(punct_matches, key=lambda m: abs(m.end() - mid))
+            if 6 <= best_p.end() <= len(text) - 6:
+                return text[:best_p.end()].strip(), text[best_p.end():].strip()
+
+        # 2. Ponto de corte por conectivos gramaticais próximos ao meio
+        conn_matches = list(re.finditer(
+            r"\s+(?:porque|que|quando|onde|donde|pero|mas|como|para|com|sem|por|and|or|because|that|which|when|where|with|from|então|entonces|del|de la|de los|do|da|dos|das)\s+",
+            text,
+            re.IGNORECASE,
+        ))
+        if conn_matches:
+            best_c = min(conn_matches, key=lambda m: abs(m.start() - mid))
+            if 6 <= best_c.start() <= len(text) - 6:
+                return text[:best_c.start()].strip(), text[best_c.start():].strip()
+
+        # 3. Ponto de corte no espaço entre palavras mais central
+        words = text.split()
+        if len(words) > 1:
+            mid_word = len(words) // 2
+            left = " ".join(words[:mid_word]).strip()
+            right = " ".join(words[mid_word:]).strip()
+            return left, right
+
+        return text, ""
+
+    def _split_recursive(text: str, start: float, end: float) -> list[SubtitleCue]:
+        text = text.strip()
+        dur_segment = max(0.08, end - start)
+        if len(text) <= max_chars and len(text.split()) <= 7:
+            return [SubtitleCue(round(start, 3), round(end, 3), text)]
+
+        left, right = _find_best_split(text)
+        if not left or not right:
+            return [SubtitleCue(round(start, 3), round(end, 3), text)]
+
+        total_chars = len(left) + len(right)
+        left_dur = max(0.12, dur_segment * (len(left) / max(1, total_chars)))
+        mid_time = start + left_dur
+
+        return _split_recursive(left, start, mid_time) + _split_recursive(right, mid_time, end)
+
+    return _split_recursive(raw_text, cue.start, cue.end)
+
+
 def parse_srt_file(path: Path) -> list[SubtitleCue]:
     try:
         text = path.read_text(encoding="utf-8-sig", errors="replace")
@@ -9071,15 +9203,21 @@ def parse_srt_file(path: Path) -> list[SubtitleCue]:
             continue
         body = " ".join(lines[time_idx + 1:]).strip()
         if body:
-            cues.append(SubtitleCue(start=start, end=max(start, end), text=body))
+            raw_cue = SubtitleCue(start=start, end=max(start, end), text=body)
+            cues.extend(split_cue_into_single_lines(raw_cue, max_chars=40))
     return cues
 
 
 def normalize_subtitles(cues: list[SubtitleCue], total_duration: float, min_duration: float = MIN_SUBTITLE_SECONDS) -> tuple[list[SubtitleCue], dict[str, Any]]:
+    # Garante que todas as cues passem pela divisão semântica de 1 linha
+    expanded_cues: list[SubtitleCue] = []
+    for cue in cues:
+        expanded_cues.extend(split_cue_into_single_lines(cue, max_chars=40))
+
     adjusted: list[SubtitleCue] = []
     removed_outside = 0
     removed_short_tail = 0
-    for cue in cues:
+    for cue in expanded_cues:
         if cue.start < 0:
             cue = SubtitleCue(0.0, cue.end, cue.text)
         if cue.start >= total_duration or not cue.text.strip():
@@ -14339,6 +14477,9 @@ def make_segments_smart(
         candidate_sources=candidate_sources,
         imported_count=len(video_files),
     )
+    # Clean Opening Protocol: protege estritamente os primeiros 10 slots com B-roll limpo
+    valid_pairs, clean_opening_summary = enforce_clean_opening_protocol(job, valid_pairs, work, max_opening_slots=10)
+    job.preflight_summary["clean_opening"] = clean_opening_summary
     performance_stop(job, "visual_analysis")
     log_visual_clean_filter(job, visual_clean_summary)
     if not valid_pairs:
@@ -14351,6 +14492,11 @@ def make_segments_smart(
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
     source_offsets: dict[str, float] = {}
+    for src, dur in valid_pairs:
+        if not is_image_path(src):
+            v_health = probe_video_render_health(src, dur, cwd=work)
+            if v_health.get("suggested_offset", 0.0) > 0.3:
+                source_offsets[str(src.resolve()).lower()] = float(v_health["suggested_offset"])
     visual_window_summary: dict[str, Any] = {
         "enabled": bool(job.options.get("scoreVisualWindows", True)),
         "analyzed": 0,
