@@ -5425,6 +5425,142 @@ def enforce_clean_opening_protocol(
     return reordered, summary
 
 
+MEDIA_STOPWORDS = {
+    "clip", "video", "img", "image", "photo", "shot", "take", "footage", "screen",
+    "the", "a", "an", "and", "or", "of", "in", "on", "at", "to", "for", "with", "from",
+    "de", "do", "da", "dos", "das", "em", "no", "na", "nos", "nas", "um", "uma", "uns", "umas",
+    "el", "la", "los", "las", "un", "una", "unos", "unas", "en", "con", "por", "para",
+    "1080p", "720p", "4k", "2k", "hd", "mp4", "jpg", "jpeg", "png", "webm",
+}
+
+
+def extract_media_tokens(path: Path) -> set[str]:
+    """Extrai tokens significativos do nome do arquivo (ex: '01_north_west_island_00m19s.mp4' -> {'north', 'west', 'island'})."""
+    stem = path.stem.lower()
+    stem = re.sub(r"\b\d+m\d+s(?:-\d+m\d+s)?\b", " ", stem)
+    stem = re.sub(r"^\d+[\s_-]+", " ", stem)
+    tokens = re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", stem)
+    cleaned = {t for t in tokens if t not in MEDIA_STOPWORDS and (not t.isdigit() or len(t) == 4)}
+    return cleaned
+
+
+def _token_stem_match(t: str, w: str) -> bool:
+    if t == w:
+        return True
+    if len(t) >= 4 and len(w) >= 4:
+        min_prefix = min(len(t), len(w), 4)
+        if t[:min_prefix] == w[:min_prefix]:
+            return True
+    return False
+
+
+def match_media_to_subtitles(
+    job: Job,
+    valid_pairs: list[tuple[Path, float]],
+    cues: list[SubtitleCue],
+    audio_total: float,
+) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
+    """Alinha semanticamente clipes de midia com as falas correspondentes na legenda SRT."""
+    if len(valid_pairs) <= 3 or not cues:
+        return valid_pairs, {"enabled": False, "matched_count": 0}
+
+    cued_tokens: list[tuple[float, float, set[str]]] = []
+    for cue in cues:
+        words = set(re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", cue.text.lower()))
+        words = {w for w in words if w not in MEDIA_STOPWORDS}
+        if words:
+            cued_tokens.append((cue.start, cue.end, words))
+
+    if not cued_tokens:
+        return valid_pairs, {"enabled": True, "matched_count": 0, "reason": "sem tokens em cues"}
+
+    media_tokens_list: list[tuple[Path, float, set[str]]] = []
+    for path, dur in valid_pairs:
+        tokens = extract_media_tokens(path)
+        media_tokens_list.append((path, dur, tokens))
+
+    matches: list[dict[str, Any]] = []
+    used_media_indices: set[int] = set()
+
+    for cue_start, cue_end, cue_words in cued_tokens:
+        best_score = 0
+        best_idx = -1
+        best_common: list[str] = []
+        for idx, (path, dur, tokens) in enumerate(media_tokens_list):
+            if idx in used_media_indices or not tokens:
+                continue
+            common = [t for t in tokens if any(_token_stem_match(t, w) for w in cue_words)]
+            if common:
+                score = len(common) * 10
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+                    best_common = common
+
+        if best_idx >= 0 and best_score >= 10:
+            used_media_indices.add(best_idx)
+            path, dur, tokens = media_tokens_list[best_idx]
+            matches.append({
+                "media_idx": best_idx,
+                "path": path,
+                "duration": dur,
+                "target_time": cue_start,
+                "matched_words": best_common,
+                "score": best_score,
+            })
+
+    if not matches:
+        return valid_pairs, {"enabled": True, "matched_count": 0, "reason": "nenhum casamento tematico encontrado"}
+
+    total_clips = len(valid_pairs)
+    avg_clip_dur = max(2.5, audio_total / max(1, total_clips))
+    reordered: list[tuple[Path, float] | None] = [None] * total_clips
+
+    for m in sorted(matches, key=lambda x: x["target_time"]):
+        ideal_slot = min(total_clips - 1, max(0, int(round(m["target_time"] / avg_clip_dur))))
+        placed = False
+        for offset in range(total_clips):
+            pos_right = ideal_slot + offset
+            if pos_right < total_clips and reordered[pos_right] is None:
+                reordered[pos_right] = (m["path"], m["duration"])
+                placed = True
+                break
+            pos_left = ideal_slot - offset
+            if pos_left >= 0 and reordered[pos_left] is None:
+                reordered[pos_left] = (m["path"], m["duration"])
+                placed = True
+                break
+
+    unmatched_pool = [
+        (path, dur)
+        for idx, (path, dur, _) in enumerate(media_tokens_list)
+        if idx not in used_media_indices
+    ]
+
+    for i in range(total_clips):
+        if reordered[i] is None and unmatched_pool:
+            reordered[i] = unmatched_pool.pop(0)
+
+    final_pairs: list[tuple[Path, float]] = [item for item in reordered if item is not None]
+    if unmatched_pool:
+        final_pairs.extend(unmatched_pool)
+
+    summary = {
+        "enabled": True,
+        "matched_count": len(matches),
+        "matches": [
+            {
+                "file": m["path"].name,
+                "target_second": round(m["target_time"], 2),
+                "matched_words": m["matched_words"],
+            }
+            for m in matches[:15]
+        ],
+    }
+    _append_log(job, f"Semantic B-Roll Matcher: {len(matches)} clipes casados com temas da narracao.")
+    return final_pairs, summary
+
+
 def visual_clean_enabled(options: dict[str, Any]) -> bool:
     return True
 
@@ -9680,18 +9816,6 @@ def build_ass_file(
     if not cues:
         _append_log(job, f"Textos ignorados: nenhum cue valido apos limpeza. Resumo={summary}")
         return None
-    strong_moments_enabled = False
-    strong_moments: list[dict[str, Any]] = []
-    job.strong_moments_summary = {
-        "enabled": strong_moments_enabled,
-        "count": len(strong_moments),
-        "moments": strong_moments,
-        "policy": "removido_v1_28_substituido_por_enfases_leves_de_textos",
-        "requested": False,
-        "suspended_by_turbo": bool(turbo_enabled(job)),
-        "removed": True,
-    }
-
     style = subtitle_style_from_options(job.options)
     caption_style = caption_style_from_options(job.options)
     summary["preset"] = style.get("preset")
@@ -14497,6 +14621,15 @@ def make_segments_smart(
         candidate_sources=candidate_sources,
         imported_count=len(video_files),
     )
+    # Semantic B-Roll Matcher: alinha tematicamente clipes com as falas da narracao
+    cues_for_matching = list(job.subtitle_cues or [])
+    if not cues_for_matching and subtitles:
+        for srt_f in subtitles:
+            if srt_f.exists():
+                cues_for_matching = parse_srt_file(srt_f)
+                break
+    valid_pairs, semantic_b_roll_summary = match_media_to_subtitles(job, valid_pairs, cues_for_matching, audio_total)
+    job.preflight_summary["semantic_b_roll"] = semantic_b_roll_summary
     # Clean Opening Protocol: protege estritamente os primeiros 10 slots com B-roll limpo
     valid_pairs, clean_opening_summary = enforce_clean_opening_protocol(job, valid_pairs, work, max_opening_slots=10)
     job.preflight_summary["clean_opening"] = clean_opening_summary
