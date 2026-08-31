@@ -73,6 +73,8 @@ MUSIC_HISTORY_FILE = DATA_ROOT / "music_history.json"
 RENDER_PERFORMANCE_FILE = DATA_ROOT / "render_performance.json"
 QUEUE_PROJECTS_FILE = DATA_ROOT / "queue_projects.json"
 APP_SETTINGS_FILE = DATA_ROOT / "app_settings.json"
+DROPZONE_ROOT = DATA_ROOT / "DROPZONE"
+DROPZONE_OUTPUT_ROOT = DATA_ROOT / "OUTPUT"
 VISUAL_CLEAN_CACHE_FILE = DATA_ROOT / "visual_clean_cache.json"
 INTELLIGENCE_DB_FILE = DATA_ROOT / "glide_intelligence.sqlite3"
 RENDER_GRAPH_CACHE_ROOT = DATA_ROOT / "render_graph_cache"
@@ -3476,10 +3478,179 @@ def maintenance_prepare_shutdown():
     return {"ok": True, "cleanup": safe_shutdown_cleanup()}
 
 
+class DropzoneManager:
+    def __init__(self, root: Path = DROPZONE_ROOT, poll_interval: float = 6.0):
+        self.root = root
+        self.poll_interval = poll_interval
+        self.enabled = True
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._processed_folders: set[str] = set()
+
+    def start(self):
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            DROPZONE_OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run_loop, name="DropzoneWatcher", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_event.set()
+
+    def scan_now(self) -> dict[str, Any]:
+        return self._scan_directory()
+
+    def _run_loop(self):
+        while not self._stop_event.is_set():
+            try:
+                if self.enabled:
+                    self._scan_directory()
+            except Exception:
+                pass
+            self._stop_event.wait(self.poll_interval)
+
+    def _scan_directory(self) -> dict[str, Any]:
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        discovered = []
+        ingested = []
+
+        try:
+            subdirs = [p for p in self.root.iterdir() if p.is_dir() and not p.name.startswith((".", "_"))]
+        except Exception:
+            subdirs = []
+
+        for folder in subdirs:
+            folder_key = str(folder.resolve()).lower()
+            if folder_key in self._processed_folders:
+                continue
+
+            try:
+                files = [p for p in folder.rglob("*") if p.is_file() and not p.name.startswith(".")]
+            except Exception:
+                files = []
+
+            if not files:
+                continue
+
+            now = time.time()
+            mtimes = [p.stat().st_mtime for p in files if p.exists()]
+            if not mtimes:
+                continue
+            latest_mtime = max(mtimes)
+            if (now - latest_mtime) < 2.5:
+                continue
+
+            discovered.append(folder.name)
+            project_id = self._ingest_folder(folder, files)
+            if project_id:
+                self._processed_folders.add(folder_key)
+                ingested.append({"folder": folder.name, "project_id": project_id})
+
+        return {
+            "enabled": self.enabled,
+            "dropzone_dir": str(self.root),
+            "output_dir": str(DROPZONE_OUTPUT_ROOT),
+            "discovered_folders": len(discovered),
+            "ingested_projects": ingested,
+        }
+
+    def _ingest_folder(self, folder: Path, files: list[Path]) -> str | None:
+        audio_exts = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}
+        srt_exts = {".srt"}
+        video_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+        img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+
+        audio_files = []
+        srt_files = []
+        media_files = []
+
+        for p in files:
+            ext = p.suffix.lower()
+            if ext in audio_exts:
+                audio_files.append(p)
+            elif ext in srt_exts:
+                srt_files.append(p)
+            elif ext in video_exts or ext in img_exts:
+                media_files.append(p)
+
+        if not audio_files or not media_files:
+            return None
+
+        media_files.sort(key=lambda p: natural_key(p.name))
+        voiceover = audio_files[0]
+        srt_path = srt_files[0] if srt_files else None
+
+        project_name = folder.name.replace("_", " ").title()
+        project_id = f"p_drop_{uuid.uuid4().hex[:8]}"
+
+        payload = {
+            "id": project_id,
+            "name": project_name,
+            "status": "ready",
+            "createdAt": _now_iso(),
+            "updatedAt": _now_iso(),
+            "source_folder": str(folder.resolve()),
+            "media": {
+                "voiceover": str(voiceover.resolve()),
+                "subtitles": str(srt_path.resolve()) if srt_path else None,
+                "videos": [str(m.resolve()) for m in media_files],
+            },
+            "options": {
+                "aspectRatio": "16:9",
+                "qualityBoost": True,
+                "allowAudioTrim": True,
+                "scoreVisualWindows": True,
+                "autoHeal": True,
+            },
+        }
+
+        with QUEUE_LOCK:
+            if not any(p.get("source_folder") == str(folder.resolve()) for p in QUEUE_PROJECTS):
+                QUEUE_PROJECTS.append(payload)
+                _save_queue_projects(QUEUE_PROJECTS)
+                return project_id
+        return None
+
+
+DROPZONE_MANAGER = DropzoneManager()
+
+
+@app.on_event("startup")
+def application_startup_init():
+    DROPZONE_MANAGER.start()
+
+
+@app.get("/api/dropzone/status")
+def api_dropzone_status():
+    return DROPZONE_MANAGER.scan_now()
+
+
+@app.post("/api/dropzone/toggle")
+def api_dropzone_toggle(payload: dict[str, Any] | None = Body(None)):
+    data = payload or {}
+    if "enabled" in data:
+        DROPZONE_MANAGER.enabled = bool(data["enabled"])
+    else:
+        DROPZONE_MANAGER.enabled = not DROPZONE_MANAGER.enabled
+    return {"ok": True, "enabled": DROPZONE_MANAGER.enabled}
+
+
+@app.post("/api/dropzone/scan_now")
+def api_dropzone_scan_now():
+    return DROPZONE_MANAGER.scan_now()
+
+
 @app.on_event("shutdown")
 def application_shutdown_cleanup():
-    # Covers the web fallback and unexpected desktop shutdown paths. The
-    # operation is idempotent, so the desktop may prepare cleanup first.
+    DROPZONE_MANAGER.stop()
     safe_shutdown_cleanup()
 
 
