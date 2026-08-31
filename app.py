@@ -13942,6 +13942,59 @@ def continuity_adjustments(
     }
 
 
+FILMIC_GRADE_PRESETS: dict[str, dict[str, Any]] = {
+    "none": {
+        "label": "Sem Gradação",
+        "filter": "",
+        "description": "Nenhum ajuste de cor adicional aplicado",
+    },
+    "natural_balanced": {
+        "label": "Natural Balance",
+        "filter": "eq=contrast=1.04:brightness=0.005:saturation=1.03",
+        "description": "Equilíbrio neutro e contraste límpido sem alterar a fidelidade",
+    },
+    "cinema_warm": {
+        "label": "Cinema Warm Documentário",
+        "filter": "eq=contrast=1.05:brightness=0.01:saturation=1.05,colorbalance=rs=0.025:gs=0.008:bs=-0.025:rm=0.018:bm=-0.018",
+        "description": "Aquecimento elegante para documentários, biografias e histórias",
+    },
+    "teal_orange": {
+        "label": "Teal & Orange Cinematográfico",
+        "filter": "eq=contrast=1.06:brightness=0.00:saturation=1.06,colorbalance=rs=0.020:bs=-0.015:rh=0.025:bh=-0.020",
+        "description": "Estilo Hollywood para ação, suspense, mistério e impacto visual",
+    },
+    "vintage_archive": {
+        "label": "Vintage Archive & Histórico",
+        "filter": "eq=contrast=1.03:brightness=0.015:saturation=0.88,colorbalance=rs=0.035:gs=0.015:bs=-0.030",
+        "description": "Dessaturação nostálgica suave com realce sépia para arquivos",
+    },
+    "vibrant_modern": {
+        "label": "Vibrant Modern Tech",
+        "filter": "eq=contrast=1.05:brightness=0.010:saturation=1.10,unsharp=3:3:0.35:3:3:0.0",
+        "description": "Cores vivas e nitidez moderna para canais de tecnologia e curiosidades",
+    },
+}
+
+
+def filmic_grade_filter_for(options: dict[str, Any] | None = None, tone: str = "explanatory") -> str:
+    opts = options or {}
+    explicit = str(opts.get("colorGradePreset") or opts.get("filmicGrade") or "").strip().lower()
+    if explicit in FILMIC_GRADE_PRESETS:
+        return FILMIC_GRADE_PRESETS[explicit]["filter"]
+    if explicit == "off":
+        return ""
+    tone = str(tone or "explanatory").strip().lower()
+    if tone in {"historical", "archive"}:
+        return FILMIC_GRADE_PRESETS["vintage_archive"]["filter"]
+    if tone in {"suspense", "action", "energetic"}:
+        return FILMIC_GRADE_PRESETS["teal_orange"]["filter"]
+    if tone in {"tech"}:
+        return FILMIC_GRADE_PRESETS["vibrant_modern"]["filter"]
+    if tone in {"emotional"}:
+        return FILMIC_GRADE_PRESETS["cinema_warm"]["filter"]
+    return FILMIC_GRADE_PRESETS["natural_balanced"]["filter"]
+
+
 def build_video_filter(
     w: int,
     h: int,
@@ -13956,6 +14009,7 @@ def build_video_filter(
     continuity_filter: str = "",
     is_reversed: bool = False,
     is_outro: bool = False,
+    filmic_grade: str = "",
 ) -> str:
     vf = ""
     if is_reversed:
@@ -13966,6 +14020,8 @@ def build_video_filter(
     )
     if quality_boost:
         vf += f",{quality_boost_chain()}"
+    if filmic_grade:
+        vf += f",{filmic_grade}"
     if continuity_filter:
         vf += f",{continuity_filter}"
     vf += ",format=yuv420p"
@@ -14014,6 +14070,7 @@ def build_image_filter_complex(
     image_path: Path | str | None = None,
     style_profile: dict[str, Any] | None = None,
     is_outro: bool = False,
+    filmic_grade: str = "",
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
     progress = f"(on/{frames})"
@@ -14037,6 +14094,7 @@ def build_image_filter_complex(
         y_expr = "(ih-ih/zoom)*0.38"
 
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
+    filmic_chain = f",{filmic_grade}" if filmic_grade else ""
 
     # Micro-fade cinematográfico (0.28s suave) ou fade out suave de encerramento
     fade_dur = min(0.8 if is_outro else 0.28, max(0.12, target_duration * (0.35 if is_outro else 0.08)))
@@ -14062,7 +14120,7 @@ def build_image_filter_complex(
         return (
             f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)/2:max(0\\,(in_h-out_h)*0.38),setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={w}x{h}:fps=30,"
-            f"trim=duration={target_duration:.4f}{style_filter}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
+            f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
 
@@ -14072,7 +14130,7 @@ def build_image_filter_complex(
         f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={w}x{h}:fps=30,"
-        f"trim=duration={target_duration:.4f}{style_filter}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
+        f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
     )
 
@@ -14838,6 +14896,11 @@ def make_segments_smart(
         f"descartados={summary.get('dropped_clips', 0)} | resolução={w}x{h} | quality_boost={'on' if summary.get('quality_boost') else 'off'}."
     ))
 
+    tone = str((job.audio_analysis or {}).get("tone") or job.options.get("tone") or "explanatory")
+    filmic_grade = filmic_grade_filter_for(job.options, tone)
+    summary["filmic_grade"] = filmic_grade
+    summary["filmic_grade_preset"] = str(job.options.get("colorGradePreset") or tone)
+
     rendered_duration = 0.0
     next_segment_no = 1
     completed_planned_duration = 0.0
@@ -14868,6 +14931,7 @@ def make_segments_smart(
                 plan.source,
                 style_profile,
                 is_outro=plan.is_outro,
+                filmic_grade=filmic_grade,
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
@@ -14901,6 +14965,7 @@ def make_segments_smart(
                 continuity_filter=continuity_filters.get(str(plan.source), ""),
                 is_reversed=plan.is_reversed,
                 is_outro=plan.is_outro,
+                filmic_grade=filmic_grade,
             )
             input_limit = max(0.5, (plan.target_duration / max(0.08, float(summary.get("setpts_factor", 1.0)))) + 1.25)
             seek_args = []
