@@ -9282,18 +9282,18 @@ def subtitle_style_from_options(options: dict[str, Any]) -> dict[str, Any]:
         "verdana": "Verdana",
     }
     presets = {
-        "bold_white": {"font": "Arial Black", "size": 48, "primary": "#FFFFFF", "outline": "#111111", "back": "#000000", "bold": True, "box": False, "animation": "mixed", "outline_size": 2.2, "shadow": 1.0},
-        "bold_yellow": {"font": "Arial Black", "size": 50, "primary": "#FFD83D", "outline": "#121212", "back": "#000000", "bold": True, "box": False, "animation": "pop", "outline_size": 2.4, "shadow": 1.0},
-        "dark_box": {"font": "Segoe UI Semibold", "size": 44, "primary": "#FFFFFF", "outline": "#000000", "back": "#101010", "bold": True, "box": True, "animation": "slide", "outline_size": 1.0, "shadow": 0.0},
-        "cinema_white": {"font": "Georgia", "size": 44, "primary": "#F7F1E8", "outline": "#0B0B0B", "back": "#000000", "bold": False, "box": False, "animation": "cinematic", "outline_size": 1.8, "shadow": 1.0},
-        "green_neon": {"font": "Arial Black", "size": 46, "primary": "#74FF8F", "outline": "#052B15", "back": "#000000", "bold": True, "box": False, "animation": "pulse", "outline_size": 2.2, "shadow": 1.0},
-        "minimal": {"font": "Segoe UI Semibold", "size": 42, "primary": "#F4F4F4", "outline": "#202020", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 1.2, "shadow": 0.4},
-        "impact_gold": {"font": "Impact", "size": 52, "primary": "#FFD36A", "outline": "#1D1404", "back": "#000000", "bold": True, "box": False, "animation": "pop", "outline_size": 2.8, "shadow": 1.2},
-        "documentary": {"font": "Bahnschrift", "size": 43, "primary": "#F0F4F2", "outline": "#0D1813", "back": "#000000", "bold": True, "box": False, "animation": "slide", "outline_size": 1.8, "shadow": 0.8},
-        "blue_glow": {"font": "Arial Black", "size": 46, "primary": "#8EDBFF", "outline": "#062033", "back": "#000000", "bold": True, "box": False, "animation": "zoom", "outline_size": 2.4, "shadow": 1.2},
-        "red_punch": {"font": "Arial Black", "size": 50, "primary": "#FF6B5F", "outline": "#1B0504", "back": "#000000", "bold": True, "box": False, "animation": "pop", "outline_size": 2.7, "shadow": 1.0},
-        "soft_pink": {"font": "Trebuchet MS", "size": 45, "primary": "#FFD1E8", "outline": "#2D1324", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 1.8, "shadow": 0.8},
-        "clean_box": {"font": "Verdana", "size": 42, "primary": "#FFFFFF", "outline": "#000000", "back": "#000000", "bold": True, "box": True, "animation": "fade", "outline_size": 0.8, "shadow": 0.0},
+        "bold_white": {"font": "Arial Black", "size": 48, "primary": "#FFFFFF", "outline": "#0A0A0A", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 1.8, "shadow": 1.2},
+        "bold_yellow": {"font": "Arial Black", "size": 48, "primary": "#FFE600", "outline": "#0C0C0C", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 1.8, "shadow": 1.2},
+        "dark_box": {"font": "Segoe UI Semibold", "size": 42, "primary": "#FFFFFF", "outline": "#000000", "back": "#121519", "bold": True, "box": True, "animation": "slide", "outline_size": 0.8, "shadow": 0.0},
+        "cinema_white": {"font": "Georgia", "size": 44, "primary": "#FBF6EE", "outline": "#080808", "back": "#000000", "bold": False, "box": False, "animation": "cinematic", "outline_size": 1.4, "shadow": 1.2},
+        "green_neon": {"font": "Arial Black", "size": 46, "primary": "#65FF90", "outline": "#031E0C", "back": "#000000", "bold": True, "box": False, "animation": "pulse", "outline_size": 1.8, "shadow": 1.0},
+        "minimal": {"font": "Segoe UI Semibold", "size": 40, "primary": "#F5F5F7", "outline": "#18181A", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 1.0, "shadow": 0.6},
+        "impact_gold": {"font": "Impact", "size": 50, "primary": "#FFDE59", "outline": "#140F03", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 2.2, "shadow": 1.2},
+        "documentary": {"font": "Bahnschrift", "size": 43, "primary": "#F0F4F2", "outline": "#09120E", "back": "#000000", "bold": True, "box": False, "animation": "cinematic", "outline_size": 1.6, "shadow": 1.0},
+        "blue_glow": {"font": "Arial Black", "size": 46, "primary": "#7FE5FF", "outline": "#041C2C", "back": "#000000", "bold": True, "box": False, "animation": "kinetic", "outline_size": 2.0, "shadow": 1.2},
+        "red_punch": {"font": "Arial Black", "size": 48, "primary": "#FF594D", "outline": "#180403", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 2.0, "shadow": 1.0},
+        "soft_pink": {"font": "Trebuchet MS", "size": 44, "primary": "#FFD4EB", "outline": "#220C19", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 1.4, "shadow": 0.8},
+        "clean_box": {"font": "Verdana", "size": 40, "primary": "#FFFFFF", "outline": "#000000", "back": "#0A0D12", "bold": True, "box": True, "animation": "fade", "outline_size": 0.6, "shadow": 0.0},
     }
     base = presets.get(preset, presets["bold_white"]).copy()
     base["preset"] = preset
