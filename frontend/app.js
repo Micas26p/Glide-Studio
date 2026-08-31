@@ -851,6 +851,7 @@ function captureControlSnapshot(includeSubtitle = true){
     codec: $('#codecSelect')?.value || 'hevc',
     transitions: $('#transitionSelect')?.value || 'off',
     zoom: $('#zoomSelect')?.value || 'off',
+    colorGradePreset: $('#colorGradeSelect')?.value || 'natural_balanced',
     gpu: $('#gpuToggle')?.checked || false,
     qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : true,
     smartVisualDirector: smartDirectorEnabled,
@@ -921,6 +922,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if($('#codecSelect')) $('#codecSelect').value = options.codec || 'hevc';
   if($('#transitionSelect')) $('#transitionSelect').value = options.transitions || 'off';
   if($('#zoomSelect')) $('#zoomSelect').value = options.zoom || 'off';
+  if($('#colorGradeSelect')) $('#colorGradeSelect').value = options.colorGradePreset || 'natural_balanced';
   if($('#gpuToggle')) $('#gpuToggle').checked = Boolean(options.gpu);
   if(qualityBoostToggle) qualityBoostToggle.checked = options.qualityBoost !== false;
   if(smartVisualDirectorToggle) smartVisualDirectorToggle.checked = options.smartVisualDirector !== false;
@@ -8352,9 +8354,75 @@ refreshFinalOutputUi();
 loadRuntimeConfig();
 loadCtaAssets();
 warmBackendCache();
+async function fetchDropzoneStatus() {
+  try {
+    const res = await fetch('/api/dropzone/status');
+    if (!res.ok) return;
+    const data = await res.json();
+    updateDropzoneUI(data);
+  } catch (err) {
+    // silent
+  }
+}
+
+function updateDropzoneUI(data) {
+  const el = $('#dropzoneStatusBar');
+  if (!el || !data) return;
+  const count = data.discovered_folders || 0;
+  const desc = el.querySelector('.dropzone-desc');
+  if (desc) {
+    if (count > 0) {
+      desc.innerHTML = `Solte pastas com mídia em <code>DROPZONE/</code> — <strong>${count} projeto(s) autônomo(s) detectado(s)</strong>.`;
+    } else {
+      desc.innerHTML = `Solte pastas com mídia em <code>DROPZONE/</code> para renderização 100% autônoma.`;
+    }
+  }
+}
+
+async function triggerDropzoneScan() {
+  const scanBtn = $('#dropzoneScanBtn');
+  if (scanBtn) {
+    scanBtn.disabled = true;
+    scanBtn.textContent = 'Escaneando...';
+  }
+  try {
+    const res = await fetch('/api/dropzone/scan_now', { method: 'POST' });
+    if (res.ok) {
+      const data = await res.json();
+      updateDropzoneUI(data);
+      if (typeof fetchQueueStatus === 'function') fetchQueueStatus();
+      if (typeof refreshQueueProjects === 'function') refreshQueueProjects();
+    }
+  } catch (e) {
+    // silent
+  } finally {
+    if (scanBtn) {
+      scanBtn.disabled = false;
+      scanBtn.textContent = 'Escanear agora';
+    }
+  }
+}
+
+const dropzoneScanBtn = $('#dropzoneScanBtn');
+if (dropzoneScanBtn) {
+  dropzoneScanBtn.addEventListener('click', triggerDropzoneScan);
+}
+
+const colorGradeSelect = $('#colorGradeSelect');
+if (colorGradeSelect) {
+  colorGradeSelect.addEventListener('change', () => {
+    const active = captureActiveProject();
+    if (active) syncProjectSnapshot(active);
+  });
+}
+
+fetchDropzoneStatus();
+setInterval(fetchDropzoneStatus, 10000);
 loadPresetMusicStatus();
 loadSfxPreviewMap();
 loadSemanticModelStatus();
 checkHealth();
 refreshRenderGallery();
 initializeProjectQueue().then(resumeActiveJob);
+
+

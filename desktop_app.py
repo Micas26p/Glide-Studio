@@ -33,7 +33,7 @@ _boot_smoke_trace("boot:uvicorn-ready")
 
 HOST = "127.0.0.1"
 SERVER_READY_TIMEOUT = 20
-APP_VERSION = "1.31.0"
+APP_VERSION = "1.40.0"
 DATA_ROOT: Path | None = None
 BACKEND_APP = None
 _INSTANCE_MUTEX = None

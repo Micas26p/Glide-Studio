@@ -4,16 +4,16 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Glide Studio - App Local</title>
-  <link rel="icon" href="/assets/glide_studio.ico?v=1.31.0" sizes="any" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/assets/glide_studio_icon_32.png?v=1.31.0" />
-  <link rel="icon" type="image/png" sizes="48x48" href="/assets/glide_studio_icon_48.png?v=1.31.0" />
-  <link rel="icon" type="image/png" sizes="256x256" href="/assets/glide_studio_icon_256.png?v=1.31.0" />
-  <link rel="icon" type="image/png" sizes="512x512" href="/assets/glide_studio_icon.png?v=1.31.0" />
-  <link rel="shortcut icon" href="/assets/glide_studio.ico?v=1.31.0" />
-  <link rel="apple-touch-icon" href="/assets/glide_studio_icon_256.png?v=1.31.0" />
-  <link rel="manifest" href="/assets/site.webmanifest?v=1.31.0" />
+  <link rel="icon" href="/assets/glide_studio.ico?v=1.40.0" sizes="any" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/assets/glide_studio_icon_32.png?v=1.40.0" />
+  <link rel="icon" type="image/png" sizes="48x48" href="/assets/glide_studio_icon_48.png?v=1.40.0" />
+  <link rel="icon" type="image/png" sizes="256x256" href="/assets/glide_studio_icon_256.png?v=1.40.0" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/assets/glide_studio_icon.png?v=1.40.0" />
+  <link rel="shortcut icon" href="/assets/glide_studio.ico?v=1.40.0" />
+  <link rel="apple-touch-icon" href="/assets/glide_studio_icon_256.png?v=1.40.0" />
+  <link rel="manifest" href="/assets/site.webmanifest?v=1.40.0" />
   <meta name="theme-color" content="#080a09" />
-  <link rel="stylesheet" href="/static/style.css?v=1.31.0" />
+  <link rel="stylesheet" href="/static/style.css?v=1.40.0" />
 </head>
 <body data-theme="system">
   <div class="editor-intro" id="editorIntro" aria-hidden="true">
@@ -35,7 +35,7 @@
       <span class="brand-mark" aria-hidden="true"></span>
       <div>
         <strong>Glide Studio</strong>
-        <span>App Local v1.31.0</span>
+        <span>App Local v1.40.0</span>
       </div>
     </div>
     <nav>
@@ -88,6 +88,15 @@
           <button type="button" class="btn ghost small" id="renderHealthyBtn" title="Renderiza apenas projetos completos e com confiança mínima">Renderizar saudáveis</button>
           <button type="button" class="btn ghost small automator-btn" id="automatorBtn" title="Distribui Textos, áudio e pastas com vídeos a partir do projeto selecionado">AUTO</button>
           <button type="button" class="btn export small" id="renderQueueBtn">Renderizar fila</button>
+        </div>
+      </div>
+      <div class="dropzone-status-bar" id="dropzoneStatusBar">
+        <div class="dropzone-info">
+          <span class="dropzone-badge"><span class="dropzone-pulse"></span> DROPZONE ATIVA</span>
+          <span class="dropzone-desc">Solte pastas com mídia em <code>DROPZONE/</code> para renderização 100% autônoma.</span>
+        </div>
+        <div class="dropzone-actions">
+          <button type="button" class="btn ghost small" id="dropzoneScanBtn" title="Escanear pasta DROPZONE imediatamente">Escanear agora</button>
         </div>
       </div>
       <div class="queue-tool-row">
@@ -300,6 +309,16 @@
             <select id="zoomSelect">
               <option value="off">Desligado</option>
               <option value="light">Zoom in/out</option>
+            </select>
+          </label>
+          <label class="advanced-only">Gradação de Cor
+            <select id="colorGradeSelect" aria-label="Preset de gradação de cor">
+              <option value="natural_balanced" selected>Auto / Natural Balanced</option>
+              <option value="cinema_warm">Cinema Warm Documentário</option>
+              <option value="teal_orange">Teal & Orange Hollywood</option>
+              <option value="vintage_archive">Vintage Archive Histórico</option>
+              <option value="vibrant_modern">Vibrant Modern Tech</option>
+              <option value="off">Desligado</option>
             </select>
           </label>
         </div>

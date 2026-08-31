@@ -51,7 +51,7 @@ from glide_render_graph import RenderGraph
 from glide_render_plan import build_render_plan, write_render_plan
 from glide_sound_design import write_sound_design_map
 
-APP_VERSION = "1.31.0"
+APP_VERSION = "1.40.0"
 RENDER_PIPELINE_VERSION = "render_graph_6_budget"
 RENDER_PERFORMANCE_VERSION = "performance_7_fast_finish"
 
