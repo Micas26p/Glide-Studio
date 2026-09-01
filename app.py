@@ -1690,6 +1690,96 @@ def _script_block_type(text: str, index: int, total: int) -> tuple[str, str]:
     return "explicacao", "bloco explicativo"
 
 
+def extract_script_editorial_structure(text: str) -> dict[str, Any]:
+    """Extrai estrutura editorial profissional de roteiros (Capítulos, Cenas Obrigatórias, Hook, Reversão, CTA)."""
+    structure: dict[str, Any] = {
+        "mandatory_scenes": [],
+        "chapters": [],
+        "hook": None,
+        "main_reversal": None,
+        "cta_phrases": [],
+        "cta_target_time": None,
+    }
+
+    # 1. Cenas Obrigatórias (Mandatory scenes / Escenas obligatorias / Cenas obrigatórias)
+    mandatory_match = re.search(
+        r"(?:mandatory scenes?|escenas obligatorias?|cenas obrigat[oó]rias?):\s*(.*?)(?=\n\s*(?:main turn|main reversal|giro principal|documentary base|base documental|full script|roteiro completo|\Z))",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if mandatory_match:
+        m_text = mandatory_match.group(1).strip()
+        scene_parts = re.split(r"(?:scene|escena|cena)\s*\d+:\s*", m_text, flags=re.IGNORECASE)
+        for part in scene_parts:
+            cleaned = part.strip().rstrip(".,;")
+            if len(cleaned) > 5:
+                raw_words = re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", cleaned.lower())
+                stopwords = {
+                    "the", "and", "about", "across", "begin", "with", "from", "are", "have", "that",
+                    "this", "into", "later", "para", "com", "uma", "dos", "das", "por", "que", "los", "las"
+                }
+                keywords = [w for w in raw_words if w not in stopwords and not w.isdigit()]
+                structure["mandatory_scenes"].append({
+                    "description": cleaned[:300],
+                    "keywords": keywords[:16],
+                    "target_time": None,
+                })
+
+    # 2. Capítulos (Chapter 1 | 0:00-2:20 | ... or Capítulo 1 | ...)
+    chapter_matches = re.finditer(
+        r"(?:chapter|cap[ií]tulo)\s*(\d+)\s*\|\s*([\d:]+)\s*-\s*([\d:]+)\s*\|\s*([^\n|]+)\|\s*([^\n]+)",
+        text,
+        re.IGNORECASE,
+    )
+    for match in chapter_matches:
+        chap_num = match.group(1)
+        start_str = match.group(2)
+        end_str = match.group(3)
+        duration_str = match.group(4).strip()
+        content_str = match.group(5).strip()
+
+        def _parse_ts(s: str) -> float:
+            parts = [float(p) for p in s.strip().split(":")]
+            if len(parts) == 2:
+                return parts[0] * 60.0 + parts[1]
+            elif len(parts) == 3:
+                return parts[0] * 3600.0 + parts[1] * 60.0 + parts[2]
+            return 0.0
+
+        start_sec = _parse_ts(start_str)
+        end_sec = _parse_ts(end_str)
+        structure["chapters"].append({
+            "chapter": int(chap_num),
+            "start": start_sec,
+            "end": end_sec,
+            "duration_str": duration_str,
+            "title": content_str[:120],
+            "keywords": _script_keywords(content_str, limit=8),
+        })
+
+    # 3. Hook
+    hook_match = re.search(r"hook:\s*([^\n]+)", text, re.IGNORECASE)
+    if hook_match:
+        structure["hook"] = hook_match.group(1).strip()
+
+    # 4. Main Reversal / Giro Principal
+    reversal_match = re.search(r"(?:main reversal|main turn|giro principal):\s*([^\n]+)", text, re.IGNORECASE)
+    if reversal_match:
+        structure["main_reversal"] = reversal_match.group(1).strip()
+
+    # 5. Call To Action (Frases finais de inscrição/engajamento)
+    cta_patterns = [
+        r"(?:subscribe to|suscr[ií]bete a|inscreva-se no|subscribe|comente|tell us in the comments|comentarios|siguiente caso|next case)[^\n.]*",
+    ]
+    for cp in cta_patterns:
+        for m in re.finditer(cp, text, re.IGNORECASE):
+            match_txt = m.group(0).strip()
+            if len(match_txt) >= 8 and match_txt not in structure["cta_phrases"]:
+                structure["cta_phrases"].append(match_txt[:120])
+
+    return structure
+
+
 def analyze_script_guide(path: Path, *, project_id: str = "", rel: str = "", srt_cues: list[SubtitleCue] | None = None) -> dict[str, Any]:
     text = extract_script_text(path)
     raw_lines = [line.strip() for line in text.splitlines()]
@@ -1759,8 +1849,11 @@ def analyze_script_guide(path: Path, *, project_id: str = "", rel: str = "", srt
 
     if len(blocks) > len(interpreted):
         warnings.append(f"{len(blocks) - len(interpreted)} bloco(s) extras foram resumidos para manter o plano leve.")
+
+    editorial = extract_script_editorial_structure(text)
+
     if srt_cues:
-        cue_texts = [fold_text(cue.text) for cue in srt_cues[:300]]
+        cue_texts = [fold_text(cue.text) for cue in srt_cues[:500]]
         for block in interpreted:
             block_words = set(_script_keywords(block.get("text") or "", limit=8))
             best_score = 0
@@ -1779,6 +1872,34 @@ def analyze_script_guide(path: Path, *, project_id: str = "", rel: str = "", srt
                 block["timing_source"] = "textos_srt"
             else:
                 block["timing_source"] = "estimated_order"
+
+        # Vincular timing das Cenas Obrigatórias
+        for scene in editorial["mandatory_scenes"]:
+            s_words = set(scene.get("keywords") or [])
+            best_score = 0
+            best_t = None
+            for cue_index, cue_text in enumerate(cue_texts):
+                if not s_words:
+                    continue
+                score = sum(1 for w in s_words if w in cue_text)
+                if score > best_score:
+                    best_score = score
+                    best_t = round(srt_cues[cue_index].start, 3)
+            if best_t is not None and best_score >= 1:
+                scene["target_time"] = best_t
+
+        # Vincular timing do CTA final
+        for cta_p in editorial["cta_phrases"]:
+            p_words = set(_script_keywords(cta_p, limit=4))
+            for cue_index, cue in enumerate(srt_cues):
+                # CTA costuma estar nos últimos 30% do vídeo
+                if cue_index >= int(len(srt_cues) * 0.60):
+                    c_text = fold_text(cue.text)
+                    if any(w in c_text for w in p_words if len(w) >= 4):
+                        editorial["cta_target_time"] = round(cue.start, 3)
+                        break
+            if editorial["cta_target_time"]:
+                break
     else:
         warnings.append("Timing real sera confirmado quando Textos/SRT e audio estiverem disponiveis.")
 
@@ -1797,10 +1918,18 @@ def analyze_script_guide(path: Path, *, project_id: str = "", rel: str = "", srt
         "summary": {
             "blocks": len(interpreted),
             "ranking_detected": any(block["type"] == "topico_ranking" for block in interpreted),
-            "cta_detected": any(block["type"] == "cta" for block in interpreted),
+            "cta_detected": any(block["type"] == "cta" for block in interpreted) or bool(editorial["cta_phrases"]),
+            "mandatory_scenes_count": len(editorial["mandatory_scenes"]),
+            "chapters_count": len(editorial["chapters"]),
             "avg_confidence": round(sum(block["confidence"] for block in interpreted) / max(1, len(interpreted)), 3),
         },
         "blocks": interpreted,
+        "mandatory_scenes": editorial["mandatory_scenes"],
+        "chapters": editorial["chapters"],
+        "hook": editorial["hook"],
+        "main_reversal": editorial["main_reversal"],
+        "cta_phrases": editorial["cta_phrases"],
+        "cta_target_time": editorial["cta_target_time"],
         "keywords": _script_keywords(text, limit=24),
         "warnings": warnings,
         "createdAt": _now_iso(),
@@ -3580,10 +3709,12 @@ class DropzoneManager:
         srt_exts = {".srt"}
         video_exts = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
         img_exts = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
+        script_exts = SCRIPT_GUIDE_EXTS
 
         audio_files = []
         srt_files = []
         media_files = []
+        script_files = []
 
         for p in files:
             ext = p.suffix.lower()
@@ -3593,6 +3724,8 @@ class DropzoneManager:
                 srt_files.append(p)
             elif ext in video_exts or ext in img_exts:
                 media_files.append(p)
+            elif ext in script_exts:
+                script_files.append(p)
 
         if not audio_files or not media_files:
             return None
@@ -3600,9 +3733,18 @@ class DropzoneManager:
         media_files.sort(key=lambda p: natural_key(p.name))
         voiceover = audio_files[0]
         srt_path = srt_files[0] if srt_files else None
+        script_path = script_files[0] if script_files else None
 
         project_name = folder.name.replace("_", " ").title()
         project_id = f"p_drop_{uuid.uuid4().hex[:8]}"
+
+        script_plan = None
+        if script_path:
+            try:
+                cues = parse_srt_file(srt_path) if srt_path else []
+                script_plan = analyze_script_guide(script_path, project_id=project_id, rel=script_path.name, srt_cues=cues)
+            except Exception:
+                script_plan = None
 
         payload = {
             "id": project_id,
@@ -3615,6 +3757,7 @@ class DropzoneManager:
                 "voiceover": str(voiceover.resolve()),
                 "subtitles": str(srt_path.resolve()) if srt_path else None,
                 "videos": [str(m.resolve()) for m in media_files],
+                "script_guides": [str(script_path.resolve())] if script_path else [],
             },
             "options": {
                 "aspectRatio": "16:9",
@@ -3622,6 +3765,7 @@ class DropzoneManager:
                 "allowAudioTrim": True,
                 "scoreVisualWindows": True,
                 "autoHeal": True,
+                "scriptGuidePlan": script_plan,
             },
         }
 
@@ -5732,6 +5876,41 @@ def match_media_to_subtitles(
     matches: list[dict[str, Any]] = []
     used_media_indices: set[int] = set()
 
+    # 1. Cenas Obrigatórias do Roteiro (Prioridade Editorial Absoluta)
+    script_plan = job.options.get("scriptGuidePlan") if isinstance(job.options.get("scriptGuidePlan"), dict) else {}
+    mandatory_scenes = script_plan.get("mandatory_scenes") or []
+    for scene in mandatory_scenes:
+        s_keywords = set(scene.get("keywords") or [])
+        s_target = scene.get("target_time")
+        if not s_keywords or s_target is None:
+            continue
+        best_score = 0
+        best_idx = -1
+        best_common = []
+        for idx, (path, dur, tokens) in enumerate(media_tokens_list):
+            if idx in used_media_indices or not tokens:
+                continue
+            common = [t for t in tokens if any(_token_stem_match(t, w) for w in s_keywords)]
+            if common:
+                score = len(common) * 25 + 50
+                if score > best_score:
+                    best_score = score
+                    best_idx = idx
+                    best_common = common
+        if best_idx >= 0 and best_score >= 50:
+            used_media_indices.add(best_idx)
+            path, dur, tokens = media_tokens_list[best_idx]
+            matches.append({
+                "media_idx": best_idx,
+                "path": path,
+                "duration": dur,
+                "target_time": s_target,
+                "matched_words": best_common,
+                "score": best_score,
+                "is_mandatory_scene": True,
+            })
+
+    # 2. Casamento Semântico Contínuo com Subtitles
     for cue_start, cue_end, cue_words in cued_tokens:
         best_score = 0
         best_idx = -1
@@ -10543,6 +10722,11 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
             add_candidate(max(start + length * 0.22, end - duration - 0.4), 3.4, "conclusao com respiro", "bottom_right")
         elif role == "reveal" and audio_total >= 130.0:
             add_candidate(min(end + 0.6, start + length * 0.72), 2.45, "apos revelacao", "top_right")
+
+    script_plan = job.options.get("scriptGuidePlan") if isinstance(job.options.get("scriptGuidePlan"), dict) else {}
+    cta_target_time = script_plan.get("cta_target_time")
+    if cta_target_time is not None and float(cta_target_time) > 0:
+        add_candidate(float(cta_target_time), 5.5, "ponto exato do CTA definido no roteiro", "top_right")
     cues = list(job.subtitle_cues or [])
     for idx, cue in enumerate(cues[:-1]):
         next_cue = cues[idx + 1]
@@ -12164,6 +12348,8 @@ def _automator_kind_allowed(kind: str, suffix: str) -> bool:
         return suffix in SRT_EXTS
     if kind == "audio":
         return suffix in AUDIO_EXTS or suffix in {".mp4", ".m4v", ".mov", ".webm"}
+    if kind in ("script_guide", "script"):
+        return suffix in SCRIPT_GUIDE_EXTS
     if kind in ("video", "image"):
         return suffix in VIDEO_EXTS or suffix in IMAGE_EXTS
     return False
@@ -12348,6 +12534,7 @@ def commit_automator_session(session_id: str):
                     "audios": [],
                     "background_music": [],
                     "texts": [],
+                    "script_guides": [],
                 }
                 index_backups[project_id] = _load_project_media_index(project_id)
 
@@ -12377,7 +12564,7 @@ def commit_automator_session(session_id: str):
                     "updatedAt": _now_iso(),
                 }
                 _save_project_media_index(project_id, items)
-                group = "videos" if kind in ("video", "image") else "audios" if kind == "audio" else "texts"
+                group = "videos" if kind in ("video", "image") else "audios" if kind == "audio" else "script_guides" if kind in ("script_guide", "script") else "texts"
                 project_results[project_id][group].append(rel_key)
 
             for row in session.get("rows") or []:
@@ -12391,9 +12578,30 @@ def commit_automator_session(session_id: str):
                     "background_music": result["background_music"] or list(media.get("background_music") or []),
                     "texts": result["texts"],
                     "captions": list(media.get("captions") or []),
-                    "script_guides": list(media.get("script_guides") or []),
+                    "script_guides": result["script_guides"] or list(media.get("script_guides") or []),
                 }
                 options = project.get("options") if isinstance(project.get("options"), dict) else {}
+                if result["script_guides"]:
+                    try:
+                        script_rel = result["script_guides"][0]
+                        script_file_item = _load_project_media_index(project_id).get(script_rel)
+                        if script_file_item:
+                            script_disk_path = _project_media_dir(project_id) / script_file_item["file"]
+                            if script_disk_path.exists():
+                                srt_cues = []
+                                if result["texts"]:
+                                    srt_rel = result["texts"][0]
+                                    srt_file_item = _load_project_media_index(project_id).get(srt_rel)
+                                    if srt_file_item:
+                                        srt_disk_path = _project_media_dir(project_id) / srt_file_item["file"]
+                                        if srt_disk_path.exists():
+                                            srt_cues = parse_srt_file(srt_disk_path)
+                                plan = analyze_script_guide(script_disk_path, project_id=project_id, rel=script_rel, srt_cues=srt_cues)
+                                _script_guide_dir(project_id).mkdir(parents=True, exist_ok=True)
+                                atomic_write_text(_script_guide_plan_path(project_id), json.dumps(plan, ensure_ascii=False, indent=2))
+                                options["scriptGuidePlan"] = plan
+                    except Exception:
+                        pass
                 project["options"] = options
                 project["status"] = "ready" if not _queue_project_missing_requirements(project) else "draft"
                 project["error"] = None

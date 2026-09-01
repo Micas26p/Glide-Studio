@@ -128,6 +128,7 @@
 
     <input type="file" id="automatorSrtInput" multiple hidden accept=".srt" />
     <input type="file" id="automatorAudioInput" multiple hidden accept="audio/*,video/mp4,video/quicktime,.mp3,.mp4,.wav,.m4a,.aac,.flac,.ogg,.webm,.m4v,.mov" />
+    <input type="file" id="automatorScriptInput" multiple hidden accept=".pdf,.docx,.txt,.html,.htm" />
     <input type="file" id="automatorVideoFolderInput" webkitdirectory directory multiple hidden />
 
     <div class="modal automation-modal" id="automatorModal" aria-hidden="true">
@@ -149,8 +150,12 @@
             <strong>Selecionar áudios</strong>
             <span id="automatorAudioCount">MP3, MP4 ou WAV</span>
           </button>
+          <button type="button" class="automation-picker" id="automatorPickScript">
+            <strong>Selecionar Roteiros</strong>
+            <span id="automatorScriptCount">PDF, DOCX ou TXT</span>
+          </button>
           <button type="button" class="automation-picker" id="automatorPickFolders">
-            <strong>Adicionar pastas com vídeos e imagens</strong>
+            <strong>Adicionar pastas de mídia</strong>
             <span id="automatorFolderCount">0 pasta(s)</span>
           </button>
         </div>
