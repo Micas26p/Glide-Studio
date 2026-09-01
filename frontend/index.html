@@ -452,80 +452,18 @@
             </select>
           </label>
         </div>
-        <div class="reference-style-panel">
-          <div class="reference-style-copy">
-            <p class="eyebrow">Reference Style DNA</p>
-            <h4>Imitar este estilo</h4>
-            <p class="engine-note" id="referenceStyleStatus">Sem vídeo referência. O pacote visual do Glide será usado.</p>
-          </div>
-          <div class="reference-style-controls">
-            <label class="toggle"><input id="referenceStyleEnabledToggle" type="checkbox" /> <span>Imitar referência</span></label>
-            <label class="control-field compact">Modo
-              <select id="referenceStyleModeSelect">
-                <option value="inspiration">Inspiração</option>
-                <option value="reference">Referência</option>
-              </select>
-            </label>
-            <label class="control-field compact">Pacote Glide
-              <select id="visualLanguagePackageSelect">
-                <option value="dark_doc">Documentário sombrio</option>
-                <option value="modern_explainer">Explicativo moderno</option>
-                <option value="dramatic_history">História dramática</option>
-                <option value="tech_cyber">Tech/cyber</option>
-                <option value="finance">Financeiro</option>
-              </select>
-            </label>
-            <label class="control-field compact">Intensidade
-              <select id="styleIntensitySelect">
-                <option value="low">Baixa</option>
-                <option value="balanced" selected>Balanceada</option>
-                <option value="high">Alta</option>
-              </select>
-            </label>
-            <button type="button" class="btn ghost small" id="referenceStylePickBtn">Anexar referência</button>
-            <button type="button" class="btn ghost small" id="referenceStyleAnalyzeBtn">Analisar referência</button>
-            <button type="button" class="btn ghost small danger-soft" id="referenceStyleRemoveBtn">Remover referência</button>
-            <input id="referenceStyleInput" type="file" accept="video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v" hidden />
-          </div>
-        </div>
         <div class="automation-summary">
           <span>Ducking profissional automático</span>
           <span>Ênfases dos Textos por contexto</span>
-          <span>Cor apenas em outliers</span>
-        </div>
-        <div class="toggle-row intelligence-toggles">
-          <label class="toggle"><input id="renderRecoveryToggle" type="checkbox" checked /> <span>Recuperação automática</span></label>
+          <span>Sincronia Semântica de B-Rolls</span>
+          <span>CTA Dinâmico por Roteiro</span>
         </div>
         <div class="intelligence-v15-grid">
-          <label class="toggle hidden"><input id="autoDirectorToggle" type="checkbox" checked /> <span>Diretor automático</span></label>
-          <label class="toggle"><input id="semanticVisualIndexToggle" type="checkbox" checked /> <span>Pesquisa visual</span></label>
-          <label class="toggle"><input id="channelLearningToggle" type="checkbox" checked /> <span>Aprender por canal</span></label>
+          <label class="toggle"><input id="renderRecoveryToggle" type="checkbox" checked /> <span>Recuperação automática</span></label>
           <label class="toggle"><input id="energyEditingToggle" type="checkbox" checked /> <span>Ritmo pela voz</span></label>
-          <label class="toggle"><input id="antiRepeatToggle" type="checkbox" checked /> <span>Antirrepetição</span></label>
+          <label class="toggle"><input id="antiRepeatToggle" type="checkbox" checked /> <span>Antirrepetição de clipes</span></label>
           <label class="toggle"><input id="audioMasteringToggle" type="checkbox" checked /> <span>Master YouTube</span></label>
         </div>
-        <div class="intelligence-v15-status">
-          <div class="intelligence-score" id="confidenceSummaryBox">
-            <span>Confiança</span><strong>--</strong><small>Aguardando verificação</small>
-          </div>
-          <div class="intelligence-score" id="semanticModelBox">
-            <span>Índice visual</span><strong>Local</strong><small>Heurísticas ativas</small>
-          </div>
-          <div class="intelligence-score graph-score" id="renderGraphBox">
-            <span>Render Graph</span><strong>Pronto</strong><small>Nenhuma execução ativa</small>
-            <div class="render-graph-nodes" id="renderGraphNodes" aria-live="polite"></div>
-          </div>
-        </div>
-        <div class="intelligence-actions">
-          <button type="button" class="btn ghost small" id="rerunDirectorBtn">Refazer direção visual</button>
-          <button type="button" class="btn ghost small" id="undoDirectorBtn">Desfazer direção visual</button>
-          <button type="button" class="btn ghost small" id="exportLearningBtn">Exportar aprendizado</button>
-          <button type="button" class="btn ghost small" id="resetLearningBtn">Zerar aprendizado</button>
-          <button type="button" class="btn ghost small" id="installVisualModelBtn">Instalar modelo local</button>
-          <input id="visualModelInput" type="file" accept=".zip,application/zip" hidden />
-        </div>
-        <div class="learning-summary" id="learningSummaryBox">O aprendizado deste canal aparece depois de três correções manuais semelhantes.</div>
-        <div class="auto-fix-plan" id="autoFixPlanBox">O plano de correção aparece aqui depois da verificação.</div>
       </div>
       <div class="preflight-grid" id="preflightGrid"></div>
     </section>
