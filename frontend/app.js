@@ -5877,27 +5877,37 @@ function renderAutomatorList(type, title, items){
   return `
     <section class="automation-sort-list" data-automator-list="${type}">
       <div class="automation-sort-head">
-        <h3>${escapeHtml(title)}</h3>
-        <select class="automation-sort-select" data-automator-sort="${type}" aria-label="Ordenar ${escapeHtml(title)}">
-          <option value="smart"${selected('smart')}>Inteligente Explorer</option>
-          <option value="imported"${selected('imported')}>Data de importação</option>
-          <option value="name"${selected('name')}>Nome</option>
-          <option value="type"${selected('type')}>Tipo</option>
-          <option value="duration"${selected('duration')}>Duração</option>
-          <option value="usage"${selected('usage')}>Ordem de uso</option>
-        </select>
-        <button type="button" class="automation-sort-direction" data-automator-direction="${type}" title="Inverter direção">${automatorSortPreference(type).direction === 'desc' ? '↓' : '↑'}</button>
-        <button type="button" class="automation-sort-reverse" data-automator-reverse="${type}" title="Inverter lista">⇅</button>
-        ${clearBtnHtml}
+        <div class="automation-sort-head-top">
+          <h3>${escapeHtml(title)}</h3>
+          <div class="automation-sort-head-actions">
+            <span class="automation-sort-badge">${items.length}</span>
+            ${clearBtnHtml}
+          </div>
+        </div>
+        <div class="automation-sort-head-controls">
+          <select class="automation-sort-select" data-automator-sort="${type}" aria-label="Ordenar ${escapeHtml(title)}">
+            <option value="smart"${selected('smart')}>Ordem Inteligente</option>
+            <option value="name"${selected('name')}>Nome (A-Z)</option>
+            <option value="usage"${selected('usage')}>Manual (Arrastar)</option>
+            <option value="imported"${selected('imported')}>Data Importação</option>
+            <option value="duration"${selected('duration')}>Duração</option>
+          </select>
+          <button type="button" class="automation-sort-direction" data-automator-direction="${type}" title="Inverter direção">${automatorSortPreference(type).direction === 'desc' ? '↓' : '↑'}</button>
+          <button type="button" class="automation-sort-reverse" data-automator-reverse="${type}" title="Inverter lista">⇅</button>
+        </div>
       </div>
-      <div class="automation-sort-items">
+      <div class="automation-sort-items" data-automator-items="${type}">
         ${items.length ? items.map((item, index) => `
-          <button type="button" class="automation-sort-item" data-automator-type="${type}" data-automator-index="${index}" title="Arraste para alterar a ordem">
-            <span class="automation-sort-grip" aria-hidden="true">::</span>
+          <div class="automation-sort-item" draggable="true" data-automator-type="${type}" data-automator-index="${index}" title="Arraste para reposicionar ou use as setas">
+            <span class="automation-sort-grip" aria-hidden="true" title="Arraste para mover">⋮⋮</span>
             <span class="automation-sort-number">${String(index + 1).padStart(2, '0')}</span>
             <span class="automation-sort-name" title="${escapeHtml(automatorItemLabel(item, type))}">${escapeHtml(automatorItemLabel(item, type))}</span>
-            <span class="automation-item-remove" role="button" tabindex="0" data-automator-remove-type="${type}" data-automator-remove-index="${index}" title="Remover este item">✕</span>
-          </button>
+            <div class="automation-item-actions">
+              <button type="button" class="automation-item-move-btn" data-automator-move="up" data-automator-type="${type}" data-automator-index="${index}" title="Mover para cima"${index === 0 ? ' disabled' : ''}>▲</button>
+              <button type="button" class="automation-item-move-btn" data-automator-move="down" data-automator-type="${type}" data-automator-index="${index}" title="Mover para baixo"${index === items.length - 1 ? ' disabled' : ''}>▼</button>
+              <button type="button" class="automation-item-remove" role="button" data-automator-remove-type="${type}" data-automator-remove-index="${index}" title="Remover este item">✕</button>
+            </div>
+          </div>
         `).join('') : `<p class="automation-sort-empty">${empty}</p>`}
       </div>
     </section>
@@ -5908,9 +5918,15 @@ function reorderAutomatorItems(type, fromIndex, toIndex, placeAfter = false){
   const list = automatorItems(type);
   if(!list.length || fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= list.length || toIndex >= list.length) return false;
   const [item] = list.splice(fromIndex, 1);
-  let targetIndex = fromIndex < toIndex ? toIndex - 1 : toIndex;
-  if(placeAfter) targetIndex += 1;
-  list.splice(Math.max(0, Math.min(targetIndex, list.length)), 0, item);
+  let targetIndex = toIndex;
+  if(fromIndex < toIndex){
+    targetIndex = toIndex - 1;
+    if(placeAfter) targetIndex += 1;
+  }else{
+    if(placeAfter) targetIndex += 1;
+  }
+  targetIndex = Math.max(0, Math.min(targetIndex, list.length));
+  list.splice(targetIndex, 0, item);
   list.forEach((entry, index) => { entry._autoUsageIndex = index; });
   state.automator.sort[type] = {criterion: 'usage', direction: 'asc'};
   saveAutomatorSortPreferences();
@@ -7663,164 +7679,93 @@ if(automatorPreview){
       updateAutomatorPreview();
     }
   });
-  automatorPreview.addEventListener('dragstart', event => event.preventDefault());
+  let automatorInternalDrag = null;
 
-  const automatorDragTargets = session => Array.from(session.list.querySelectorAll('.automation-sort-item'))
-    .filter(target => target !== session.item)
-    .map(target => ({target, rect: target.getBoundingClientRect()}));
-
-  const clearAutomatorPointerDrag = (session, commit) => {
-    if(!session) return;
-    if(session.raf) cancelAnimationFrame(session.raf);
-    try{
-      if(!session.item.hasPointerCapture || session.item.hasPointerCapture(session.pointerId)){
-        session.item.releasePointerCapture?.(session.pointerId);
-      }
-    }catch(_){}
-    session.overElement?.classList.remove('drag-over-before', 'drag-over-after');
-    if(session.started){
-      const changed = commit && session.overElement
-        ? reorderAutomatorItems(
-            session.type,
-            session.index,
-            Number(session.overElement.dataset.automatorIndex || -1),
-            session.placeAfter,
-          )
-        : false;
-      session.item.classList.remove('dragging', 'pointer-dragging');
-      session.item.style.position = '';
-      session.item.style.left = '';
-      session.item.style.top = '';
-      session.item.style.width = '';
-      session.item.style.height = '';
-      session.item.style.zIndex = '';
-      session.item.style.pointerEvents = '';
-      session.item.style.transform = '';
-      session.item.style.margin = '';
-      if(changed){
-        if(session.placeAfter) session.overElement.after(session.item);
-        else session.overElement.before(session.item);
-      }
-      session.placeholder?.remove();
-      if(changed){
-        refreshAutomatorListOrder(session.type);
-        refreshAutomatorPlanAfterReorder();
-      }
-    }
-    automatorModal?.classList.remove('automation-drag-active');
-    document.body.classList.remove('interaction-drag-active');
-    state.automatorDrag = null;
-  };
-
-  const paintAutomatorPointerDrag = session => {
-    session.raf = 0;
-    if(state.automatorDrag !== session || !session.started) return;
-    const dx = session.latestX - session.startX;
-    const dy = session.latestY - session.startY;
-    session.item.style.transform = `translate3d(${dx}px,${dy}px,0)`;
-
-    const targetInfo = (session.targetRects || []).find(info => (
-      session.latestY >= info.rect.top
-      && session.latestY <= info.rect.bottom
-      && session.latestX >= info.rect.left - 24
-      && session.latestX <= info.rect.right + 24
-    ));
-    const target = targetInfo?.target || null;
-    const validTarget = Boolean(target);
-    if(!validTarget){
-      session.overElement?.classList.remove('drag-over-before', 'drag-over-after');
-      session.overElement = null;
-      session.overRect = null;
-    }else{
-      if(session.overElement !== target){
-        session.overElement?.classList.remove('drag-over-before', 'drag-over-after');
-        session.overElement = target;
-        session.overRect = targetInfo.rect;
-      }
-      if(!session.overRect) session.overRect = targetInfo.rect;
-      const placeAfter = session.latestY > session.overRect.top + session.overRect.height / 2;
-      session.placeAfter = placeAfter;
-      target.classList.toggle('drag-over-before', !placeAfter);
-      target.classList.toggle('drag-over-after', placeAfter);
-    }
-
-    const listRect = session.listRect;
-    if(session.latestY < listRect.top + 24 && session.list.scrollTop > 0){
-      session.list.scrollTop -= 10;
-      session.targetRects = automatorDragTargets(session);
-      session.overRect = null;
-    }else if(session.latestY > listRect.bottom - 24 && session.list.scrollTop < session.list.scrollHeight - session.list.clientHeight){
-      session.list.scrollTop += 10;
-      session.targetRects = automatorDragTargets(session);
-      session.overRect = null;
-    }
-  };
-
-  automatorPreview.addEventListener('pointerdown', event => {
-    if(event.button !== 0) return;
-    if(event.target.closest('button,a,input,select,textarea,.automation-item-remove,.automation-sort-clear,[data-no-drag]')) return;
+  automatorPreview.addEventListener('dragstart', event => {
     const item = event.target.closest('.automation-sort-item');
-    if(!item) return;
+    if(!item){
+      return;
+    }
+    const type = item.dataset.automatorType;
+    const index = Number(item.dataset.automatorIndex);
+    automatorInternalDrag = { type, index, element: item };
+    item.classList.add('dragging');
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', `${type}:${index}`);
+    try{
+      if(event.dataTransfer.setDragImage) event.dataTransfer.setDragImage(item, 24, 20);
+    }catch(_){}
+  });
+
+  automatorPreview.addEventListener('dragover', event => {
+    if(automatorInternalDrag){
+      const targetItem = event.target.closest('.automation-sort-item');
+      if(targetItem && targetItem.dataset.automatorType === automatorInternalDrag.type && targetItem !== automatorInternalDrag.element){
+        event.preventDefault();
+        event.dataTransfer.dropEffect = 'move';
+        const rect = targetItem.getBoundingClientRect();
+        const placeAfter = event.clientY > rect.top + rect.height / 2;
+        automatorPreview.querySelectorAll('.drag-over-before, .drag-over-after').forEach(el => {
+          if(el !== targetItem) el.classList.remove('drag-over-before', 'drag-over-after');
+        });
+        targetItem.classList.toggle('drag-over-before', !placeAfter);
+        targetItem.classList.toggle('drag-over-after', placeAfter);
+        return;
+      }
+    }
+    // Handle external file dragover
     event.preventDefault();
-    const list = item.closest('.automation-sort-items');
-    state.automatorDrag = {
-      type: item.dataset.automatorType,
-      index: Number(item.dataset.automatorIndex || -1),
-      element: item,
-      item,
-      list,
-      listRect: list.getBoundingClientRect(),
-      pointerId: event.pointerId,
-      startX: event.clientX,
-      startY: event.clientY,
-      latestX: event.clientX,
-      latestY: event.clientY,
-      started: false,
-      raf: 0,
-      overElement: null,
-      overRect: null,
-      placeAfter: false,
-    };
-    item.setPointerCapture?.(event.pointerId);
+    const listEl = event.target.closest('[data-automator-list]');
+    automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => {
+      el.classList.toggle('automation-drop-active', Boolean(listEl && el === listEl && !automatorInternalDrag));
+    });
   });
 
-  automatorPreview.addEventListener('click', event => {
-    const removeBtn = event.target.closest('.automation-item-remove');
-    if(removeBtn){
-      event.preventDefault();
-      event.stopPropagation();
-      const type = removeBtn.dataset.automatorRemoveType;
-      const index = Number(removeBtn.dataset.automatorRemoveIndex);
-      removeAutomatorItem(type, index);
-      return;
+  automatorPreview.addEventListener('dragleave', event => {
+    const targetItem = event.target.closest('.automation-sort-item');
+    if(targetItem && (!event.relatedTarget || !targetItem.contains(event.relatedTarget))){
+      targetItem.classList.remove('drag-over-before', 'drag-over-after');
     }
-    const clearBtn = event.target.closest('.automation-sort-clear');
-    if(clearBtn){
-      event.preventDefault();
-      event.stopPropagation();
-      const type = clearBtn.dataset.automatorClear;
-      clearAutomatorList(type);
-      return;
+    const listEl = event.target.closest('[data-automator-list]');
+    if(listEl && (!event.relatedTarget || !listEl.contains(event.relatedTarget))){
+      listEl.classList.remove('automation-drop-active');
     }
   });
 
-  ['dragenter', 'dragover'].forEach(type => {
-    automatorPreview.addEventListener(type, event => {
-      event.preventDefault();
-      const listEl = event.target.closest('[data-automator-list]');
-      automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => {
-        el.classList.toggle('automation-drop-active', Boolean(listEl && el === listEl));
-      });
+  automatorPreview.addEventListener('dragend', () => {
+    automatorPreview.querySelectorAll('.dragging, .drag-over-before, .drag-over-after, .automation-drop-active').forEach(el => {
+      el.classList.remove('dragging', 'drag-over-before', 'drag-over-after', 'automation-drop-active');
     });
+    automatorInternalDrag = null;
   });
-  ['dragleave', 'drop'].forEach(type => {
-    automatorPreview.addEventListener(type, event => {
-      if(type !== 'drop') automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => el.classList.remove('automation-drop-active'));
-    });
-  });
+
   automatorPreview.addEventListener('drop', async event => {
     event.preventDefault();
-    automatorPreview.querySelectorAll('[data-automator-list]').forEach(el => el.classList.remove('automation-drop-active'));
+    automatorPreview.querySelectorAll('.dragging, .drag-over-before, .drag-over-after, .automation-drop-active').forEach(el => {
+      el.classList.remove('dragging', 'drag-over-before', 'drag-over-after', 'automation-drop-active');
+    });
+
+    // 1. Check if this is an internal item reorder drop:
+    if(automatorInternalDrag){
+      const targetItem = event.target.closest('.automation-sort-item');
+      if(targetItem && targetItem.dataset.automatorType === automatorInternalDrag.type){
+        event.stopPropagation();
+        const rect = targetItem.getBoundingClientRect();
+        const placeAfter = event.clientY > rect.top + rect.height / 2;
+        const fromIndex = automatorInternalDrag.index;
+        const toIndex = Number(targetItem.dataset.automatorIndex);
+        if(fromIndex !== toIndex){
+          const changed = reorderAutomatorItems(automatorInternalDrag.type, fromIndex, toIndex, placeAfter);
+          if(changed){
+            updateAutomatorPreview();
+          }
+        }
+      }
+      automatorInternalDrag = null;
+      return;
+    }
+
+    // 2. Otherwise, this is an external file drop from OS:
     const listEl = event.target.closest('[data-automator-list]');
     const files = await automatorFilesFromDrop(event.dataTransfer).catch(() => []);
     if(!files.length) return;
@@ -7843,63 +7788,73 @@ if(automatorPreview){
         sortAutomatorItems('audio');
         hydrateAutomatorDurations('audio', state.automator.audios);
       }
+    }else if(targetType === 'script'){
+      const scriptFiles = files.filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
+      if(scriptFiles.length){
+        state.automator.scripts = annotateAutomatorItems([...state.automator.scripts, ...scriptFiles]);
+        sortAutomatorItems('script');
+      }
     }else{
       const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
       const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
+      const scriptFiles = files.filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
       const folderAdded = appendAutomatorFolders(files);
       if(srtFiles.length) state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
       if(audioFiles.length){
         state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
         hydrateAutomatorDurations('audio', state.automator.audios);
       }
+      if(scriptFiles.length) state.automator.scripts = annotateAutomatorItems([...state.automator.scripts, ...scriptFiles]);
       if(srtFiles.length) sortAutomatorItems('srt');
       if(audioFiles.length) sortAutomatorItems('audio');
+      if(scriptFiles.length) sortAutomatorItems('script');
       if(folderAdded) sortAutomatorItems('folder');
       else updateAutomatorPreview();
     }
   });
 
-  automatorPreview.addEventListener('pointermove', event => {
-    const session = state.automatorDrag;
-    if(!session || session.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    session.latestX = event.clientX;
-    session.latestY = event.clientY;
-    if(!session.started){
-      if(Math.hypot(event.clientX - session.startX, event.clientY - session.startY) < 5) return;
-      const rect = session.item.getBoundingClientRect();
-      const placeholder = document.createElement('div');
-      placeholder.className = 'automation-sort-placeholder';
-      placeholder.style.height = `${rect.height}px`;
-      session.placeholder = placeholder;
-      session.item.after(placeholder);
-      session.item.classList.add('dragging', 'pointer-dragging');
-      session.item.style.position = 'fixed';
-      session.item.style.left = `${rect.left}px`;
-      session.item.style.top = `${rect.top}px`;
-      session.item.style.width = `${rect.width}px`;
-      session.item.style.height = `${rect.height}px`;
-      session.item.style.zIndex = '80';
-      session.item.style.pointerEvents = 'none';
-      session.item.style.margin = '0';
-      session.started = true;
-      session.targetRects = automatorDragTargets(session);
-      automatorModal?.classList.add('automation-drag-active');
-      document.body.classList.add('interaction-drag-active');
+  automatorPreview.addEventListener('click', event => {
+    // 1. Move up or down button
+    const moveBtn = event.target.closest('.automation-item-move-btn');
+    if(moveBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const type = moveBtn.dataset.automatorType;
+      const index = Number(moveBtn.dataset.automatorIndex);
+      const dir = moveBtn.dataset.automatorMove;
+      const targetIndex = dir === 'up' ? index - 1 : index + 1;
+      const list = automatorItems(type);
+      if(targetIndex >= 0 && targetIndex < list.length){
+        const [item] = list.splice(index, 1);
+        list.splice(targetIndex, 0, item);
+        list.forEach((entry, idx) => { entry._autoUsageIndex = idx; });
+        state.automator.sort[type] = {criterion: 'usage', direction: 'asc'};
+        saveAutomatorSortPreferences();
+        updateAutomatorPreview();
+      }
+      return;
     }
-    if(!session.raf) session.raf = requestAnimationFrame(() => paintAutomatorPointerDrag(session));
-  });
 
-  automatorPreview.addEventListener('pointerup', event => {
-    const session = state.automatorDrag;
-    if(!session || session.pointerId !== event.pointerId) return;
-    clearAutomatorPointerDrag(session, true);
-  });
+    // 2. Remove single item
+    const removeBtn = event.target.closest('.automation-item-remove');
+    if(removeBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const type = removeBtn.dataset.automatorRemoveType;
+      const index = Number(removeBtn.dataset.automatorRemoveIndex);
+      removeAutomatorItem(type, index);
+      return;
+    }
 
-  automatorPreview.addEventListener('pointercancel', event => {
-    const session = state.automatorDrag;
-    if(!session || session.pointerId !== event.pointerId) return;
-    clearAutomatorPointerDrag(session, false);
+    // 3. Clear entire list
+    const clearBtn = event.target.closest('.automation-sort-clear');
+    if(clearBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const type = clearBtn.dataset.automatorClear;
+      clearAutomatorList(type);
+      return;
+    }
   });
 }
 if(automatorPickSrt) automatorPickSrt.addEventListener('click', () => automatorSrtInput?.click());
