@@ -1056,20 +1056,48 @@ function snapshotProjectForRender(project){
   const options = cloneOptions(project?.options || {});
   options.renderPriority = normalizedRenderPriority(state.renderPriority);
   options.turboPolicy = options.renderPriority === 'max' ? 'production_max' : 'disabled';
-  options.selectedCta = options.selectedCta || options.ctaLanguage || '';
-  options.ctaLanguage = options.ctaLanguage || options.selectedCta || '';
-  options.musicGenre = options.musicGenre || options.backgroundMusicGenre || 'cinematic';
+  options.selectedCta = options.selectedCta || options.ctaLanguage || state.selectedCta || '';
+  options.ctaLanguage = options.ctaLanguage || options.selectedCta || state.selectedCta || '';
+  options.musicGenre = options.musicGenre || options.backgroundMusicGenre || state.musicGenre || 'cinematic';
   options.backgroundMusicGenre = options.backgroundMusicGenre || options.musicGenre;
   options.outputName = project?.outputName || options.outputName || '';
   options.referenceStyleVideo = project?.referenceStyleVideo || options.referenceStyleVideo || null;
   options.referenceStyleEnabled = Boolean(options.referenceStyleEnabled && options.referenceStyleVideo);
   options.styleSource = options.referenceStyleEnabled ? 'reference_dna' : 'glide_package';
-  options.visualLanguagePackage = options.visualLanguagePackage || 'dark_doc';
-  options.styleIntensity = options.styleIntensity || 'balanced';
+  options.visualLanguagePackage = options.visualLanguagePackage || visualLanguagePackageSelect?.value || 'dark_doc';
+  options.styleIntensity = options.styleIntensity || styleIntensitySelect?.value || 'balanced';
+  if(typeof options.gpu !== 'boolean'){
+    options.gpu = $('#gpuToggle') ? Boolean($('#gpuToggle').checked) : true;
+  }
+  if(typeof options.qualityBoost !== 'boolean'){
+    options.qualityBoost = qualityBoostToggle ? qualityBoostToggle.checked : true;
+  }
+  if(!options.codec){
+    options.codec = $('#codecSelect')?.value || 'hevc';
+  }
+  if(!options.exportProfile){
+    options.exportProfile = exportProfileSelect?.value || 'capcut_compact';
+  }
+
+  const durationMap = new Map(project?.maps?.durations || []);
+  const allMedia = [...(files.videos || []), ...(files.audios || []), ...(files.backgroundTracks || [])];
+  allMedia.forEach(file => {
+    const r = rel(file);
+    if(!durationMap.has(r)){
+      const dur = (state.activeProjectId === project?.id ? state.durations.get(r) : 0)
+        || file._autoDuration
+        || (project?.maps?.durations instanceof Map ? project.maps.durations.get(r) : 0)
+        || (isImage(file) ? 4 : 0)
+        || secondsFromClipStamp(file?.name || '')
+        || 0;
+      if(dur > 0) durationMap.set(r, dur);
+    }
+  });
+
   return {
     id: project?.id || '',
     name: project?.name || options.outputName || 'Projeto',
-    durationMap: new Map(project?.maps?.durations || []),
+    durationMap,
     files: {
       videos: [...(files.videos || [])],
       audios: [...(files.audios || [])],
@@ -6676,12 +6704,13 @@ async function renderQueue(config = {}){
   let cancelled = 0;
   for(let i = 0; i < queueItems.length; i++){
     if(state.queuePauseRequested || state.queueStopRequested) break;
-    const {project, snapshot} = queueItems[i];
+    const {project} = queueItems[i];
     activateRenderingProject(project.id);
     project.status = 'rendering';
     project.error = '';
     syncProjectSnapshot(project);
     renderProjectQueue();
+    const activeSnapshot = snapshotProjectForRender(project);
     try{
       const result = await startRender({
         queue: true,
@@ -6689,7 +6718,7 @@ async function renderQueue(config = {}){
         queueIndex: i + 1,
         projectId: project.id,
         projectName: project.name,
-        projectSnapshot: snapshot,
+        projectSnapshot: activeSnapshot,
       });
       if(result?.status === 'done'){
         project.status = result.recovery_summary?.recovered ? 'recovered' : 'done';
@@ -6707,7 +6736,7 @@ async function renderQueue(config = {}){
         project.status = 'error';
         project.error = result?.error || 'Erro desconhecido no render.';
         project.lastRenderSummary = renderErrorSummary(project.error, {
-          renderPriority: snapshot?.options?.renderPriority,
+          renderPriority: activeSnapshot?.options?.renderPriority,
           outputName: project.outputName || project.name,
           outputDir: project.outputDir || '',
         });
@@ -6723,7 +6752,7 @@ async function renderQueue(config = {}){
         project.status = 'error';
         project.error = error.message || String(error);
         project.lastRenderSummary = renderErrorSummary(project.error, {
-          renderPriority: snapshot?.options?.renderPriority,
+          renderPriority: activeSnapshot?.options?.renderPriority,
           outputName: project.outputName || project.name,
           outputDir: project.outputDir || '',
         });
@@ -6733,6 +6762,8 @@ async function renderQueue(config = {}){
     syncProjectSnapshot(project);
     renderProjectQueue();
     if(state.queuePauseRequested || state.queueStopRequested) break;
+    // Cooldown to allow OS, disk buffers and GPU driver (NVENC/AMF) to release handles before next project
+    await new Promise(resolve => setTimeout(resolve, 1200));
   }
   state.queueRendering = false;
   if(renderPrioritySelect) renderPrioritySelect.disabled = false;

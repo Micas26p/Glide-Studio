@@ -3864,7 +3864,8 @@ def render_budget_for_duration(duration_seconds: Any, priority: str | None, opti
         duration = max(1.0, float(duration_seconds or 0.0))
     except Exception:
         duration = 1.0
-    return duration * render_budget_multiplier(priority, options)
+    multiplier = render_budget_multiplier(priority, options)
+    return max(240.0, duration * multiplier + 120.0)
 
 
 def render_hardware_signature(profile: dict[str, Any] | None = None) -> str:
@@ -4977,8 +4978,16 @@ def _terminate_process(proc: subprocess.Popen[Any] | None) -> None:
     if not proc or proc.poll() is not None:
         return
     try:
-        proc.terminate()
-        proc.wait(timeout=2.5)
+        if os.name == "nt" and proc.pid:
+            # On Windows, kill the entire process tree (/T) force (/F) to prevent orphan FFmpeg worker threads
+            # from staying resident in RAM and locking the GPU hardware encoder sessions (NVENC / AMF).
+            try:
+                _run_hidden(["taskkill", "/F", "/T", "/PID", str(proc.pid)], timeout=3)
+            except Exception:
+                proc.kill()
+        else:
+            proc.terminate()
+            proc.wait(timeout=2.0)
     except Exception:
         try:
             proc.kill()
@@ -5440,8 +5449,11 @@ def run_cmd(
 
     last_lines: list[str] = []
     reader_done = False
+    last_output_time = time.time()
 
     def consume_line(raw_line: str) -> None:
+        nonlocal last_output_time
+        last_output_time = time.time()
         line = raw_line.strip()
         if not line:
             return
@@ -5474,12 +5486,27 @@ def run_cmd(
                 _terminate_process(proc)
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
-                job.render_budget_state = "exceeded"
-                _terminate_process(proc)
-                raise RenderBudgetExceeded(
-                    f"Orçamento de render excedido no modo {render_mode_label(priority)}. "
-                    "O job foi interrompido antes de ultrapassar o limite definido."
-                )
+                # If FFmpeg is actively encoding and outputting progress lines within the last 60s,
+                # do NOT kill it! Grant an automatic grace extension so the local video finishes safely.
+                if time.time() - last_output_time < 60.0:
+                    grace = max(180.0, float(job.render_budget_seconds or 300.0) * 0.5)
+                    job.render_budget_seconds += grace
+                    job.render_deadline_at += grace
+                    job.render_budget_state = "extended"
+                    if "budget_auto_extended" not in job.render_budget_fallbacks:
+                        job.render_budget_fallbacks.append("budget_auto_extended")
+                    _append_log(
+                        job,
+                        f"Tempo de render estendido automaticamente (+{round(grace)}s) "
+                        f"pois o FFmpeg está ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s)."
+                    )
+                else:
+                    job.render_budget_state = "exceeded"
+                    _terminate_process(proc)
+                    raise RenderBudgetExceeded(
+                        f"Orçamento de render excedido no modo {render_mode_label(priority)}. "
+                        "O job foi interrompido após inatividade do processo."
+                    )
             try:
                 item = line_queue.get(timeout=0.15)
             except queue.Empty:
@@ -16281,6 +16308,8 @@ def write_recovery_report(job: Job, action: dict[str, Any]) -> None:
 def plan_recovery_retry(job: Job, exc: Exception) -> dict[str, Any] | None:
     if isinstance(exc, RenderCancelled) or job.cancel_requested:
         return None
+    if isinstance(exc, RenderBudgetExceeded):
+        return None
     if not recovery_enabled(job.options):
         return None
     lowered = str(exc).lower()
@@ -17787,7 +17816,7 @@ def render_worker(job_id: str):
         min_est = float(estimate.get("minimum_required_seconds") or 0.0)
         job.render_budget_seconds = max(calc_budget, min_est * 1.5) if calc_budget > 0 else 0.0
         if job.render_budget_seconds > 0:
-            job.render_deadline_at = float(job.started_at or time.time()) + job.render_budget_seconds
+            job.render_deadline_at = time.time() + job.render_budget_seconds
         else:
             job.render_deadline_at = 0.0
             job.render_budget_state = "disabled"
