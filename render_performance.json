@@ -2,91 +2,6 @@
   "version": "1.40.0",
   "records": [
     {
-      "at": "2026-07-02T00:01:21",
-      "version": "1.26.0",
-      "pipeline": "performance_7_fast_finish",
-      "project_id": "p_mp9rxhpu_76vc",
-      "project_name": "LEGADO RODANTE",
-      "priority": "balanced",
-      "mode": "standard",
-      "codec": "hevc",
-      "gpu": true,
-      "duration_seconds": 959.222,
-      "elapsed_seconds": 1665.579,
-      "realtime_factor": 1.7364,
-      "hardware_signature": "9a1dee47ce617958",
-      "hardware_acceleration": "NVIDIA NVENC",
-      "breakdown": {
-        "audio": 36.656,
-        "direction": 120.877,
-        "subtitles_ass": 0.038,
-        "visual_analysis": 465.443,
-        "continuity": 0.113,
-        "visual_windows": 75.773,
-        "segments": 374.605,
-        "concat": 5.398,
-        "sound_fx": 148.159,
-        "mastering": 60.393,
-        "composition": 127.952,
-        "mux": 135.027,
-        "delivery": 0.652,
-        "total": 1665.012
-      },
-      "budget_seconds": 1918.396,
-      "budget_state": "met",
-      "budget_met": true,
-      "budget_fallbacks": [
-        "visual_analysis_quota_exhausted",
-        "visual_windows_quota_exhausted"
-      ],
-      "safe_render": false,
-      "render_graph": {
-        "processed": 13,
-        "reused": 0
-      }
-    },
-    {
-      "at": "2026-07-02T00:34:47",
-      "version": "1.26.0",
-      "pipeline": "performance_7_fast_finish",
-      "project_id": "p_mp9s3mn2_h2zm",
-      "project_name": "Fierros Colombia",
-      "priority": "max",
-      "mode": "standard",
-      "codec": "hevc",
-      "gpu": true,
-      "duration_seconds": 1001.003,
-      "elapsed_seconds": 1001.591,
-      "realtime_factor": 1.0006,
-      "hardware_signature": "9a1dee47ce617958",
-      "hardware_acceleration": "NVIDIA NVENC",
-      "breakdown": {
-        "audio": 49.513,
-        "direction": 70.323,
-        "subtitles_ass": 0.046,
-        "visual_analysis": 1.301,
-        "continuity": 0.0,
-        "visual_windows": 0.049,
-        "segments": 302.979,
-        "concat": 25.177,
-        "sound_fx": 231.569,
-        "mastering": 120.164,
-        "total": 1001.583
-      },
-      "budget_seconds": 1001.003,
-      "budget_state": "exceeded",
-      "budget_met": false,
-      "budget_fallbacks": [
-        "visual_analysis_cache_only_turbo",
-        "visual_windows_cache_only_turbo"
-      ],
-      "safe_render": false,
-      "render_graph": {
-        "processed": 8,
-        "reused": 1
-      }
-    },
-    {
       "at": "2026-07-02T01:00:04",
       "version": "1.26.0",
       "pipeline": "performance_7_fast_finish",
@@ -3228,6 +3143,70 @@
         "direction": 0.025,
         "delivery": 0.289,
         "total": 7.847
+      },
+      "budget_seconds": 240.0,
+      "budget_state": "met",
+      "budget_met": true,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 0,
+        "reused": 9
+      }
+    },
+    {
+      "at": "2026-09-04T00:43:08",
+      "version": "1.40.0",
+      "pipeline": "performance_7_fast_finish",
+      "project_id": "",
+      "project_name": "Teste_E2E_Real_Master",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "hevc",
+      "gpu": true,
+      "duration_seconds": 13.754,
+      "elapsed_seconds": 123.556,
+      "realtime_factor": 8.983,
+      "hardware_signature": "55c83cb0a309ad94",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "direction": 0.01,
+        "sound_fx": 0.299,
+        "mastering": 1.061,
+        "composition": 2.645,
+        "mux": 0.852,
+        "delivery": 0.338,
+        "total": 90.402
+      },
+      "budget_seconds": 240.0,
+      "budget_state": "met",
+      "budget_met": true,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 5,
+        "reused": 5
+      }
+    },
+    {
+      "at": "2026-09-04T00:44:45",
+      "version": "1.40.0",
+      "pipeline": "performance_7_fast_finish",
+      "project_id": "",
+      "project_name": "Teste_E2E_Real_Master",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "hevc",
+      "gpu": true,
+      "duration_seconds": 13.754,
+      "elapsed_seconds": 26.813,
+      "realtime_factor": 1.9494,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "direction": 0.01,
+        "delivery": 0.3,
+        "total": 8.674
       },
       "budget_seconds": 240.0,
       "budget_state": "met",

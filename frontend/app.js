@@ -8338,6 +8338,31 @@ $('#closeModal').addEventListener('click', () => {
   modal.setAttribute('aria-hidden', 'true');
 });
 
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const activeModals = [
+      $('#settingsModal'),
+      $('#retryModal'),
+      $('#reportModal'),
+      $('#scriptGuideModal'),
+      $('#automatorModal')
+    ];
+    for (const m of activeModals) {
+      if (m && m.classList.contains('show')) {
+        m.classList.remove('show');
+        m.setAttribute('aria-hidden', 'true');
+        return;
+      }
+    }
+    const renderModal = $('#renderModal');
+    if (renderModal && renderModal.classList.contains('show') && !state.renderActive && !state.queueRendering) {
+      renderModal.classList.remove('minimized');
+      renderModal.classList.remove('show');
+      renderModal.setAttribute('aria-hidden', 'true');
+    }
+  }
+});
+
 document.addEventListener('click', event => {
   if(shouldPlayUiSound(event)) playUiSound();
 }, true);

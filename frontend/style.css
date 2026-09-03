@@ -551,7 +551,9 @@ body[data-theme-resolved="light"] .toggle input{background:rgba(15,23,42,.18)}
 .render-dock span#dockSummary{display:block;color:var(--muted);font-size:12px;margin-top:2px}
 .modal{position:fixed;inset:0;display:none;place-items:center;z-index:20;background:rgba(0,0,0,.75);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);padding:22px}
 .modal.show{display:grid}
+@keyframes modalScaleIn{from{opacity:0;transform:scale(.97) translateY(6px)}to{opacity:1;transform:scale(1) translateY(0)}}
 .modal-card{width:min(820px,100%);border:1px solid var(--border-default);border-radius:12px;background:var(--modal-bg);box-shadow:0 28px 82px rgba(0,0,0,.7);padding:24px;text-align:center}
+.modal.show .modal-card{animation:modalScaleIn .18s cubic-bezier(0.16, 1, 0.3, 1) forwards}
 .settings-card{width:min(860px,100%);text-align:left}
 .retry-card{width:min(760px,100%);text-align:left}
 .settings-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:10px;margin:16px 0}
