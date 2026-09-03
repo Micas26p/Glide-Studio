@@ -14626,6 +14626,8 @@ def build_segment_plan(
     audio_trimmed = False
     smart_snapped = False
     ratio = T_total / max(0.1, audio_total)
+    auto_healing_applied: list[str] = []
+    ordered_items: list[tuple[Path, float]] = list(pairs)
 
     # CENÁRIO: Falta Crítica de Mídia (T_total < 65% da narração)
     if ratio < 0.65 and T_total < (audio_total - 12.0):
@@ -14646,18 +14648,23 @@ def build_segment_plan(
             audio_trimmed = True
             ratio = 1.0
         else:
+            # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop)
+            # Em vez de interromper o render em lotes, expande a sequência de mídias de forma cíclica e harmônica
             falta = max(0.0, audio_total - T_total)
-            items_rec = max(1, math.ceil(falta / 4.0))
-            raise RuntimeError(
-                "Mídia insuficiente para produzir um vídeo com ritmo visual adequado. "
-                "Adicione mais clipes ou imagens antes de continuar.\n"
-                f"• Duração da narração: {audio_total:.1f}s\n"
-                f"• Duração visual disponível: {T_total:.1f}s ({N_v} vídeo(s), {N_i} imagem(ns))\n"
-                f"• Mídia adicional recomendada: pelo menos ~{falta:.0f}s (cerca de {items_rec} novo(s) clipe(s) ou imagem(ns) no ritmo saudável de 3–5s)."
-            )
+            auto_healing_applied.append(f"camada_4_auto_broll_elastic_loop_deficit_{falta:.1f}s")
+            initial_pairs = list(pairs)
+            cycle_pass = 0
+            while T_total < audio_total * 1.02 and cycle_pass < 20 and initial_pairs:
+                cycle_pass += 1
+                for src, orig_dur in initial_pairs:
+                    dur_contrib = orig_dur if not is_image_path(src) else base_img_dur
+                    ordered_items.append((src, orig_dur))
+                    T_total += dur_contrib
+                    if T_total >= audio_total * 1.05:
+                        break
+            ratio = min(1.0, T_total / max(1.0, audio_total))
 
     # PASSO 8: Aplicar estratégia apropriada de ritmo saudável
-    auto_healing_applied: list[str] = []
     if not audio_trimmed:
         img_dur = base_img_dur
         setpts_factor = 1.0
@@ -14686,7 +14693,6 @@ def build_segment_plan(
                 img_dur = max(3.0, min(5.0, round((audio_total - T_v) / N_i, 3)))
 
     # PASSO 9: Cumprimento rigoroso da ordem natural da pasta (fidelidade 100% à sequência)
-    ordered_items = list(pairs)
 
     # PASSO 10: Montagem da timeline com Organic Micro-Pace Oscillation
     PACE_HARMONICS = [0.92, 1.08, 0.95, 1.05, 1.00]
@@ -15828,10 +15834,119 @@ def generate_youtube_chapters_and_metadata(job: Job, out_file: Path, final_durat
         pass
 
 
+def extract_best_thumbnail_candidates(job: Job, out_file: Path, final_duration: float) -> list[str]:
+    """
+    Analisa os quadros do vídeo recém-exportado via OpenCV e extrai
+    automaticamente as 3 melhores miniaturas (Thumbnails) de alta definição
+    baseadas em nitidez (variância de Laplace), equilíbrio de luminosidade e contraste.
+    """
+    if not out_file.exists() or final_duration < 1.0:
+        return []
+    target_dir = out_file.parent if out_file.exists() else job.export_dir
+    if not target_dir:
+        return []
+
+    try:
+        import cv2
+        import numpy as np
+
+        cap = cv2.VideoCapture(str(out_file))
+        if not cap.isOpened():
+            return []
+
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if total_frames <= 0:
+            cap.release()
+            return []
+
+        # Amostrar até 12 pontos estratégicos entre 10% e 88% da duração
+        start_sec = max(1.5, final_duration * 0.10)
+        end_sec = min(final_duration - 1.5, final_duration * 0.88)
+        if end_sec <= start_sec:
+            start_sec = 0.5
+            end_sec = max(0.5, final_duration - 0.5)
+
+        sample_count = min(12, max(4, int(final_duration // 5)))
+        candidate_timestamps = np.linspace(start_sec, end_sec, num=sample_count)
+
+        scored_candidates = []
+        for ts in candidate_timestamps:
+            frame_num = int(ts * fps)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+
+            h, w = frame.shape[:2]
+            thumb_small = cv2.resize(frame, (320, max(1, int(320 * h / max(1, w)))), interpolation=cv2.INTER_AREA)
+            gray = cv2.cvtColor(thumb_small, cv2.COLOR_BGR2GRAY)
+
+            mean_val = float(np.mean(gray))
+            # Descartar telas pretas, transições escuras ou telas brancas
+            if mean_val < 32.0 or mean_val > 228.0:
+                continue
+
+            std_val = float(np.std(gray))  # contraste
+            lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())  # nitidez
+
+            score = lap_var * (std_val / 64.0)
+            scored_candidates.append({
+                "ts": ts,
+                "score": score,
+                "frame": frame,
+                "lap": lap_var,
+                "std": std_val
+            })
+
+        cap.release()
+
+        if not scored_candidates:
+            return []
+
+        scored_candidates.sort(key=lambda x: x["score"], reverse=True)
+
+        # Selecionar os 3 melhores separados no tempo por pelo menos 8% do vídeo
+        min_sep = max(2.5, final_duration * 0.08)
+        selected = []
+        for cand in scored_candidates:
+            if any(abs(cand["ts"] - s["ts"]) < min_sep for s in selected):
+                continue
+            selected.append(cand)
+            if len(selected) == 3:
+                break
+
+        # Fallback se a separação for muito estrita
+        if len(selected) < 3 and len(scored_candidates) > len(selected):
+            for cand in scored_candidates:
+                if cand not in selected:
+                    selected.append(cand)
+                    if len(selected) == 3:
+                        break
+
+        saved_thumbnails = []
+        for idx, item in enumerate(selected, 1):
+            thumb_name = f"{out_file.stem}_thumb_{idx}.jpg"
+            thumb_path = target_dir / thumb_name
+            cv2.imwrite(str(thumb_path), item["frame"], [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+            saved_thumbnails.append(thumb_name)
+
+        if saved_thumbnails:
+            _append_log(job, f"Thumbnails HD: 3 melhores miniaturas extraídas automaticamente em {target_dir.name} ({', '.join(saved_thumbnails)})")
+            if hasattr(job, "options") and isinstance(job.options, dict):
+                job.options["thumbnails"] = saved_thumbnails
+
+        return saved_thumbnails
+    except Exception as exc:
+        _append_log(job, f"Aviso: Não foi possível extrair miniaturas automáticas: {exc}")
+        return []
+
+
 def write_render_report(job: Job, out_file: Path, final_duration: float):
     if not job.export_dir:
         return
     generate_youtube_chapters_and_metadata(job, out_file, final_duration)
+    extract_best_thumbnail_candidates(job, out_file, final_duration)
     write_editorial_intelligence_plan(job, "final")
     visual_clean = (job.timeline_summary or {}).get("visual_clean_summary") or (job.preflight_summary or {}).get("visual_clean_filter") or {}
     lines = [
