@@ -5971,6 +5971,53 @@ function refreshAutomatorListOrder(type){
   });
 }
 
+function estimateAudioFileSeconds(file){
+  if(!file || !file.size) return 0;
+  const name = String(file.name || '').toLowerCase();
+  const ext = name.split('.').pop() || '';
+  if(ext === 'wav') return file.size / 176400;
+  if(ext === 'flac') return file.size / 90000;
+  if(ext === 'aac' || ext === 'm4a') return file.size / 24000;
+  // Narração de alta fidelidade em MP3 (320 kbps = 40.000 bytes/s)
+  return file.size / 38000;
+}
+
+function probeAutomatorRowDurations(row){
+  if(!row || row._probed) return;
+  row._probed = true;
+  if(row.srt && !row._audioDuration && typeof row.srt.slice === 'function'){
+    try{
+      const slice = row.srt.slice(Math.max(0, row.srt.size - 8192));
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = String(reader.result || '');
+        const matches = [...text.matchAll(/-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/g)];
+        if(matches.length){
+          const lastMatch = matches[matches.length - 1][1];
+          const sec = parseSrtTime(lastMatch);
+          if(sec && sec > 0){
+            row._audioDuration = sec;
+            const tbody = automatorPreview?.querySelector('.automation-table tbody');
+            const plan = automatorPlan();
+            if(tbody) tbody.innerHTML = automatorTableRowsHtml(plan.rows);
+          }
+        }
+      };
+      reader.readAsText(slice);
+    }catch(_){ }
+  }
+  if(row.audio && !row._audioDuration && typeof durationOf === 'function'){
+    durationOf(row.audio).then(info => {
+      if(info?.seconds > 0){
+        row._audioDuration = info.seconds;
+        const tbody = automatorPreview?.querySelector('.automation-table tbody');
+        const plan = automatorPlan();
+        if(tbody) tbody.innerHTML = automatorTableRowsHtml(plan.rows);
+      }
+    }).catch(() => {});
+  }
+}
+
 function automatorRowHealth(row){
   const files = row.folder?.files || [];
   const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
@@ -5980,17 +6027,18 @@ function automatorRowHealth(row){
   if(!row.audio) return {tag: '<span class="health-tag tag-short">Sem áudio</span>', ready: false};
   if(totalItems === 0) return {tag: '<span class="health-tag tag-short">Sem mídia</span>', ready: false};
 
-  const audioDur = (row.audio && state.durations.get(rel(row.audio))) || (row.audio ? Math.max(10, row.audio.size / 16000) : 0);
-  const mediaDur = (vCount * 5.0) + (iCount * 4.0);
+  probeAutomatorRowDurations(row);
+  const audioDur = row._audioDuration || (row.audio && state.durations.get(rel(row.audio))) || (row.audio ? estimateAudioFileSeconds(row.audio) : 0);
+  const mediaDur = (vCount * 6.5) + (iCount * 4.5);
   const ratio = audioDur > 0 ? (mediaDur / audioDur) : 1;
 
-  if(ratio >= 0.98){
-    return {tag: '<span class="health-tag tag-ready" title="Mídia suficiente com folga">🟢 Pronto</span>', ready: true};
+  if(ratio >= 0.85){
+    return {tag: `<span class="health-tag tag-ready" title="Mídia suficiente com folga (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟢 Pronto</span>`, ready: true};
   }
-  if(ratio >= 0.65){
-    return {tag: '<span class="health-tag tag-auto" title="Pequena falta: compensada automaticamente com fotos ou desaceleração suave">🟡 Ajuste Automático</span>', ready: true};
+  if(ratio >= 0.45){
+    return {tag: `<span class="health-tag tag-auto" title="Ajuste automático: compensado suavemente pelo Auto-Healer (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟡 Ajuste Automático</span>`, ready: true};
   }
-  return {tag: `<span class="health-tag tag-short" title="Falta crítica de mídia (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🔴 Mídia Curta</span>`, ready: false};
+  return {tag: `<span class="health-tag tag-short" title="Mídia curta: sugerido adicionar mais vídeos (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🔴 Mídia Curta</span>`, ready: false};
 }
 
 function automatorTableRowsHtml(rows){
@@ -6654,170 +6702,176 @@ async function renderQueue(config = {}){
     renderQueueBtn.textContent = 'Preparando fila...';
   }
   dockSummary.textContent = 'Preparando plano da fila antes de iniciar o render...';
-  await new Promise(resolve => requestAnimationFrame(resolve));
-  captureActiveProject();
-  await Promise.all(state.projects.map(project => syncProjectSnapshot(project, {immediate: true}) || Promise.resolve()));
-  const requestedIds = new Set(Array.isArray(config.projectIds) ? config.projectIds : []);
-  const planMode = config.healthyOnly ? 'healthy' : (requestedIds.size ? 'selected' : 'all');
-  let queuePlan = null;
   try{
-    queuePlan = await buildQueuePreflightPlan(planMode, [...requestedIds]);
-  }catch(error){
-    dockSummary.textContent = `Não foi possível preparar a fila: ${error.message || error}`;
-    renderProjectQueue();
-    return;
-  }
-  const plannedRenderable = new Set(
-    Array.isArray(queuePlan?.projects)
-      ? queuePlan.projects.filter(item => item.renderable).map(item => String(item.id || ''))
-      : []
-  );
-  const projects = state.projects.filter(project => {
-    if(requestedIds.size && !requestedIds.has(project.id)) return false;
-    if(['done', 'recovered', 'rendering', 'queued', 'cancelled'].includes(project.status)) return false;
-    if(queuePlan && !plannedRenderable.has(project.id)) return false;
-    return projectReadiness(project).ok;
-  });
-  const queueItems = projects.map(project => ({project, snapshot: snapshotProjectForRender(project)}));
-  const queueScope = requestedIds.size
-    ? state.projects.filter(project => requestedIds.has(project.id))
-    : state.projects;
-  const skipped = queueScope.filter(project => !projects.includes(project) && !['done', 'recovered'].includes(project.status));
-  if(!projects.length){
-    dockSummary.textContent = 'Nenhum projeto com vídeos, narração, Textos e CTA pronto para renderizar.';
-    renderProjectQueue();
-    return;
-  }
-  state.queueRendering = true;
-  if(renderPrioritySelect) renderPrioritySelect.disabled = true;
-  state.queuePaused = false;
-  state.queuePauseRequested = false;
-  state.queueStopRequested = false;
-  document.body.classList.add('queue-rendering');
-  state.queueBatchId = `batch_${timestampId()}`;
-  prepareRenderNotification();
-  dockSummary.textContent = config.retryFailed
-    ? `Repetindo ${projects.length} projeto(s). O Render Graph reutilizará etapas válidas quando possível.`
-    : `Fila validada: ${projects.length} projeto(s) pronto(s), ${skipped.length} ignorado(s). Plano inicial salvo antes do render.`;
-  let done = 0;
-  let failed = 0;
-  let cancelled = 0;
-  for(let i = 0; i < queueItems.length; i++){
-    if(state.queuePauseRequested || state.queueStopRequested) break;
-    const {project} = queueItems[i];
-    activateRenderingProject(project.id);
-    project.status = 'rendering';
-    project.error = '';
-    syncProjectSnapshot(project);
-    renderProjectQueue();
-    const activeSnapshot = snapshotProjectForRender(project);
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    captureActiveProject();
+    await Promise.all(state.projects.map(project => syncProjectSnapshot(project, {immediate: true}) || Promise.resolve()));
+    const requestedIds = new Set(Array.isArray(config.projectIds) ? config.projectIds : []);
+    const planMode = config.healthyOnly ? 'healthy' : (requestedIds.size ? 'selected' : 'all');
+    let queuePlan = null;
     try{
-      const result = await startRender({
-        queue: true,
-        batchId: state.queueBatchId,
-        queueIndex: i + 1,
-        projectId: project.id,
-        projectName: project.name,
-        projectSnapshot: activeSnapshot,
-      });
-      if(result?.status === 'done'){
-        project.status = result.recovery_summary?.recovered ? 'recovered' : 'done';
-        project.backendJobId = result.id;
-        project.outputDir = result.output_dir || '';
-        project.outputFile = result.output_name || '';
-        done++;
-      }else if(result?.status === 'cancelled'){
-        project.status = 'cancelled';
-        project.backendJobId = result.id;
-        project.error = result?.error || 'Render cancelado pelo usuário.';
-        cancelled++;
-        state.queueStopRequested = true;
-      }else{
-        project.status = 'error';
-        project.error = result?.error || 'Erro desconhecido no render.';
-        project.lastRenderSummary = renderErrorSummary(project.error, {
-          renderPriority: activeSnapshot?.options?.renderPriority,
-          outputName: project.outputName || project.name,
-          outputDir: project.outputDir || '',
-        });
-        failed++;
-      }
+      queuePlan = await buildQueuePreflightPlan(planMode, [...requestedIds]);
     }catch(error){
-      if(/cancelado/i.test(error.message || String(error))){
-        project.status = 'cancelled';
-        project.error = 'Render cancelado pelo usuário.';
-        cancelled++;
-        state.queueStopRequested = true;
-      }else{
-        project.status = 'error';
-        project.error = error.message || String(error);
-        project.lastRenderSummary = renderErrorSummary(project.error, {
-          renderPriority: activeSnapshot?.options?.renderPriority,
-          outputName: project.outputName || project.name,
-          outputDir: project.outputDir || '',
-        });
-        failed++;
-      }
+      dockSummary.textContent = `Não foi possível preparar a fila: ${error.message || error}`;
+      return;
     }
-    syncProjectSnapshot(project);
-    renderProjectQueue();
-    if(state.queuePauseRequested || state.queueStopRequested) break;
-    // Cooldown to allow OS, disk buffers and GPU driver (NVENC/AMF) to release handles before next project
-    await new Promise(resolve => setTimeout(resolve, 1200));
-  }
-  state.queueRendering = false;
-  if(renderPrioritySelect) renderPrioritySelect.disabled = false;
-  document.body.classList.remove('queue-rendering');
-  await refreshRenderGallery();
-  if(state.queuePauseRequested && !state.queueStopRequested){
-    let pending = 0;
-    for(const {project} of queueItems){
-      if(projectReadiness(project).ok && !['done', 'recovered', 'error', 'cancelled'].includes(project.status)){
-        project.status = 'paused';
-        syncProjectSnapshot(project);
-        pending++;
-      }
+    const plannedRenderable = new Set(
+      Array.isArray(queuePlan?.projects)
+        ? queuePlan.projects.filter(item => item.renderable).map(item => String(item.id || ''))
+        : []
+    );
+    const projects = state.projects.filter(project => {
+      if(requestedIds.size && !requestedIds.has(project.id)) return false;
+      if(['done', 'recovered', 'rendering', 'queued', 'cancelled'].includes(project.status)) return false;
+      if(queuePlan && !plannedRenderable.has(project.id)) return false;
+      return projectReadiness(project).ok;
+    });
+    const queueItems = projects.map(project => ({project, snapshot: snapshotProjectForRender(project)}));
+    const queueScope = requestedIds.size
+      ? state.projects.filter(project => requestedIds.has(project.id))
+      : state.projects;
+    const skipped = queueScope.filter(project => !projects.includes(project) && !['done', 'recovered'].includes(project.status));
+    if(!projects.length){
+      dockSummary.textContent = 'Nenhum projeto com vídeos, narração, Textos e CTA pronto para renderizar.';
+      return;
     }
-    state.queuePaused = true;
-    renderTitle.textContent = 'Fila pausada';
-    renderMsg.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
-    dockSummary.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
-  }else if(state.queueStopRequested){
-    let pending = 0;
-    for(const {project} of queueItems){
-      if(projectReadiness(project).ok && !['done', 'recovered', 'error', 'cancelled'].includes(project.status)){
-        project.status = 'paused';
-        syncProjectSnapshot(project);
-        pending++;
-      }
-    }
-    state.queuePaused = true;
-    renderTitle.textContent = 'Render cancelado';
-    renderMsg.textContent = `${done} concluído(s), ${cancelled} cancelado(s), ${failed} erro(s). ${pending} projeto(s) pendente(s) para retomar.`;
-    dockSummary.textContent = `Render cancelado. ${pending} projeto(s) pendente(s).`;
-  }else{
+    state.queueRendering = true;
+    if(renderPrioritySelect) renderPrioritySelect.disabled = true;
     state.queuePaused = false;
-    setRenderStage('queue_done');
-    setRenderProgress(100);
-    renderTitle.textContent = 'Fila concluída';
-    renderMsg.textContent = `${done} projeto(s) concluído(s), ${failed} com erro, ${skipped.length} ignorado(s) sem requisitos. Veja a galeria e os cards da fila.`;
-    dockSummary.textContent = `Fila finalizada: ${done} concluído(s), ${failed} erro(s), ${skipped.length} ignorado(s).`;
-    if(done > 0) playCompletionSound('queue');
+    state.queuePauseRequested = false;
+    state.queueStopRequested = false;
+    document.body.classList.add('queue-rendering');
+    state.queueBatchId = `batch_${timestampId()}`;
+    prepareRenderNotification();
+    dockSummary.textContent = config.retryFailed
+      ? `Repetindo ${projects.length} projeto(s). O Render Graph reutilizará etapas válidas quando possível.`
+      : `Fila validada: ${projects.length} projeto(s) pronto(s), ${skipped.length} ignorado(s). Plano inicial salvo antes do render.`;
+    let done = 0;
+    let failed = 0;
+    let cancelled = 0;
+    for(let i = 0; i < queueItems.length; i++){
+      if(state.queuePauseRequested || state.queueStopRequested) break;
+      const {project} = queueItems[i];
+      activateRenderingProject(project.id);
+      project.status = 'rendering';
+      project.error = '';
+      syncProjectSnapshot(project);
+      renderProjectQueue();
+      const activeSnapshot = snapshotProjectForRender(project);
+      try{
+        const result = await startRender({
+          queue: true,
+          batchId: state.queueBatchId,
+          queueIndex: i + 1,
+          projectId: project.id,
+          projectName: project.name,
+          projectSnapshot: activeSnapshot,
+        });
+        if(result?.status === 'done'){
+          project.status = result.recovery_summary?.recovered ? 'recovered' : 'done';
+          project.backendJobId = result.id;
+          project.outputDir = result.output_dir || '';
+          project.outputFile = result.output_name || '';
+          done++;
+        }else if(result?.status === 'cancelled'){
+          project.status = 'cancelled';
+          project.backendJobId = result.id;
+          project.error = result?.error || 'Render cancelado pelo usuário.';
+          cancelled++;
+          state.queueStopRequested = true;
+        }else{
+          project.status = 'error';
+          project.error = result?.error || 'Erro desconhecido no render.';
+          project.lastRenderSummary = renderErrorSummary(project.error, {
+            renderPriority: activeSnapshot?.options?.renderPriority,
+            outputName: project.outputName || project.name,
+            outputDir: project.outputDir || '',
+          });
+          failed++;
+        }
+      }catch(error){
+        if(/cancelado/i.test(error.message || String(error))){
+          project.status = 'cancelled';
+          project.error = 'Render cancelado pelo usuário.';
+          cancelled++;
+          state.queueStopRequested = true;
+        }else{
+          project.status = 'error';
+          project.error = error.message || String(error);
+          project.lastRenderSummary = renderErrorSummary(project.error, {
+            renderPriority: activeSnapshot?.options?.renderPriority,
+            outputName: project.outputName || project.name,
+            outputDir: project.outputDir || '',
+          });
+          failed++;
+        }
+      }
+      syncProjectSnapshot(project);
+      renderProjectQueue();
+      if(state.queuePauseRequested || state.queueStopRequested) break;
+      // Cooldown to allow OS, disk buffers and GPU driver (NVENC/AMF) to release handles before next project
+      await new Promise(resolve => setTimeout(resolve, 1200));
+    }
+    state.queueRendering = false;
+    if(renderPrioritySelect) renderPrioritySelect.disabled = false;
+    document.body.classList.remove('queue-rendering');
+    await refreshRenderGallery();
+    if(state.queuePauseRequested && !state.queueStopRequested){
+      let pending = 0;
+      for(const {project} of queueItems){
+        if(projectReadiness(project).ok && !['done', 'recovered', 'error', 'cancelled'].includes(project.status)){
+          project.status = 'paused';
+          syncProjectSnapshot(project);
+          pending++;
+        }
+      }
+      state.queuePaused = true;
+      renderTitle.textContent = 'Fila pausada';
+      renderMsg.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
+      dockSummary.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
+    }else if(state.queueStopRequested){
+      let pending = 0;
+      for(const {project} of queueItems){
+        if(projectReadiness(project).ok && !['done', 'recovered', 'error', 'cancelled'].includes(project.status)){
+          project.status = 'paused';
+          syncProjectSnapshot(project);
+          pending++;
+        }
+      }
+      state.queuePaused = true;
+      renderTitle.textContent = 'Render cancelado';
+      renderMsg.textContent = `${done} concluído(s), ${cancelled} cancelado(s), ${failed} erro(s). ${pending} projeto(s) pendente(s) para retomar.`;
+      dockSummary.textContent = `Render cancelado. ${pending} projeto(s) pendente(s).`;
+    }else{
+      state.queuePaused = false;
+      setRenderStage('queue_done');
+      setRenderProgress(100);
+      renderTitle.textContent = 'Fila concluída';
+      renderMsg.textContent = `${done} projeto(s) concluído(s), ${failed} com erro, ${skipped.length} ignorado(s) sem requisitos. Veja a galeria e os cards da fila.`;
+      dockSummary.textContent = `Fila finalizada: ${done} concluído(s), ${failed} erro(s), ${skipped.length} ignorado(s).`;
+      if(done > 0) playCompletionSound('queue');
+    }
+    const batchReport = await saveQueueBatchReport(state.queueBatchId, queueItems, {
+      total: queueItems.length,
+      completed: done,
+      failed,
+      cancelled,
+      skipped: skipped.length,
+      paused: Boolean(state.queuePauseRequested || state.queueStopRequested),
+    });
+    if(batchReport?.savedPaths?.length){
+      dockSummary.textContent = `${dockSummary.textContent} Relatório consolidado salvo.`;
+    }
+    state.queuePauseRequested = false;
+    state.queueStopRequested = false;
+  }catch(outerError){
+    dockSummary.textContent = `Falha inesperada na fila: ${outerError.message || outerError}`;
+  }finally{
+    state.queueRendering = false;
+    if(renderPrioritySelect) renderPrioritySelect.disabled = false;
+    document.body.classList.remove('queue-rendering');
+    renderProjectQueue();
   }
-  const batchReport = await saveQueueBatchReport(state.queueBatchId, queueItems, {
-    total: queueItems.length,
-    completed: done,
-    failed,
-    cancelled,
-    skipped: skipped.length,
-    paused: Boolean(state.queuePauseRequested || state.queueStopRequested),
-  });
-  if(batchReport?.savedPaths?.length){
-    dockSummary.textContent = `${dockSummary.textContent} Relatório consolidado salvo.`;
-  }
-  state.queuePauseRequested = false;
-  state.queueStopRequested = false;
-  renderProjectQueue();
 }
 
 async function retryFailedRenders(){

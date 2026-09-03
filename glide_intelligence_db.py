@@ -498,3 +498,23 @@ class IntelligenceDB:
             (channel_key, channel_key, int(limit_jobs)),
         ).fetchall()
         return {str(row["fingerprint"]) for row in rows if row["fingerprint"]}
+
+    def prune_dead_media(self, limit: int = 500) -> int:
+        """Removes entries from media_index whose files no longer exist on disk."""
+        with self._write_lock:
+            connection = self._connection()
+            rows = connection.execute(
+                "SELECT signature, path FROM media_index ORDER BY updated_at ASC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+            dead = [
+                row["signature"] for row in rows
+                if row["path"] and not Path(str(row["path"])).exists()
+            ]
+            if dead:
+                connection.executemany(
+                    "DELETE FROM media_index WHERE signature=?",
+                    [(sig,) for sig in dead],
+                )
+                connection.commit()
+            return len(dead)

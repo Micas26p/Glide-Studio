@@ -326,6 +326,12 @@ def safe_startup_cleanup() -> dict[str, Any]:
     except Exception as exc:
         summary["errors"].append(f"render_graph_cache: {exc}")
 
+    try:
+        dead_count = INTELLIGENCE_DB.prune_dead_media(limit=300)
+        summary["removed"]["dead_media_records"] = dead_count
+    except Exception as exc:
+        summary["errors"].append(f"prune_dead_media: {exc}")
+
     for name in SAFE_STARTUP_DIR_NAMES:
         _remove_maintenance_item(DATA_ROOT / name, summary, "safe_dirs")
     for name, min_age_seconds in SAFE_AGED_DIR_POLICIES.items():
@@ -1980,15 +1986,6 @@ def attach_script_guide_plan_to_job(job: Job) -> None:
         _append_log(job, f"Roteiro guia ignorado: {human_render_error(exc)}")
 
 
-def _style_intensity_value(value: str | None) -> float:
-    value = str(value or "balanced").lower()
-    if value == "low":
-        return 0.72
-    if value == "high":
-        return 1.22
-    return 1.0
-
-
 def visual_language_package(options: dict[str, Any] | None) -> dict[str, Any]:
     key = str((options or {}).get("visualLanguagePackage") or "dark_doc").strip().lower()
     package = VISUAL_LANGUAGE_PACKAGES.get(key) or VISUAL_LANGUAGE_PACKAGES["dark_doc"]
@@ -2000,14 +1997,6 @@ def normalized_reference_style_mode(options: dict[str, Any] | None) -> str:
     if value in {"reference", "referencia", "referência", "precise", "preciso"}:
         return "reference"
     return "inspiration"
-
-
-def reference_style_eagle_active(options: dict[str, Any] | None) -> bool:
-    options = options or {}
-    if options.get("smartVisualDirector") is False or options.get("autoDirector") is False:
-        return False
-    priority = str(options.get("renderPriority") or options.get("render_priority") or "balanced").lower()
-    return priority not in {"max", "turbo", "turbo_production", "production_max"}
 
 
 def _public_reference_style(meta: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2580,6 +2569,15 @@ def _resolve_persisted_manifest_item(item: dict[str, Any]) -> Path | None:
         matches = list(source_dir.glob(f"u{source_index:04d}.*"))
         if matches and matches[0].is_file():
             return matches[0]
+    for key in ("path", "rel", "name"):
+        candidate_val = str(item.get(key) or "").strip()
+        if candidate_val:
+            try:
+                candidate_path = Path(candidate_val)
+                if candidate_path.is_absolute() and candidate_path.exists() and candidate_path.is_file():
+                    return candidate_path
+            except Exception:
+                pass
     return None
 
 
@@ -3572,13 +3570,6 @@ def build_auto_fix_plan(
     }
 
 
-def estimate_output_bytes(options: dict[str, Any], duration_seconds: float) -> int:
-    duration = max(0.0, float(duration_seconds or 0.0))
-    bitrate = clamp_float(options.get("videoBitrateKbps"), 2500.0, 500.0, 25000.0)
-    audio_kbps = 160.0
-    return int(((bitrate + audio_kbps) * 1000 / 8) * duration * 1.04)
-
-
 @app.get("/")
 def index():
     return FileResponse(FRONTEND / "index.html")
@@ -3754,10 +3745,14 @@ class DropzoneManager:
             "updatedAt": _now_iso(),
             "source_folder": str(folder.resolve()),
             "media": {
+                "audios": [str(voiceover.resolve())],
+                "texts": [str(srt_path.resolve())] if srt_path else [],
+                "videos": [str(m.resolve()) for m in media_files],
+                "captions": [],
+                "background_music": [],
+                "script_guides": [str(script_path.resolve())] if script_path else [],
                 "voiceover": str(voiceover.resolve()),
                 "subtitles": str(srt_path.resolve()) if srt_path else None,
-                "videos": [str(m.resolve()) for m in media_files],
-                "script_guides": [str(script_path.resolve())] if script_path else [],
             },
             "options": {
                 "aspectRatio": "16:9",
@@ -4656,10 +4651,6 @@ def render_priority(job: Job | dict[str, Any] | None = None) -> str:
 
 def turbo_enabled(job: Job | dict[str, Any] | None = None) -> bool:
     return True
-
-
-def render_execution_profile(options: dict[str, Any] | None = None) -> str:
-    return "unified_ultra_performance"
 
 
 def render_mode_label(priority: str = "max") -> str:
@@ -6046,17 +6037,6 @@ def visual_clean_cache_key(path: Path, duration: float, cwd: Path | None = None,
         return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}:{duration:.3f}"
 
 
-def visual_clean_sample_points(duration: float, level: str) -> list[float]:
-    if duration <= 0:
-        return []
-    safe_end = max(0.05, duration - 0.10)
-    return [
-        min(max(duration * 0.16, 0.08), safe_end),
-        min(max(duration * 0.50, 0.12), safe_end),
-        min(max(duration * 0.82, 0.16), safe_end),
-    ]
-
-
 def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = None, start_offset: float = 0.0) -> list[bytes]:
     if not FFMPEG:
         return []
@@ -6777,7 +6757,8 @@ def probe_visual_window_scores(path: Path, duration: float, cwd: Path | None = N
     if duration <= 1.2 or is_image_path(path):
         return {"enabled": False, "reason": "midia curta ou imagem", "windows": []}
     cache_key = visual_clean_cache_key(path, duration, cwd=cwd, scope="windows_v3_batch")
-    cached = VISUAL_CLEAN_CACHE.get(cache_key)
+    with VISUAL_CLEAN_CACHE_LOCK:
+        cached = VISUAL_CLEAN_CACHE.get(cache_key)
     if isinstance(cached, dict):
         cached_result = dict(cached)
         cached_result["cache_hit"] = True
@@ -6828,7 +6809,8 @@ def probe_visual_window_scores(path: Path, duration: float, cwd: Path | None = N
             "policy": "uma extracao temporal compartilhada; usa o melhor trecho saudavel sem processos FFmpeg repetidos",
             "windows": windows,
         }
-    VISUAL_CLEAN_CACHE[cache_key] = dict(result)
+    with VISUAL_CLEAN_CACHE_LOCK:
+        VISUAL_CLEAN_CACHE[cache_key] = dict(result)
     return result
 
 
@@ -7515,7 +7497,8 @@ def apply_visual_clean_filter(
         zone_analyzed[guard_zone] += 1
         source_context = visual_filter_source_context(job, source, project_context)
         cache_key = visual_clean_cache_key(source, duration, cwd=work)
-        has_cached_analysis = isinstance(VISUAL_CLEAN_CACHE.get(cache_key), dict)
+        with VISUAL_CLEAN_CACHE_LOCK:
+            has_cached_analysis = isinstance(VISUAL_CLEAN_CACHE.get(cache_key), dict)
         if media_kind == "video" and not has_cached_analysis and priority == "max":
             clean_pairs.append((source, duration))
             summary["skipped_analysis"] += 1
@@ -7812,17 +7795,6 @@ def _director_assignments_by_block(job: Job) -> dict[int, list[dict[str, Any]]]:
             block_index = 0
         grouped.setdefault(block_index, []).append(item)
     return grouped
-
-
-def _director_block_for_time(job: Job, value: float) -> dict[str, Any] | None:
-    blocks = _director_blocks(job)
-    if not blocks:
-        return None
-    value = float(value or 0.0)
-    for block in blocks:
-        if float(block.get("start") or 0.0) <= value <= float(block.get("end") or 0.0) + 0.05:
-            return block
-    return min(blocks, key=lambda block: abs(float(block.get("start") or 0.0) - value))
 
 
 def _assignment_context(assignments: list[dict[str, Any]]) -> dict[str, Any]:
@@ -8326,112 +8298,6 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
     return payload
 
 
-def build_premium_feel_report(job: Job, event_timeline: dict[str, Any] | None = None) -> dict[str, Any]:
-    visual = (job.timeline_summary or {}).get("visual_clean_summary") or {}
-    timing = job.subtitle_timing_summary or {}
-    fx = job.sound_fx_summary or {}
-    music = job.background_music_summary or {}
-    continuity = job.continuity_summary or {}
-    anti_repeat = job.anti_repeat_summary or {}
-    style = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
-    max_deviation = float(timing.get("max_abs_deviation_ms") or 0.0)
-    sync_score = 100 if max_deviation <= 33 else max(35, 100 - (max_deviation - 33) * 1.6)
-    used = float(visual.get("effectively_used") or visual.get("used") or visual.get("approved") or 0)
-    rejected = float(visual.get("rejected") or 0)
-    visual_score = 82 if not used else max(45, min(100, 100 - (rejected / max(used + rejected, 1)) * 75))
-    fx_score = 88 if fx.get("enabled", True) and int(fx.get("events") or fx.get("subtitle_events") or 0) else 62
-    music_score = 86 if music.get("enabled", True) else 66
-    continuity_score = 84 + min(10, int(continuity.get("adjusted") or continuity.get("applied") or 0))
-    repetition_penalty = min(18, int(anti_repeat.get("repeated") or anti_repeat.get("demoted") or 0) * 2)
-    event_score = 88 if (event_timeline or {}).get("events") else 68
-    score = round(max(0, min(100, (
-        sync_score * 0.22 + visual_score * 0.20 + fx_score * 0.16 + music_score * 0.15 +
-        continuity_score * 0.12 + event_score * 0.15 - repetition_penalty
-    ))))
-    suggestions: list[str] = []
-    if sync_score < 82:
-        suggestions.append("Recriar legendas/FX com sincronizador frame-perfect.")
-    if event_score < 82:
-        suggestions.append("Recriar timeline invisivel de eventos para resolver conflitos entre CTA, texto, FX e musica.")
-    if visual_score < 78:
-        suggestions.append("Usar Render seguro ou reduzir rejeicoes visuais incertas.")
-    if fx_score < 78:
-        suggestions.append("Aumentar FX +2 dB ou refazer mapa de sound design.")
-    if music_score < 78:
-        suggestions.append("Trocar música ou refazer masterização com ducking vivo.")
-    if repetition_penalty:
-        suggestions.append("Ativar antirrepeticao mais forte ou usar mais imagens/clipes.")
-    if style.get("source") == "glide_package" and style.get("referenceAvailable"):
-        suggestions.append("Analisar a referencia para ativar o Style DNA completo.")
-    payload = {
-        "kind": "glide_premium_feel_report",
-        "version": APP_VERSION,
-        "jobId": job.id,
-        "createdAt": _now_iso(),
-        "score": score,
-        "components": {
-            "sync": round(sync_score),
-            "visualVariety": round(visual_score),
-            "soundFx": round(fx_score),
-            "music": round(music_score),
-            "continuity": round(continuity_score),
-            "eventTimeline": round(event_score),
-            "repetitionPenalty": repetition_penalty,
-        },
-        "style": style,
-        "suggestions": suggestions[:8],
-    }
-    if job.export_dir:
-        atomic_write_text(job.export_dir / "premium_feel_report.json", json.dumps(payload, ensure_ascii=False, indent=2))
-    return payload
-
-
-def build_post_render_corrections(job: Job, premium: dict[str, Any]) -> dict[str, Any]:
-    suggestions = list(premium.get("suggestions") or [])
-    actions: list[dict[str, Any]] = []
-    for text in suggestions:
-        action = "review"
-        scope = "report_only"
-        if "FX" in text:
-            action = "boost_fx"
-            scope = "audio_fx_mix"
-        elif "musica" in text.lower() or "master" in text.lower():
-            action = "remaster_audio"
-            scope = "audio_mix_master"
-        elif "legendas" in text.lower():
-            action = "rebuild_subtitles"
-            scope = "ass_srt_composition"
-        elif "antirrepeticao" in text.lower():
-            action = "rerun_director"
-            scope = "director_timeline"
-        actions.append({"action": action, "label": text, "renderGraphScope": scope})
-    components = premium.get("components") if isinstance(premium.get("components"), dict) else {}
-    if float(components.get("visualVariety") or 100) < 82 and not any(item.get("action") == "more_motion" for item in actions):
-        actions.append({
-            "action": "more_motion",
-            "label": "Adicionar mais motion graphics nas imagens e trechos estaticos.",
-            "renderGraphScope": "image_segments_composition",
-        })
-    if float(components.get("eventTimeline") or 100) < 82 and not any(item.get("action") == "rebuild_event_timeline" for item in actions):
-        actions.append({
-            "action": "rebuild_event_timeline",
-            "label": "Recriar timeline invisivel de eventos para reduzir conflitos de CTA, texto, FX e musica.",
-            "renderGraphScope": "event_timeline_fx",
-        })
-    payload = {
-        "kind": "glide_post_render_corrections",
-        "version": APP_VERSION,
-        "jobId": job.id,
-        "createdAt": _now_iso(),
-        "available": bool(actions),
-        "actions": actions[:10],
-        "note": "Correcoes usam Render Graph quando os artefatos necessarios estiverem cacheados.",
-    }
-    if job.export_dir:
-        atomic_write_text(job.export_dir / "post_render_corrections.json", json.dumps(payload, ensure_ascii=False, indent=2))
-    return payload
-
-
 def job_last_render_summary(job: Job) -> dict[str, Any]:
     visual = (job.timeline_summary or {}).get("visual_clean_summary") or {}
     project_id = str(job.options.get("queueProjectId") or "")
@@ -8777,8 +8643,29 @@ def analyze_audio_health(job: Job, audio_file: Path, duration: float, work: Path
         "-f", "null", "-",
     ]
     try:
-        p = _run_hidden(cmd, cwd=work, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=90)
-        text = (p.stderr or "") + "\n" + (p.stdout or "")
+        proc = _popen_hidden(
+            cmd,
+            cwd=work,
+            priority=render_priority(job),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        _register_process(job, proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=90)
+        except subprocess.TimeoutExpired:
+            _terminate_process(proc)
+            raise RuntimeError("Tempo limite excedido na análise de lacunas do áudio.")
+        finally:
+            _unregister_process(job, proc)
+        if job.cancel_requested:
+            raise RenderCancelled("Render cancelado pelo usuario.")
+        text = (stderr or "") + "\n" + (stdout or "")
+    except RenderCancelled:
+        raise
     except Exception as exc:
         summary["message"] = f"Nao foi possivel analisar lacunas do audio: {exc}"
         job.audio_health_summary = summary
@@ -11279,11 +11166,6 @@ def sfx_effect_layers_for_subtitle(
     return [(selected, 0.0, 0.08)]
 
 
-def sfx_effect_for_subtitle(job: Job, idx: int, cue: SubtitleCue, animation: str) -> str:
-    layers = sfx_effect_layers_for_subtitle(job, idx, cue, animation)
-    return layers[0][0] if layers else ""
-
-
 def sfx_duration(effect: str, event_duration: float = 0.0) -> float:
     spec = SFX_EFFECT_SPECS.get(effect, {})
     defaults = {
@@ -12755,6 +12637,12 @@ def queue_project_media(project_id: str):
         ".html": "text/html",
         ".htm": "text/html",
     }
+    if "voiceover" in groups and not groups.get("audios"):
+        vo = groups["voiceover"]
+        groups["audios"] = [vo] if isinstance(vo, str) and vo else (vo if isinstance(vo, list) else [])
+    if "subtitles" in groups and not groups.get("texts"):
+        st = groups["subtitles"]
+        groups["texts"] = [st] if isinstance(st, str) and st else (st if isinstance(st, list) else [])
     for group, kind in kind_map.items():
         for raw_rel in groups.get(group) or []:
             rel_key = str(raw_rel).replace("\\", "/")
@@ -12812,6 +12700,17 @@ def queue_project_media(project_id: str):
                                 "persistedJobId": source_job_id,
                                 "persistedIndex": index,
                             }
+            if path is None:
+                try:
+                    direct_candidate = Path(raw_rel)
+                    if direct_candidate.is_absolute() and direct_candidate.exists() and direct_candidate.is_file():
+                        path = direct_candidate
+                        persisted = {
+                            "persistedProjectId": project_id,
+                            "path": str(direct_candidate.resolve()),
+                        }
+                except Exception:
+                    pass
             if path is None:
                 missing.append(rel_key)
                 continue
@@ -13265,24 +13164,8 @@ def queue_save_batch_report(payload: dict[str, Any] | None = Body(None)):
     technical_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     saved_paths.append(str(technical_path))
 
-    output_dirs = []
-    for raw in data.get("outputDirs") or []:
-        try:
-            folder = Path(str(raw)).expanduser().resolve()
-        except Exception:
-            continue
-        if folder.is_dir() and folder not in output_dirs:
-            output_dirs.append(folder)
-    if output_dirs:
-        try:
-            common_dir = Path(os.path.commonpath([str(folder) for folder in output_dirs]))
-            if common_dir.is_dir():
-                delivery_path = common_dir / f"{batch_id}_report.json"
-                if delivery_path.resolve() != technical_path.resolve():
-                    delivery_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-                    saved_paths.append(str(delivery_path))
-        except Exception:
-            pass
+    # Apenas salva o log tecnico interno em EXPORT_ROOT.
+    # Nao gera arquivo de relatorio .json na pasta de destino/Downloads do usuario.
     return {"ok": True, "report": report, "savedPaths": saved_paths}
 
 
@@ -13921,161 +13804,6 @@ def export_bitrate_settings(mode: str, codec: str, options: dict[str, Any]) -> d
     }
 
 
-def _choose_video_args_legacy(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
-    mode = (mode or "standard").lower()
-    use_hevc = (codec or "hevc").lower() != "h264"
-    fast = mode == "fast"
-    rate = export_bitrate_settings(mode, codec, job.options)
-    target = f"{rate['target']}k"
-    maxrate = f"{rate['maxrate']}k"
-    bufsize = f"{rate['bufsize']}k"
-    job.timeline_summary.update({
-        "export_profile": rate["profile"],
-        "video_bitrate_kbps": rate["target"],
-        "rate_control": rate["rate_control"],
-    })
-    if not job.encoder_logged:
-        _append_log(job, f"Preset de exportacao: {rate['profile']} | VBR alvo={target} | max={maxrate} | buffer={bufsize}.")
-
-    if turbo_enabled(job):
-        turbo = ensure_turbo_summary(job)
-        job.timeline_summary.update({
-            "codec_requested": turbo["codec_requested"],
-            "codec_effective": turbo["codec_effective"],
-            "encoder_effective": turbo["encoder_effective"],
-            "turbo_policy": turbo["policy"],
-        })
-        if turbo["gpu_effective"]:
-            encoder = str(turbo["encoder_effective"])
-            if encoder.endswith("_nvenc"):
-                args = [
-                    "-c:v", encoder, "-preset", "p1", "-rc", "vbr",
-                    "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
-                ]
-            elif encoder.endswith("_qsv"):
-                args = [
-                    "-c:v", encoder, "-preset", "veryfast",
-                    "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
-                ]
-            else:
-                args = [
-                    "-c:v", encoder, "-quality", "speed",
-                    "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
-                ]
-            if encoder.startswith("hevc_"):
-                args += ["-tag:v", "hvc1"]
-            return encoder_choice(job, f"Hardware {encoder.upper()} rapido", args)
-        if turbo.get("codec_fallback") and not turbo.get("codec_fallback_logged"):
-            _append_log(job, (
-                "Turbo Produção: HEVC solicitado, mas NVENC HEVC não está disponível. "
-                "Usando H.264 CPU ultrafast com a mesma resolução e bitrate alvo."
-            ))
-            turbo["codec_fallback_logged"] = True
-        return encoder_choice(job, "CPU x264 H.264 ultrafast", [
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "fastdecode",
-            "-b:v", target,
-            "-maxrate", maxrate,
-            "-bufsize", bufsize,
-        ])
-
-    balanced_auto_gpu = render_priority(job) == "balanced"
-    if (gpu or balanced_auto_gpu) and use_hevc and encoder_available("hevc_nvenc"):
-        job.timeline_summary["gpu_effective"] = True
-        if balanced_auto_gpu and not gpu:
-            _append_log(job, "Modo Eficiente: NVENC HEVC ativado automaticamente para acelerar sem remover recursos.")
-        return encoder_choice(job, "NVIDIA NVENC HEVC p5", [
-            "-c:v", "hevc_nvenc", "-preset", "p5", "-tag:v", "hvc1",
-            "-rc", "vbr",
-            "-spatial_aq", "1", "-temporal_aq", "1", "-rc-lookahead", "20",
-            "-b:v", target,
-            "-maxrate", maxrate,
-            "-bufsize", bufsize,
-        ])
-    if (gpu or balanced_auto_gpu) and (not use_hevc) and encoder_available("h264_nvenc"):
-        job.timeline_summary["gpu_effective"] = True
-        if balanced_auto_gpu and not gpu:
-            _append_log(job, "Modo Eficiente: NVENC H.264 ativado automaticamente para acelerar sem remover recursos.")
-        return encoder_choice(job, "NVIDIA NVENC H.264 p5", [
-            "-c:v", "h264_nvenc", "-preset", "p5",
-            "-rc", "vbr",
-            "-spatial_aq", "1", "-temporal_aq", "1", "-rc-lookahead", "20",
-            "-b:v", target,
-            "-maxrate", maxrate,
-            "-bufsize", bufsize,
-        ])
-    if gpu and not job.encoder_logged:
-        _append_log(job, "NVENC não disponível ou falhou na detecção: usando CPU automaticamente.")
-
-    priority = render_priority(job)
-    logical_cpus = max(2, int(os.cpu_count() or 4))
-    balanced_threads = max(4, min(16, int(logical_cpus * 0.70)))
-    cpu_threads = 1 if priority == "light" else (balanced_threads if priority == "balanced" else 0)
-    cpu_thread_args = ["-threads", str(cpu_threads)] if cpu_threads else []
-    x265_params = "log-level=error"
-    if priority == "light":
-        x265_params += ":pools=1:frame-threads=1"
-    elif priority == "balanced":
-        x265_params += f":pools={max(2, min(8, balanced_threads // 2))}:frame-threads={max(2, min(6, balanced_threads // 3))}"
-
-    if use_hevc:
-        # The balanced profile keeps all visual features while allowing enough parallelism
-        # to avoid multi-hour encodes on ordinary desktop CPUs.
-        return encoder_choice(job, "CPU x265 HEVC", [
-            "-c:v", "libx265", "-preset", ("ultrafast" if fast else "veryfast"), "-tag:v", "hvc1",
-            "-b:v", target,
-            "-maxrate", maxrate,
-            "-bufsize", bufsize,
-            *cpu_thread_args,
-            "-x265-params", x265_params,
-        ])
-    return encoder_choice(job, "CPU x264 H.264", [
-        "-c:v", "libx264", "-preset", "veryfast",
-        "-b:v", target,
-        "-maxrate", maxrate,
-        "-bufsize", bufsize,
-        *cpu_thread_args,
-    ])
-
-
-def _choose_segment_video_args_legacy(mode: str, gpu: bool, job: Job, worker_count: int = 1) -> list[str]:
-    """Fast high-quality intermediate used before the single final composition pass."""
-    use_nvenc = encoder_available("h264_nvenc") and (
-        bool(gpu) or turbo_enabled(job) or render_priority(job) == "balanced"
-    )
-    if use_nvenc:
-        label = "H.264 NVENC p5" if not turbo_enabled(job) else "H.264 NVENC p1"
-        args = [
-            "-c:v", "h264_nvenc",
-            "-preset", "p5" if not turbo_enabled(job) else "p1",
-            "-rc", "constqp",
-            "-qp", "16" if not turbo_enabled(job) else "20",
-            *(["-spatial_aq", "1", "-temporal_aq", "1"] if not turbo_enabled(job) else []),
-            "-g", "60",
-        ]
-    else:
-        logical_cpus = max(2, int(os.cpu_count() or 4))
-        total_budget = max(2, int(logical_cpus * 0.70))
-        threads = max(2, min(12, total_budget // max(1, worker_count)))
-        label = "H.264 CPU superfast"
-        args = [
-            "-c:v", "libx264",
-            "-preset", "ultrafast" if turbo_enabled(job) else "superfast",
-            "-crf", "20" if turbo_enabled(job) else "15",
-            "-threads", str(threads),
-            "-g", "60",
-        ]
-    if not job.timeline_summary.get("intermediate_encoder_logged"):
-        _append_log(
-            job,
-            f"Pipeline otimizado: clipes processados em intermediário {label}; codec e bitrate finais aplicados uma única vez na composição.",
-        )
-        job.timeline_summary["intermediate_encoder"] = label
-        job.timeline_summary["intermediate_encoder_logged"] = True
-    return args
-
-
 def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
     mode = (mode or "standard").lower()
     use_hevc = (codec or "hevc").lower() != "h264"
@@ -14629,71 +14357,6 @@ def _source_offset_for(source_offsets: dict[str, float] | None, path: Path) -> f
         return 0.0
 
 
-def _interleave_media_editorial(
-    v_list: list[tuple[Path, float]],
-    i_list: list[tuple[Path, float]],
-) -> list[tuple[Path, float]]:
-    """Intercala imagens e vídeos de maneira perfeitamente proporcional e equilibrada,
-    seja com muito mais vídeos do que imagens, muito mais imagens do que vídeos, ou proporções iguais."""
-    if not v_list:
-        return list(i_list)
-    if not i_list:
-        return list(v_list)
-
-    nv = len(v_list)
-    ni = len(i_list)
-    total = nv + ni
-
-    res: list[tuple[Path, float]] = []
-    v_idx = 0
-    i_idx = 0
-
-    for _ in range(total):
-        if v_idx >= nv:
-            res.append(i_list[i_idx])
-            i_idx += 1
-        elif i_idx >= ni:
-            res.append(v_list[v_idx])
-            v_idx += 1
-        else:
-            v_prog = (v_idx + 0.5) / nv
-            i_prog = (i_idx + 0.5) / ni
-            if nv >= ni:
-                if v_prog <= i_prog:
-                    res.append(v_list[v_idx])
-                    v_idx += 1
-                else:
-                    res.append(i_list[i_idx])
-                    i_idx += 1
-            else:
-                if i_prog <= v_prog:
-                    res.append(i_list[i_idx])
-                    i_idx += 1
-                else:
-                    res.append(v_list[v_idx])
-                    v_idx += 1
-    return res
-
-
-def _needs_interleaving(pairs: list[tuple[Path, float]]) -> bool:
-    """Verifica se os arquivos de mídia estão aglomerados e precisam de intercalação editorial."""
-    if not pairs:
-        return False
-    v_indices = [i for i, (src, _) in enumerate(pairs) if not is_image_path(src)]
-    i_indices = [i for i, (src, _) in enumerate(pairs) if is_image_path(src)]
-    if not v_indices or not i_indices:
-        return False
-    min_indices = v_indices if len(v_indices) <= len(i_indices) else i_indices
-    if len(min_indices) >= 2:
-        span = min_indices[-1] - min_indices[0] + 1
-        if span <= len(min_indices) + 2:
-            return True
-    elif len(min_indices) == 1:
-        if min_indices[0] == 0 or min_indices[0] == len(pairs) - 1:
-            return True
-    return False
-
-
 def find_smart_sentence_snap(
     srt_path: Path | str | None,
     max_duration: float,
@@ -15080,127 +14743,6 @@ def log_invalid_video_filter(job: Job, invalid_infos: list[dict[str, Any]], pref
     _append_log(job, f"{prefix}: {len(invalid_infos)} vídeo(s) inválido(s) serão ignorados automaticamente: {sample}{more}")
 
 
-def make_segments_low_memory(
-    job: Job,
-    video_files: list[Path],
-    audio_total: float,
-    mode: str,
-    ratio: str,
-    zoom: str,
-    transitions: str,
-    codec: str,
-    gpu: bool,
-    work: Path,
-) -> list[Path]:
-    if not video_files:
-        raise RuntimeError("Nenhum vídeo encontrado. Envie clipes reais para a timeline.")
-    if audio_total <= 0:
-        raise RuntimeError("A duração total do áudio deu 0. Verifique se o áudio foi lido corretamente.")
-
-    w, h = render_size(mode, ratio)
-    valid_pairs, invalid_infos = filter_renderable_videos(job, video_files, work)
-    log_invalid_video_filter(job, invalid_infos)
-    performance_start(job, "visual_analysis")
-    valid_pairs, visual_clean_summary = apply_visual_clean_filter(
-        job,
-        valid_pairs,
-        audio_total,
-        work,
-        imported_count=len(video_files),
-    )
-    performance_stop(job, "visual_analysis")
-    log_visual_clean_filter(job, visual_clean_summary)
-    if not valid_pairs:
-        raise RuntimeError("Nenhum video valido foi encontrado. Alguns arquivos podem estar corrompidos ou sem frames.")
-    video_files = [item[0] for item in valid_pairs]
-    video_durs = [item[1] for item in valid_pairs]
-    job.preflight_summary.update({
-        "videos_valid": len(video_files),
-        "videos_invalid": len(invalid_infos),
-        "invalid_video_names": [item["name"] for item in invalid_infos[:20]],
-        "invalid_video_details": invalid_infos[:20],
-        "visual_clean_filter": visual_clean_summary,
-    })
-    raw_total = sum(video_durs)
-    if raw_total <= 0:
-        raise RuntimeError("A duração total dos vídeos deu 0. Verifique os ficheiros de vídeo.")
-
-    speed_factor = 1.0
-    if raw_total < audio_total:
-        speed_factor = audio_total / raw_total
-
-    visual = effective_visual_options(job)
-    performance_budget = render_performance_budget(job, gpu, len(video_files))
-    worker_count = int(performance_budget.get("segment_workers") or efficient_segment_worker_count(job, gpu))
-    encoder_args = choose_segment_video_args(mode, gpu, job, worker_count=worker_count)
-    segments_dir = work / "segments"
-    segments_dir.mkdir(exist_ok=True)
-    segments: list[Path] = []
-    remaining = audio_total
-    _append_log(job, (
-        f"Motor v0.5 seguro: render segmentado. Vídeos={len(video_files)} | "
-        f"Áudio={audio_total:.2f}s | Vídeo bruto={raw_total:.2f}s | "
-        f"Speed factor={speed_factor:.4f} | Resolução={w}x{h} | transições seguras={transitions} | sem faststart para evitar WinError/memória."
-    ))
-
-    for idx, (src, dur) in enumerate(zip(video_files, video_durs), start=1):
-        if remaining <= 0.08:
-            break
-        adjusted = max(0.01, dur * speed_factor)
-        target = min(adjusted, remaining)
-        if target < 0.08:
-            break
-        out = segments_dir / f"seg_{idx:04d}.mp4"
-        job.message = f"Renderizando clip {idx}/{len(video_files)}"
-        job.percent = min(92.0, 15.0 + ((audio_total - remaining) / audio_total) * 77.0)
-        if is_image_path(src):
-            style_profile = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
-            filter_complex = build_image_filter_complex(w, h, target, image_motion_for(src, idx), src, style_profile)
-            cmd = [
-                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
-                "-i", str(src),
-                "-filter_complex", filter_complex,
-                "-map", "[vout]",
-                "-an", "-r", "30",
-                *encoder_args,
-                "-pix_fmt", "yuv420p",
-                str(out),
-            ]
-        else:
-            vf = build_video_filter(
-                w,
-                h,
-                speed_factor,
-                target,
-                visual["zoom"],
-                idx,
-                visual["transitions"],
-                quality_boost=visual["quality_boost"],
-                intro_fade=(0.75 if idx == 1 else 0.0),
-            )
-            cmd = [
-                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
-                "-i", str(src),
-                "-vf", vf,
-                "-an", "-r", "30",
-                *encoder_args,
-                "-pix_fmt", "yuv420p",
-                str(out),
-            ]
-        run_cmd(job, cmd, cwd=work, quiet_success=True)
-        if out.exists() and out.stat().st_size > 0:
-            segments.append(out)
-            remaining -= target
-        else:
-            raise RuntimeError(f"Falha ao criar segmento: {out.name}")
-
-    if not segments:
-        raise RuntimeError("Nenhum segmento de vídeo foi gerado.")
-    if remaining > 1.0:
-        _append_log(job, f"Aviso: ainda faltariam {remaining:.2f}s. O último frame pode ser estendido em versões futuras.")
-    return segments
-
-
 def make_segments_smart(
     job: Job,
     video_files: list[Path],
@@ -15278,7 +14820,8 @@ def make_segments_smart(
             if is_image_path(src) or dur <= 1.2:
                 continue
             window_cache_key = visual_clean_cache_key(src, dur, cwd=work, scope="windows_v3_batch")
-            cached_window = VISUAL_CLEAN_CACHE.get(window_cache_key)
+            with VISUAL_CLEAN_CACHE_LOCK:
+                cached_window = VISUAL_CLEAN_CACHE.get(window_cache_key)
             if (turbo_enabled(job) or len(valid_pairs) > 40) and not isinstance(cached_window, dict):
                 visual_window_summary["budget_skipped"] += 1
                 if "visual_windows_cache_only_turbo" not in job.render_budget_fallbacks:
@@ -16038,7 +15581,9 @@ def concat_segments_and_mux(
 
 
 def generate_youtube_chapters_and_metadata(job: Job, out_file: Path, final_duration: float):
-    """Gera automaticamente o arquivo com Capítulos para a descrição do YouTube e Tags sugeridas a partir da narração."""
+    """Gera o arquivo com Capítulos para a descrição do YouTube apenas se explicitamente solicitado."""
+    if not bool(job.options.get("generateYoutubeChapters")):
+        return
     try:
         from collections import Counter
         target_dir = out_file.parent if out_file.exists() else job.export_dir
@@ -16046,7 +15591,7 @@ def generate_youtube_chapters_and_metadata(job: Job, out_file: Path, final_durat
             return
         chapters_file = target_dir / f"{out_file.stem}_Capitulos_YouTube.txt"
         
-        cues = list(job.srt_cues or [])
+        cues = list(getattr(job, "subtitle_cues", None) or getattr(job, "subtitle_preview_cues", None) or [])
         chapters = [(0.0, "Introdução")]
         
         if cues and final_duration > 30.0:
@@ -16355,7 +15900,8 @@ def apply_recovery_action(job: Job, action: dict[str, Any], exc: Exception) -> N
         job.options["_recovery_skip_video_names"] = existing
     elif action.get("kind") == "codec_fallback":
         job.options["codec"] = "h264"
-        job.options["gpu"] = False
+        if not bool(job.options.get("_force_cpu")):
+            job.options["gpu"] = bool(job.options.get("gpu", False))
     elif action.get("kind") == "cpu_fallback":
         job.options["gpu"] = False
         job.options["_force_cpu"] = True
@@ -17423,19 +16969,31 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
     ]
     try:
         assert_render_budget(job, "análise de loudness")
-        first = _run_hidden(
+        proc = _popen_hidden(
             first_cmd,
             cwd=work,
             priority=render_priority(job),
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             encoding="utf-8",
             errors="ignore",
-            timeout=max(120, int(max(1.0, job.estimated_render_duration) * 2.5)),
         )
+        _register_process(job, proc)
+        try:
+            stdout, stderr = proc.communicate(
+                timeout=max(120, int(max(1.0, job.estimated_render_duration) * 2.5))
+            )
+        except subprocess.TimeoutExpired:
+            _terminate_process(proc)
+            raise RuntimeError("Tempo limite excedido na análise de loudness.")
+        finally:
+            _unregister_process(job, proc)
+        if job.cancel_requested:
+            raise RenderCancelled("Render cancelado pelo usuario.")
         assert_render_budget(job, "análise de loudness")
-        measurement = parse_loudnorm_output((first.stderr or "") + "\n" + (first.stdout or ""))
-        if first.returncode != 0 or not measurement:
+        measurement = parse_loudnorm_output((stderr or "") + "\n" + (stdout or ""))
+        if proc.returncode != 0 or not measurement:
             raise RuntimeError("FFmpeg nao retornou medicao loudness valida")
         mastered = work / "audio_mastered.wav"
         second_filter = second_pass_filter(measurement, master_profile) + f",alimiter=limit={limiter_value(master_profile)}"
@@ -18013,6 +17571,28 @@ def render_worker(job_id: str):
         )
         job.preflight_summary["confidence"] = job.confidence_summary
 
+        if job.timeline_summary.get("audio_trimmed"):
+            trimmed_duration = float(job.timeline_summary.get("audio_duration") or timeline_total)
+            if trimmed_duration < timeline_total - 0.25:
+                fade_duration = min(1.8, max(0.4, trimmed_duration * 0.08))
+                fade_start = max(0.0, trimmed_duration - fade_duration)
+                trimmed_audio_path = job.work / "final_audio_trimmed.wav"
+                _append_log(
+                    job,
+                    f"Auto-Healer: Mídia curta ({trimmed_duration:.2f}s vs {timeline_total:.2f}s). "
+                    f"Recortando áudio com fade-out suave de {fade_duration:.2f}s.",
+                )
+                cmd_trim_audio = [
+                    FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(final_audio),
+                    "-af", f"afade=t=out:st={fade_start:.3f}:d={fade_duration:.3f}",
+                    "-t", f"{trimmed_duration:.3f}",
+                    str(trimmed_audio_path),
+                ]
+                run_cmd(job, cmd_trim_audio, cwd=job.work, quiet_success=True)
+                final_audio = trimmed_audio_path
+                timeline_total = trimmed_duration
+
         output_name = output_name_from_options(job.options)
         technical_out_file = job.export_dir / output_name
         final_duration = concat_segments_and_mux(
@@ -18282,6 +17862,14 @@ async def create_render_job(manifest: str = Form("[]"), options: str = Form("{}"
         job.estimated_render_duration = float(initial_duration)
         job.estimated_total_seconds = float(initial_estimate.get("seconds") or 0.0)
         job.estimate_confidence = str(initial_estimate.get("confidence") or "heuristic")
+    if len(JOBS) >= 50:
+        finished_keys = [
+            k for k, j in JOBS.items()
+            if j.status in {"done", "error", "cancelled", "recovered"}
+        ]
+        if len(finished_keys) > 30:
+            for k in finished_keys[:-30]:
+                JOBS.pop(k, None)
     JOBS[job_id] = job
     return {
         "job_id": job_id,

@@ -9,14 +9,14 @@
     "/static/app.js": 200,
     "/static/modules/runtime-config.js": 200,
     "/static/style.css": 200,
-    "/assets/eagle_glide.png": 200,
+    "/assets/glide_studio_icon_256.png": 200,
     "/assets/glide_studio.ico": 200,
     "/assets/glide_studio_icon_32.png": 200,
     "/assets/glide_studio_icon_48.png": 200,
     "/assets/glide_studio_icon.png": 200,
     "/assets/site.webmanifest": 200
   },
-  "version": "1.29.0",
+  "version": "1.40.0",
   "visual_face_detector": {
     "engine": "opencv_yunet",
     "model": "face_detection_yunet_2023mar.onnx",

@@ -8,11 +8,13 @@ webview_profile/
 project_media/
 reference_styles/
 
-# Large binary files & database
+# Large binary files & temporary database / caches
 *.exe
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
+visual_clean_cache.json
+*.bak
 
 # Build artifacts and python bytecode
 __pycache__/
