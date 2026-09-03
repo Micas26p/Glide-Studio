@@ -1,4 +1,4 @@
-﻿GLIDE ULTRA LOCAL STUDIO v1.13.7
+GLIDE ULTRA LOCAL STUDIO v1.14.0
 ================================
 
 Glide Ultra e um editor local Windows para montar videos com clipes, narracao,
@@ -6,11 +6,29 @@ musica automatica, SRT, CTA oficial e render FFmpeg em segundo plano.
 
 INICIALIZADORES OFICIAIS
 ------------------------
-1. Glide Ultra.exe
+1. Glide Studio.exe
    Inicia o backend local invisivel e abre a interface em modo app.
 
 2. Iniciar_Versao_Web.bat
    Fallback web local. Mantem os mesmos recursos da versao desktop.
+
+NOVIDADES DA v1.14.0 (VERSAO DEFINITIVA COMERCIAL)
+--------------------------------------------------
+- Exportacao Dual Automatica: Gera simultaneamente o Master 16:9 Full HD e a
+  versao vertical 9:16 (_Shorts_9x16.mp4) para YouTube Shorts, TikTok e Reels.
+- Extracao Inteligente de Miniaturas HD: Seleciona e exporta automaticamente
+  as 3 melhores thumbnails HD do video (_thumb_1.jpg, _thumb_2.jpg, _thumb_3.jpg).
+- Remocao Inteligente de Silencio: Corta pausas mortas na narracao mantendo o
+  ritmo fluido e dinamico do audio.
+- Nova Barra Lateral Colapsavel: Reducao para 72px com botao vetorial SVG,
+  animacao suave de rotacao e centralizacao de icones.
+- Botoes de Acao e Fila Reformulados: O botao Renderizar Fila agora tem estado
+  inativo em alto contraste e gradiente esmeralda ativo.
+- Biblioteca Musical em Chips: Segmented control dark pro para generos (Cinematic
+  e Ambiente) e faixas de amostra em chips elegantes individuais.
+- Normalizacao Universal de Idiomas de CTA: Suporte automatico tanto para siglas
+  quanto para nomes completos (portugues, german, english, etc.).
+- Atalho Escape: Fechamento instantaneo de qualquer modal ou dialogo aberto.
 
 NOVIDADES DA v1.13.7
 --------------------
