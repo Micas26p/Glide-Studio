@@ -8549,8 +8549,48 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
         script = work / "audio_filter_complex.txt"
         script.write_text(";".join(filters), encoding="utf-8")
         cmd += ["-filter_complex_script", script.name, "-map", "[aout]", "-ac", "2", "-ar", "48000", str(out)]
-        run_cmd(job, cmd, total_duration=total or None, base=10, span=5, cwd=work)
     return out, total
+
+
+def optimize_audio_cadence_and_silence(job: Job, audio_in: Path, audio_total: float, work: Path) -> tuple[Path, float]:
+    """
+    Detecta e compacta silêncios mortos (> 1.0s) na narração de voz
+    para um respiro natural (~350ms), acelerando o render e melhorando o ritmo.
+    """
+    actual_path = audio_in if audio_in.is_absolute() else work / audio_in
+    if audio_total < 5.0 or not actual_path.exists():
+        return audio_in, audio_total
+
+    out_trimmed = work / f"{actual_path.stem}_cadence_optimized.wav"
+    try:
+        filter_str = "silenceremove=stop_periods=-1:stop_duration=0.9:stop_threshold=-42dB"
+        cmd = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(actual_path),
+            "-af", filter_str,
+            "-ac", "2", "-ar", "48000",
+            str(out_trimmed)
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(work))
+        if res.returncode == 0 and out_trimmed.exists() and out_trimmed.stat().st_size > 1000:
+            new_dur = safe_probe_duration(out_trimmed, cwd=work)
+            if 0.40 * audio_total <= new_dur < 0.99 * audio_total:
+                saved = audio_total - new_dur
+                _append_log(job, f"Otimizador de Cadência: silêncios mortos compactados ({audio_total:.1f}s -> {new_dur:.1f}s, ganho de {saved:.1f}s de retenção).")
+                job.cadence_summary = {
+                    "enabled": True,
+                    "original_duration": round(audio_total, 3),
+                    "optimized_duration": round(new_dur, 3),
+                    "saved_seconds": round(saved, 3)
+                }
+                return out_trimmed, new_dur
+            elif new_dur >= 0.99 * audio_total:
+                _append_log(job, "Otimizador de Cadência: narração já possui ritmo excelente sem silêncios mortos.")
+                job.cadence_summary = {"enabled": True, "action": "none_needed", "saved_seconds": 0.0}
+    except Exception as exc:
+        _append_log(job, f"Aviso no Otimizador de Cadência: {exc}; preservando áudio original.")
+
+    return audio_in, audio_total
 
 
 def clamp_float(value: Any, default: float, minimum: float, maximum: float) -> float:
@@ -15942,11 +15982,73 @@ def extract_best_thumbnail_candidates(job: Job, out_file: Path, final_duration: 
         return []
 
 
+def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float) -> Path | None:
+    """
+    Gera automaticamente uma versão vertical 1080x1920 (9:16) para YouTube Shorts,
+    TikTok e Instagram Reels com fundo borrado (Pillowbox Blur) e áudio original.
+    """
+    if not out_file.exists() or final_duration < 1.0:
+        return None
+    target_dir = out_file.parent if out_file.exists() else job.export_dir
+    if not target_dir:
+        return None
+
+    shorts_file = target_dir / f"{out_file.stem}_Shorts_9x16.mp4"
+    _append_log(job, f"Dual Export: gerando versão vertical 9:16 para Shorts/TikTok em {shorts_file.name}...")
+
+    try:
+        filter_complex = (
+            "[0:v]split=2[bg][fg];"
+            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg_blur];"
+            "[fg]scale=1080:-1[fg_center];"
+            "[bg_blur][fg_center]overlay=0:(H-h)/2[outv]"
+        )
+        
+        gpu_enabled = bool(job.options.get("gpu", False))
+        vcodec = "h264_nvenc" if gpu_enabled and encoder_available("h264_nvenc") else "libx264"
+        preset = "p4" if vcodec == "h264_nvenc" else "ultrafast"
+
+        cmd = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(out_file),
+            "-filter_complex", filter_complex,
+            "-map", "[outv]",
+            "-map", "0:a?",
+            "-c:v", vcodec,
+            "-preset", preset,
+            "-c:a", "copy",
+            str(shorts_file)
+        ]
+
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if res.returncode == 0 and shorts_file.exists() and shorts_file.stat().st_size > 1000:
+            mb_size = shorts_file.stat().st_size / (1024 * 1024)
+            _append_log(job, f"Dual Export Concluído: {shorts_file.name} ({mb_size:.1f} MB) gerado com sucesso para Shorts/TikTok.")
+            if hasattr(job, "options") and isinstance(job.options, dict):
+                job.options["shorts_export"] = shorts_file.name
+            return shorts_file
+        else:
+            if vcodec != "libx264":
+                cmd[cmd.index("-c:v") + 1] = "libx264"
+                cmd[cmd.index("-preset") + 1] = "veryfast"
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                if res.returncode == 0 and shorts_file.exists():
+                    _append_log(job, f"Dual Export Concluído (CPU fallback): {shorts_file.name} gerado.")
+                    return shorts_file
+    except Exception as exc:
+        _append_log(job, f"Aviso no Dual Export 9:16: {exc}")
+
+    return None
+
+
 def write_render_report(job: Job, out_file: Path, final_duration: float):
     if not job.export_dir:
         return
     generate_youtube_chapters_and_metadata(job, out_file, final_duration)
-    extract_best_thumbnail_candidates(job, out_file, final_duration)
+    if bool(job.options.get("autoThumbnails", True)):
+        extract_best_thumbnail_candidates(job, out_file, final_duration)
+    if bool(job.options.get("dualExportShorts", False)):
+        generate_dual_shorts_export(job, out_file, final_duration)
     write_editorial_intelligence_plan(job, "final")
     visual_clean = (job.timeline_summary or {}).get("visual_clean_summary") or (job.preflight_summary or {}).get("visual_clean_filter") or {}
     lines = [
@@ -17112,6 +17214,8 @@ def prepare_audio_foundation(
     performance_start(job, "audio")
     audio_concat, audio_total = make_concat_audio(job, audios, work)
     analyze_audio_health(job, audio_concat, audio_total, work)
+    if bool(job.options.get("trimSilence", True)):
+        audio_concat, audio_total = optimize_audio_cadence_and_silence(job, audio_concat, audio_total, work)
     if subtitles and visual["dynamic_pauses"]:
         pause_source_cues = subtitle_preview_cues
         if not pause_source_cues:

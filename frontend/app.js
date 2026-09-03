@@ -226,6 +226,9 @@ const visualFilterHint = $('#visualFilterHint');
 const voiceNormalizeToggle = $('#voiceNormalizeToggle');
 const autoSoundFxToggle = $('#autoSoundFxToggle');
 const allowAudioTrimToggle = $('#allowAudioTrimToggle');
+const trimSilenceToggle = $('#trimSilenceToggle');
+const dualExportShortsToggle = $('#dualExportShortsToggle');
+const autoThumbnailsToggle = $('#autoThumbnailsToggle');
 const preflightGrid = $('#preflightGrid');
 const autoFixBtn = $('#autoFixBtn');
 const projectToneSelect = $('#projectToneSelect');
@@ -870,6 +873,9 @@ function captureControlSnapshot(includeSubtitle = true){
     voiceNormalize: voiceNormalizeToggle ? voiceNormalizeToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
+    trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
+    dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
+    autoThumbnails: autoThumbnailsToggle ? autoThumbnailsToggle.checked : true,
     backgroundMusicVolumeDb: backgroundVolumeValue(),
     backgroundMusicPreset: backgroundVolumePreset?.value || 'immersive',
     backgroundMusicDucking: true,
@@ -938,6 +944,9 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(voiceNormalizeToggle) voiceNormalizeToggle.checked = options.voiceNormalize !== false;
   if(autoSoundFxToggle) autoSoundFxToggle.checked = options.autoSoundFx !== false;
   if(allowAudioTrimToggle) allowAudioTrimToggle.checked = options.allowAudioTrim !== false;
+  if(trimSilenceToggle) trimSilenceToggle.checked = options.trimSilence !== false;
+  if(dualExportShortsToggle) dualExportShortsToggle.checked = Boolean(options.dualExportShorts);
+  if(autoThumbnailsToggle) autoThumbnailsToggle.checked = options.autoThumbnails !== false;
   if(backgroundVolumePreset) backgroundVolumePreset.value = options.backgroundMusicPreset || 'immersive';
   if(backgroundVolumeDb) backgroundVolumeDb.value = String(options.backgroundMusicVolumeDb ?? -25);
   if(backgroundDuckingToggle) backgroundDuckingToggle.checked = options.backgroundMusicDucking !== false;
@@ -2877,6 +2886,9 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
+    trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
+    dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
+    autoThumbnails: autoThumbnailsToggle ? autoThumbnailsToggle.checked : true,
     zoom: $('#zoomSelect')?.value || 'off',
     transitions: $('#transitionSelect')?.value || 'off',
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
@@ -5017,6 +5029,9 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     voiceNormalize: optionValue('voiceNormalize', voiceNormalizeToggle ? voiceNormalizeToggle.checked : true) !== false,
     autoSoundFx: optionValue('autoSoundFx', autoSoundFxToggle ? autoSoundFxToggle.checked : true) !== false,
     allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : true) !== false,
+    trimSilence: optionValue('trimSilence', trimSilenceToggle ? trimSilenceToggle.checked : true) !== false,
+    dualExportShorts: Boolean(optionValue('dualExportShorts', dualExportShortsToggle ? dualExportShortsToggle.checked : false)),
+    autoThumbnails: optionValue('autoThumbnails', autoThumbnailsToggle ? autoThumbnailsToggle.checked : true) !== false,
     videoOrder: sourceVideos.map(rel),
     imageOrder: sourceVideos.filter(isImage).map(rel),
     imageDefaultDurationSeconds: Number(optionValue('imageDefaultDurationSeconds', 4)) || 4,

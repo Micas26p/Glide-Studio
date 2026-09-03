@@ -428,6 +428,9 @@
           <label class="toggle"><input id="voiceNormalizeToggle" type="checkbox" checked /> <span>Voz nivelada</span></label>
           <label class="toggle"><input id="autoSoundFxToggle" type="checkbox" checked /> <span>Efeitos sonoros automáticos</span></label>
           <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render."><input id="allowAudioTrimToggle" type="checkbox" checked /> <span>Sacrificar áudio se faltar mídia</span></label>
+          <label class="toggle" title="Detecta pausas mortas (>1.0s) na narração e compacta suavemente para um respiro natural (~350ms), acelerando o render e aumentando a retenção."><input id="trimSilenceToggle" type="checkbox" checked /> <span>Otimizar silêncios da voz</span></label>
+          <label class="toggle" title="Gera automaticamente uma versão vertical 1080x1920 (9:16) para TikTok/Shorts/Reels junto com o master horizontal."><input id="dualExportShortsToggle" type="checkbox" /> <span>Dual Export (Shorts 9:16)</span></label>
+          <label class="toggle" title="Analisa nitidez e contraste dos quadros e extrai automaticamente as 3 melhores miniaturas HD para o YouTube."><input id="autoThumbnailsToggle" type="checkbox" checked /> <span>Extrair Miniaturas HD</span></label>
         </div>
         <div class="intro-panel advanced-only" id="introPanel">
           <div class="intro-head">
