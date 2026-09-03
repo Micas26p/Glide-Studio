@@ -3784,6 +3784,9 @@ class DropzoneManager:
                 "allowAudioTrim": True,
                 "scoreVisualWindows": True,
                 "autoHeal": True,
+                "trimSilence": True,
+                "dualExportShorts": False,
+                "autoThumbnails": True,
                 "scriptGuidePlan": script_plan,
             },
         }
@@ -13751,6 +13754,9 @@ def render_gallery():
             stat = path.stat()
             parent = path.parent
             report = parent / "relatorio_render.txt"
+            is_shorts = path.stem.endswith("_Shorts_9x16")
+            base_stem = path.stem.replace("_Shorts_9x16", "")
+            thumbs = sorted([p.name for p in parent.glob(f"{base_stem}_thumb_*.jpg")])
             renders.append({
                 "name": path.name,
                 "path": str(path),
@@ -13761,6 +13767,8 @@ def render_gallery():
                 "download": None,
                 "has_report": report.exists(),
                 "batch": batch,
+                "is_shorts": is_shorts,
+                "thumbnails": thumbs,
             })
         except Exception:
             pass

@@ -735,6 +735,9 @@ function storedProjectToModel(raw = {}, index = 0){
   project.files = emptyProjectFiles();
   project.maps = emptyProjectMaps();
   project.options = raw.options && typeof raw.options === 'object' ? raw.options : {};
+  if(typeof project.options.trimSilence === 'undefined') project.options.trimSilence = true;
+  if(typeof project.options.dualExportShorts === 'undefined') project.options.dualExportShorts = false;
+  if(typeof project.options.autoThumbnails === 'undefined') project.options.autoThumbnails = true;
   project.referenceStyleVideo = raw.referenceStyleVideo && typeof raw.referenceStyleVideo === 'object'
     ? raw.referenceStyleVideo
     : (project.options.referenceStyleVideo && typeof project.options.referenceStyleVideo === 'object' ? project.options.referenceStyleVideo : null);
@@ -3287,6 +3290,11 @@ function projectChecks(){
       text: autoSoundFxToggle?.checked
         ? 'Automático: Textos animados e a abertura cinematográfica recebem efeitos sincronizados. Legendas permanecem limpas e sem FX.'
         : 'Desligado: render sem efeitos sonoros automáticos.',
+    },
+    {
+      state: 'ok',
+      title: 'Entregáveis & Automações',
+      text: `Miniaturas HD: ${autoThumbnailsToggle?.checked ? '3 automáticas' : 'desligado'} | Cadência: ${trimSilenceToggle?.checked ? 'silêncios mortos compactados' : 'original'} | Formato: ${dualExportShortsToggle?.checked ? 'Master 16:9 + Shorts 9:16' : '16:9 único'}.`,
     },
   ];
 }
@@ -7126,7 +7134,13 @@ async function refreshRenderGallery(){
     renderGallery.innerHTML = state.renderGallery.length
       ? state.renderGallery.slice(0, 16).map(item => `
         <div class="gallery-item">
-          <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</strong>
+          <div class="gallery-top">
+            <strong title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</strong>
+            <div class="gallery-badges">
+              ${item.is_shorts ? '<span class="gallery-chip shorts">9:16 Shorts</span>' : ''}
+              ${item.thumbnails?.length ? `<span class="gallery-chip thumbs">${item.thumbnails.length} Thumbs</span>` : ''}
+            </div>
+          </div>
           <span>${escapeHtml(item.size_label || '')} - ${escapeHtml(item.batch || 'render avulso')}</span>
           <small>${escapeHtml(item.output_dir || '')}</small>
         </div>`).join('')

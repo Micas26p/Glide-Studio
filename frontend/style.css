@@ -289,6 +289,11 @@ button,select,input{font:inherit;min-width:0}
 .gallery-item strong,.gallery-item span,.gallery-item small{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gallery-item span{color:var(--text);font-size:12px}
 .gallery-item small{color:var(--muted);font-size:11px}
+.gallery-top{display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0}
+.gallery-badges{display:flex;align-items:center;gap:4px;flex-shrink:0}
+.gallery-chip{font-size:10px;font-weight:800;padding:2px 6px;border-radius:999px;line-height:1;text-transform:uppercase}
+.gallery-chip.shorts{background:rgba(168,85,247,.18);color:#d8b4fe;border:1px solid rgba(168,85,247,.35)}
+.gallery-chip.thumbs{background:rgba(16,185,129,.16);color:#6ee7b7;border:1px solid rgba(16,185,129,.35)}
 
 .btn{min-width:0;min-height:38px;border:1px solid var(--border-default);border-radius:8px;padding:0 14px;color:var(--text);background:var(--bg-card);cursor:pointer;font-weight:600;font-size:13px;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background var(--duration-fast) ease,border-color var(--duration-fast) ease,box-shadow var(--duration-fast) ease,transform 80ms ease,opacity var(--duration-fast) ease;text-align:center;overflow-wrap:anywhere}
 .btn:hover:not(:disabled){background:var(--bg-card-hover);border-color:var(--border-hover);box-shadow:var(--shadow-sm)}
