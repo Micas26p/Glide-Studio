@@ -39,16 +39,34 @@
       </div>
     </div>
     <nav>
-      <button type="button" class="nav-item" data-target="queueSection" data-short="F" title="Fila"><span>Fila</span></button>
-      <button type="button" class="nav-item active" data-target="renderSection" data-short="I" title="Importar"><span>Importar</span></button>
-      <button type="button" class="nav-item" data-target="timelineSection" data-short="T" title="Timeline"><span>Timeline</span></button>
-      <button type="button" class="nav-item" data-target="subtitleSection" data-short="X" title="Textos"><span>Textos</span></button>
-      <button type="button" class="nav-item" data-target="exportSection" data-short="E" title="Exportar"><span>Exportar</span></button>
-      <button type="button" class="nav-item" data-target="gallerySection" data-short="G" title="Galeria"><span>Galeria</span></button>
+      <button type="button" class="nav-item" data-target="queueSection" data-short="F" title="Fila de Produção">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+        <span>Fila</span>
+      </button>
+      <button type="button" class="nav-item active" data-target="renderSection" data-short="I" title="Importar Mídia">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+        <span>Importar</span>
+      </button>
+      <button type="button" class="nav-item" data-target="timelineSection" data-short="T" title="Timeline de Clipes">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="2" y1="7" x2="7" y2="7"/><line x1="2" y1="17" x2="7" y2="17"/><line x1="17" y1="17" x2="22" y2="17"/><line x1="17" y1="7" x2="22" y2="7"/></svg>
+        <span>Timeline</span>
+      </button>
+      <button type="button" class="nav-item" data-target="subtitleSection" data-short="X" title="Textos e Legendas">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+        <span>Textos</span>
+      </button>
+      <button type="button" class="nav-item" data-target="exportSection" data-short="E" title="Exportar e Presets">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+        <span>Exportar</span>
+      </button>
+      <button type="button" class="nav-item" data-target="gallerySection" data-short="G" title="Galeria de Renders">
+        <svg class="nav-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+        <span>Galeria</span>
+      </button>
     </nav>
     <div class="side-card">
       <span class="dot"></span>
-      <p><b>Motor local:</b> FFmpeg roda nesta máquina. O app pode ficar minimizado durante o render.</p>
+      <p><b>Motor local:</b> FFmpeg roda nesta máquina com aceleração GPU.</p>
     </div>
   </aside>
 
@@ -57,18 +75,29 @@
       <div class="hero-heading">
         <span class="brand-mark hero-mark" aria-hidden="true"></span>
         <div>
-          <p class="eyebrow">Desktop workflow</p>
-          <h1>Editor local para clipes + narração</h1>
-          <p class="hero-subtitle">Importe mídia, ajuste a timeline e gere o MP4 com o motor local em segundo plano.</p>
+          <div class="topbar-badge-row">
+            <span class="eyebrow-badge"><span class="badge-dot"></span>Estúdio Local • 1080p Ultra</span>
+          </div>
+          <h1>Glide Studio</h1>
+          <p class="hero-subtitle">Estação de edição editorial e renderização em lote de alta performance.</p>
         </div>
       </div>
       <div class="top-actions">
         <div class="render-time-estimate" id="renderTimeEstimate" aria-live="polite">
-          <span>Tempo estimado</span>
-          <strong>Aguardando duração do áudio</strong>
+          <span class="estimate-label">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Tempo estimado
+          </span>
+          <strong>Aguardando áudio</strong>
         </div>
-        <button type="button" class="btn ghost small settings-button" id="settingsBtn" title="Configurações e utilitários">Config</button>
-        <div class="health" id="healthBadge">Verificando motor...</div>
+        <button type="button" class="btn ghost small settings-button" id="settingsBtn" title="Configurações e utilitários">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>Config</span>
+        </button>
+        <div class="health" id="healthBadge">
+          <span class="health-dot"></span>
+          <span class="health-text">Verificando motor...</span>
+        </div>
       </div>
     </header>
 
@@ -80,23 +109,52 @@
           <p class="engine-note" id="queueSummary">Cada projeto guarda sua própria mídia, CTA, música, Textos, Legendas, nome e preset.</p>
         </div>
         <div class="actions-inline queue-actions">
-          <button type="button" class="btn primary small" id="newProjectBtn">Novo projeto</button>
-          <button type="button" class="btn ghost small" id="duplicateProjectBtn">Duplicar</button>
-          <button type="button" class="btn ghost small" id="removeProjectBtn">Remover</button>
-          <button type="button" class="btn ghost small queue-danger" id="clearAllProjectsBtn" title="Limpa mídias, jobs e renders da fila, mantendo nomes e presets">Limpar fila</button>
-          <button type="button" class="btn ghost small retry-failed-btn" id="retryFailedBtn" disabled title="Repete todos ou apenas projetos selecionados">Repetir fila</button>
-          <button type="button" class="btn ghost small" id="renderHealthyBtn" title="Renderiza apenas projetos completos e com confiança mínima">Renderizar saudáveis</button>
-          <button type="button" class="btn ghost small automator-btn" id="automatorBtn" title="Distribui Textos, áudio e pastas com vídeos a partir do projeto selecionado">AUTO</button>
-          <button type="button" class="btn export small" id="renderQueueBtn">Renderizar fila</button>
+          <button type="button" class="btn primary small" id="newProjectBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <span>Novo</span>
+          </button>
+          <button type="button" class="btn ghost small" id="duplicateProjectBtn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+            <span>Duplicar</span>
+          </button>
+          <button type="button" class="btn ghost small" id="removeProjectBtn">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            <span>Remover</span>
+          </button>
+          <button type="button" class="btn ghost small queue-danger" id="clearAllProjectsBtn" title="Limpa mídias, jobs e renders da fila, mantendo nomes e presets">
+            <span>Limpar</span>
+          </button>
+          <button type="button" class="btn ghost small retry-failed-btn" id="retryFailedBtn" disabled title="Repete todos ou apenas projetos selecionados">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
+            <span>Repetir</span>
+          </button>
+          <button type="button" class="btn ghost small" id="renderHealthyBtn" title="Renderiza apenas projetos completos e com confiança mínima">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            <span>Saudáveis</span>
+          </button>
+          <button type="button" class="btn ghost small automator-btn" id="automatorBtn" title="Distribui Textos, áudio e pastas com vídeos a partir do projeto selecionado">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>
+            <span>AUTO Lote</span>
+          </button>
+          <button type="button" class="btn export small" id="renderQueueBtn">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+            <span>Renderizar fila</span>
+          </button>
         </div>
       </div>
       <div class="dropzone-status-bar" id="dropzoneStatusBar">
         <div class="dropzone-info">
-          <span class="dropzone-badge"><span class="dropzone-pulse"></span> DROPZONE ATIVA</span>
-          <span class="dropzone-desc">Solte pastas com mídia em <code>DROPZONE/</code> para renderização 100% autônoma.</span>
+          <div class="dropzone-badge">
+            <span class="dropzone-pulse"></span>
+            <span>DROPZONE ATIVA</span>
+          </div>
+          <span class="dropzone-desc">Solte pastas em <code>DROPZONE/</code> para ingestão e renderização autônoma.</span>
         </div>
         <div class="dropzone-actions">
-          <button type="button" class="btn ghost small" id="dropzoneScanBtn" title="Escanear pasta DROPZONE imediatamente">Escanear agora</button>
+          <button type="button" class="btn ghost small" id="dropzoneScanBtn" title="Escanear pasta DROPZONE imediatamente">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            <span>Escanear agora</span>
+          </button>
         </div>
       </div>
       <div class="queue-tool-row">
@@ -187,18 +245,44 @@
         <input type="file" id="subtitleInput" hidden accept=".srt" />
         <input type="file" id="captionInput" hidden accept=".srt" />
         <input type="file" id="scriptGuideInput" hidden accept=".txt,.docx,.pdf,.html,.htm" />
-        <div class="upload-icon">+</div>
-        <h3>Adicionar arquivos</h3>
+        <div class="upload-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        </div>
+        <h3>Adicionar arquivos e mídia</h3>
         <p>Envie vídeos, imagens e áudios em partes. Cada novo envio entra na timeline sem apagar o que já foi carregado.</p>
         <div class="upload-actions">
-          <button type="button" class="btn primary" id="pickFolder">Adicionar pasta</button>
-          <button type="button" class="btn ghost" id="pickVideos">Vídeos e Imagens</button>
-          <button type="button" class="btn ghost" id="pickAudios">Áudios</button>
-          <button type="button" class="btn ghost" id="pickBackground">Músicas de fundo</button>
-          <button type="button" class="btn ghost" id="pickSubtitles">Textos</button>
-          <button type="button" class="btn ghost" id="pickCaptions">Legendas</button>
-          <button type="button" class="btn ghost" id="pickScriptGuide">Roteiro</button>
-          <button type="button" class="btn ghost" id="pickFiles">Misto</button>
+          <button type="button" class="btn primary" id="pickFolder">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            <span>Pasta</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickVideos">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/></svg>
+            <span>Vídeos &amp; Fotos</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickAudios">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+            <span>Narração</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickBackground">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+            <span>Músicas</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickSubtitles">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" y1="20" x2="15" y2="20"/><line x1="12" y1="4" x2="12" y2="20"/></svg>
+            <span>Textos</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickCaptions">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="15" x2="18" y2="15"/><line x1="6" y1="11" x2="14" y2="11"/></svg>
+            <span>Legendas</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickScriptGuide">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+            <span>Roteiro</span>
+          </button>
+          <button type="button" class="btn ghost" id="pickFiles">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+            <span>Misto</span>
+          </button>
         </div>
         <div class="script-guide-card" id="scriptGuideCard">
           <div>
@@ -774,11 +858,17 @@
     </section>
 
     <section class="render-dock glass">
-      <div>
-        <strong>Pronto para exportar</strong>
+      <div class="render-dock-info">
+        <div class="render-dock-badge">
+          <span class="render-dock-dot"></span>
+          <strong>Status da Sessão</strong>
+        </div>
         <span id="dockSummary">Importe vídeos e áudios para liberar o render.</span>
       </div>
-      <button type="button" class="btn export" id="renderBtn" disabled>Renderizar MP4</button>
+      <button type="button" class="btn export" id="renderBtn" disabled>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        <span>Renderizar MP4</span>
+      </button>
     </section>
   </main>
 

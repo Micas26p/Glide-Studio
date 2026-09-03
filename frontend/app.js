@@ -4232,7 +4232,7 @@ function renderLists({updatePreview = true} = {}){
     videoTimeline.dataset.ready = '1';
     videoTimeline.dataset.complete = '0';
     if(!state.videos.length){
-      videoTimeline.innerHTML = '<div class="empty">Os clipes e imagens aparecem aqui. Arraste para mudar a ordem antes do render.</div>';
+      videoTimeline.innerHTML = '<div class="empty"><div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/></svg></div><strong>Nenhum clipe na timeline</strong><span>Arraste vídeos e imagens para esta área ou use os botões de envio acima.</span></div>';
       videoTimeline.dataset.complete = '1';
     }else{
       videoTimeline.innerHTML = '';
@@ -4258,7 +4258,7 @@ function renderLists({updatePreview = true} = {}){
     state.audioListSignature = nextAudioSignature;
     audioTimeline.dataset.ready = '1';
     if(!state.audios.length){
-      audioTimeline.innerHTML = '<div class="empty">A narração aparece aqui. Vários áudios serão unidos na ordem exibida.</div>';
+      audioTimeline.innerHTML = '<div class="empty"><div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></div><strong>Nenhuma narração carregada</strong><span>Adicione arquivos de áudio para definir o tempo do vídeo e liberar a exportação.</span></div>';
     }else{
       audioTimeline.innerHTML = '';
       const frag = document.createDocumentFragment();
