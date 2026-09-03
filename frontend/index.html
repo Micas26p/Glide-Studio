@@ -29,7 +29,7 @@
   </div>
   <aside class="sidebar" id="sidebar" aria-label="Navegação principal">
     <button type="button" class="sidebar-toggle" id="sidebarToggle" aria-label="Recolher menu lateral" aria-expanded="true" title="Recolher menu lateral">
-      <span aria-hidden="true"></span>
+      <svg class="toggle-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
     </button>
     <div class="brand">
       <span class="brand-mark" aria-hidden="true"></span>
@@ -827,18 +827,19 @@
             <small class="field-hint" id="presetMusicStatus">Verificando biblioteca musical...</small>
             <div class="music-library-shelf" id="musicLibraryShelf"></div>
           </div>
-          <label>Volume
-            <select id="backgroundVolumePreset">
-              <option value="immersive">Imersivo (-22 dB)</option>
-              <option value="silent">Silencioso (-28 dB)</option>
-              <option value="custom">Personalizado</option>
-            </select>
-          </label>
-          <label id="backgroundVolumeField">dB
-            <input id="backgroundVolumeDb" type="number" min="-42" max="-10" step="1" value="-22" />
-            <small class="field-hint">Imersivo: base -22 dB e picos nas pausas até -13.5 dB. Silencioso: base -28 dB.</small>
-          </label>
-          <p class="field-hint">A música usa ducking profissional automático para preservar a narração.</p>
+          <div class="music-volume-row">
+            <label>Volume da Trilha
+              <select id="backgroundVolumePreset">
+                <option value="immersive">Imersivo (-22 dB)</option>
+                <option value="silent">Silencioso (-28 dB)</option>
+                <option value="custom">Personalizado</option>
+              </select>
+            </label>
+            <label id="backgroundVolumeField">Ganho (dB)
+              <input id="backgroundVolumeDb" type="number" min="-42" max="-10" step="1" value="-22" />
+            </label>
+          </div>
+          <small class="field-hint">Imersivo: base -22 dB e picos nas pausas até -13.5 dB com ducking profissional automático para preservar a voz.</small>
         </div>
       </div>
       <div class="audio-lane music-lane" id="backgroundTimeline">
