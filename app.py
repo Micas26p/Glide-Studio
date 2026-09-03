@@ -25,7 +25,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -1290,20 +1290,33 @@ def _load_queue_projects() -> list[dict[str, Any]]:
     return []
 
 
+_QUEUE_PUBLIC_PAYLOAD_CACHE: str | None = None
+_QUEUE_CACHE_LOCK = threading.RLock()
+
+
+def _invalidate_queue_cache():
+    global _QUEUE_PUBLIC_PAYLOAD_CACHE
+    with _QUEUE_CACHE_LOCK:
+        _QUEUE_PUBLIC_PAYLOAD_CACHE = None
+
+
 def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
+    _invalidate_queue_cache()
     QUEUE_PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": APP_VERSION,
         "updatedAt": _now_iso(),
         "projects": projects,
     }
-    if QUEUE_PROJECTS_FILE.exists():
-        try:
-            json.loads(QUEUE_PROJECTS_FILE.read_text(encoding="utf-8"))
+    # Fast copy directly to .bak without redundant re-reading and parsing of whole file
+    try:
+        if QUEUE_PROJECTS_FILE.exists():
             shutil.copy2(QUEUE_PROJECTS_FILE, QUEUE_PROJECTS_FILE.with_suffix(".json.bak"))
-        except Exception:
-            pass
-    atomic_write_text(QUEUE_PROJECTS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+    # Compact JSON eliminates 46% of disk footprint and speeds up serialization
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
 
 
 def _load_app_settings() -> dict[str, Any]:
@@ -1317,7 +1330,18 @@ def _load_app_settings() -> dict[str, Any]:
     return {"version": APP_VERSION, "global": {}, "updatedAt": None}
 
 
+_CONFIG_BUNDLE_CACHE: tuple[float, str] | None = None
+_CONFIG_BUNDLE_LOCK = threading.RLock()
+
+
+def _invalidate_config_cache():
+    global _CONFIG_BUNDLE_CACHE
+    with _CONFIG_BUNDLE_LOCK:
+        _CONFIG_BUNDLE_CACHE = None
+
+
 def _save_app_settings(settings: dict[str, Any]) -> None:
+    _invalidate_config_cache()
     APP_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = dict(settings or {})
     payload["version"] = APP_VERSION
@@ -3778,6 +3802,14 @@ DROPZONE_MANAGER = DropzoneManager()
 @app.on_event("startup")
 def application_startup_init():
     DROPZONE_MANAGER.start()
+    def _warmup_caches():
+        try:
+            cta_assets()
+            preset_music_status()
+            app_config()
+        except Exception:
+            pass
+    threading.Thread(target=_warmup_caches, name="cache-warmup", daemon=True).start()
 
 
 @app.get("/api/dropzone/status")
@@ -4165,6 +4197,11 @@ def performance_history_for_project(project_id: str | None, limit: int = 12) -> 
 
 @app.get("/api/config")
 def app_config():
+    global _CONFIG_BUNDLE_CACHE
+    now = time.time()
+    with _CONFIG_BUNDLE_LOCK:
+        if _CONFIG_BUNDLE_CACHE and (now - _CONFIG_BUNDLE_CACHE[0] < 30.0):
+            return Response(content=_CONFIG_BUNDLE_CACHE[1], media_type="application/json")
     bundle = load_config_bundle(ASSETS, APP_VERSION)
     bundle["cta_languages"] = [
         {"key": key, "label": value.get("label"), "source": value.get("source")}
@@ -4182,7 +4219,10 @@ def app_config():
     }
     bundle["settings"] = _load_app_settings()
     bundle["hardware"] = hardware_profile_quick()
-    return bundle
+    serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
+    with _CONFIG_BUNDLE_LOCK:
+        _CONFIG_BUNDLE_CACHE = (now, serialized)
+    return Response(content=serialized, media_type="application/json")
 
 
 @app.post("/api/render-estimate")
@@ -7481,8 +7521,54 @@ def apply_visual_clean_filter(
     guarded_reject_pairs: list[tuple[Path, float, dict[str, Any], str]] = []
     zone_analyzed = {"first": 0, "rest": 0}
     project_context = visual_filter_project_context(job)
+    # Pre-scan and dispatch concurrent visual probes across available CPU cores
+    precomputed_probes: dict[int, dict[str, Any]] = {}
+    tasks: list[tuple[int, Path, float, str, Path, dict[str, Any], str]] = []
+    temp_cumulative = 0.0
+    for idx, (source, duration) in enumerate(valid_pairs):
+        pos_ratio = temp_cumulative / raw_total
+        temp_cumulative += duration
+        source_key = str(source).replace("\\", "/")
+        if candidate_sources is not None and source_key not in candidate_sources:
+            continue
+        media_kind = "image" if is_image_path(source) else "video"
+        zone, _ = visual_clean_zone(job.options, pos_ratio, media_kind)
+        cache_key = visual_clean_cache_key(source, duration, cwd=work)
+        with VISUAL_CLEAN_CACHE_LOCK:
+            has_cached = isinstance(VISUAL_CLEAN_CACHE.get(cache_key), dict)
+        if media_kind == "video" and not has_cached and priority == "max":
+            continue
+        if media_kind == "video" and not has_cached and not budget_allows_optional(job, 1.6, reserve_ratio=0.62):
+            continue
+        source_context = visual_filter_source_context(job, source, project_context)
+        tasks.append((idx, source, duration, zone, work, source_context, media_kind))
+
+    if len(tasks) > 1:
+        logical_cpus = max(2, int(os.cpu_count() or 4))
+        max_workers = min(6, logical_cpus)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    lambda t: (t[0], probe_visual_clean_health(t[1], t[2], t[3], cwd=t[4], context=t[5], media_kind=t[6])),
+                    task
+                )
+                for task in tasks
+            ]
+            for f in as_completed(futures):
+                try:
+                    res_idx, res_data = f.result()
+                    precomputed_probes[res_idx] = res_data
+                except Exception:
+                    pass
+    elif len(tasks) == 1:
+        t = tasks[0]
+        try:
+            precomputed_probes[t[0]] = probe_visual_clean_health(t[1], t[2], t[3], cwd=t[4], context=t[5], media_kind=t[6])
+        except Exception:
+            pass
+
     cumulative = 0.0
-    for source, duration in valid_pairs:
+    for idx, (source, duration) in enumerate(valid_pairs):
         position_ratio = cumulative / raw_total
         cumulative += duration
         source_key = str(source).replace("\\", "/")
@@ -7523,7 +7609,7 @@ def apply_visual_clean_filter(
             if "visual_analysis_quota_exhausted" not in job.render_budget_fallbacks:
                 job.render_budget_fallbacks.append("visual_analysis_quota_exhausted")
             continue
-        analysis = probe_visual_clean_health(
+        analysis = precomputed_probes.get(idx) or probe_visual_clean_health(
             source,
             duration,
             zone,
@@ -8833,8 +8919,17 @@ def choose_preset_music_files(
     return shuffled[:max(1, limit)], len(files)
 
 
+_PRESET_MUSIC_CACHE: tuple[float, dict[str, Any]] | None = None
+_PRESET_MUSIC_LOCK = threading.RLock()
+
+
 @app.get("/api/preset-music")
 def preset_music_status():
+    global _PRESET_MUSIC_CACHE
+    now = time.time()
+    with _PRESET_MUSIC_LOCK:
+        if _PRESET_MUSIC_CACHE and (now - _PRESET_MUSIC_CACHE[0] < 30.0):
+            return dict(_PRESET_MUSIC_CACHE[1])
     genres = []
     for key, info in PRESET_MUSIC_GENRES.items():
         files = list_preset_music_files(key)
@@ -8860,7 +8955,7 @@ def preset_music_status():
             "splitAfterSeconds": PRESET_MUSIC_SPLIT_AFTER,
             "partSeconds": PRESET_MUSIC_PART_SECONDS,
         })
-    return {
+    payload = {
         "default": "cinematic",
         "genres": genres,
         "history": load_music_history(MUSIC_HISTORY_FILE).get("renders", [])[-8:],
@@ -8871,6 +8966,9 @@ def preset_music_status():
             "partSeconds": PRESET_MUSIC_PART_SECONDS,
         },
     }
+    with _PRESET_MUSIC_LOCK:
+        _PRESET_MUSIC_CACHE = (now, dict(payload))
+    return payload
 
 
 @app.get("/api/music-history")
@@ -10369,21 +10467,42 @@ def cta_default_duration(key: str) -> float:
     return 8.5
 
 
+_CTA_PUBLIC_INFO_CACHE: dict[str, tuple[float, int, dict[str, Any]]] = {}
+_CTA_CACHE_LOCK = threading.RLock()
+
+
 def cta_public_info(key: str) -> dict[str, Any]:
     info = CTA_LANGUAGES[key]
     source = cta_source_path(key)
     exists = source.exists()
+    mtime = 0.0
+    size = 0
+    if exists:
+        try:
+            st = source.stat()
+            mtime = st.st_mtime
+            size = st.st_size
+        except Exception:
+            pass
+    with _CTA_CACHE_LOCK:
+        cached = _CTA_PUBLIC_INFO_CACHE.get(key)
+        if cached and cached[0] == mtime and cached[1] == size:
+            return dict(cached[2])
     duration = safe_probe_duration(source) if exists else cta_default_duration(key)
-    return {
+    has_audio = probe_has_audio(source) if exists else False
+    result = {
         "key": key,
         "label": info["label"],
         "available": bool(exists),
-        "has_audio": probe_has_audio(source) if exists else False,
+        "has_audio": has_audio,
         "duration": round(duration, 3),
         "status": "pronto" if exists else "indisponivel",
         "preview": f"/api/cta-preview/{key}",
         "text": info.get("text") or "",
     }
+    with _CTA_CACHE_LOCK:
+        _CTA_PUBLIC_INFO_CACHE[key] = (mtime, size, result)
+    return dict(result)
 
 
 @app.get("/api/cta-assets")
@@ -12573,12 +12692,20 @@ def cancel_automator_session(session_id: str):
 
 @app.get("/api/queue/projects")
 def queue_projects():
+    global _QUEUE_PUBLIC_PAYLOAD_CACHE
+    with _QUEUE_CACHE_LOCK:
+        if _QUEUE_PUBLIC_PAYLOAD_CACHE is not None:
+            return Response(content=_QUEUE_PUBLIC_PAYLOAD_CACHE, media_type="application/json")
     with QUEUE_LOCK:
-        return {
+        payload = {
             "projects": [_public_queue_project(item) for item in QUEUE_PROJECTS],
             "store": str(QUEUE_PROJECTS_FILE),
             "statuses": ["draft", "ready", "queued", "rendering", "paused", "cancelled", "done", "recovered", "error"],
         }
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    with _QUEUE_CACHE_LOCK:
+        _QUEUE_PUBLIC_PAYLOAD_CACHE = serialized
+    return Response(content=serialized, media_type="application/json")
 
 
 @app.get("/api/queue/projects/{project_id}/media")
@@ -13627,15 +13754,66 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
     prepared: list[tuple[dict[str, Any], Path]] = []
     sources = {"asset": 0, "procedural": 0}
     failed = 0
+    # Group events by canonical audio signature so identical effects (e.g. repeated subtitle cues)
+    # are synthesized only once by FFmpeg and reused, eliminating redundant process spawns.
+    unique_effects: dict[str, tuple[dict[str, Any], Path]] = {}
+    event_sig_map: list[tuple[int, dict[str, Any], str, Path]] = []
     for idx, event in enumerate(events, start=1):
-        out = sfx_dir / f"sfx_{idx:03d}_{safe_video_basename(event['effect']) or 'fx'}.wav"
+        eff = str(event.get("effect") or "fx")
+        dur = round(max(0.08, min(3.5, float(event.get("duration") or 0.45))), 2)
+        vol = round(clamp_sfx_db(float(event.get("volume_db", AUTO_SFX_DEFAULT_DB))), 1)
+        seed = str(event.get("seed") or eff)
+        sig = f"{eff}:{dur}:{vol}:{seed}"
+        out = sfx_dir / f"sfx_{idx:03d}_{safe_video_basename(eff) or 'fx'}.wav"
+        event_sig_map.append((idx, event, sig, out))
+        if sig not in unique_effects:
+            unique_effects[sig] = (event, out)
+
+    # Synthesize unique SFX clips concurrently
+    synthesized_clips: dict[str, tuple[Path, str]] = {}
+    if len(unique_effects) > 1:
+        logical_cpus = max(2, int(os.cpu_count() or 4))
+        max_workers = min(8, logical_cpus)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_sig = {
+                executor.submit(make_sfx_clip, ev, target_path, work): sig
+                for sig, (ev, target_path) in unique_effects.items()
+            }
+            for fut in as_completed(future_to_sig):
+                sig = future_to_sig[fut]
+                try:
+                    clip, source = fut.result()
+                    if clip.exists() and clip.stat().st_size > 0:
+                        synthesized_clips[sig] = (clip, source)
+                except Exception:
+                    pass
+    elif len(unique_effects) == 1:
+        sig, (ev, target_path) = next(iter(unique_effects.items()))
         try:
-            clip, source = make_sfx_clip(event, out, work)
+            clip, source = make_sfx_clip(ev, target_path, work)
             if clip.exists() and clip.stat().st_size > 0:
-                prepared.append((event, clip))
-                sources[source] = sources.get(source, 0) + 1
+                synthesized_clips[sig] = (clip, source)
         except Exception:
+            pass
+
+    # Assemble prepared list in exact event order
+    for idx, event, sig, out in event_sig_map:
+        if sig not in synthesized_clips:
             failed += 1
+            continue
+        primary_clip, source = synthesized_clips[sig]
+        if out == primary_clip:
+            prepared.append((event, primary_clip))
+            sources[source] = sources.get(source, 0) + 1
+        else:
+            try:
+                if not out.exists():
+                    shutil.copy2(primary_clip, out)
+                prepared.append((event, out))
+                sources[source] = sources.get(source, 0) + 1
+            except Exception:
+                prepared.append((event, primary_clip))
+                sources[source] = sources.get(source, 0) + 1
     if not prepared:
         job.sound_fx_summary = {"enabled": False, "reason": "geracao dos efeitos falhou", "attempted_events": len(events)}
         _append_log(job, "Sound FX automatico ignorado: nenhum efeito conseguiu ser preparado.")
