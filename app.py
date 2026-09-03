@@ -4491,7 +4491,7 @@ def build_preflight_summary(files_manifest: list[dict[str, Any]], options: dict[
 
     errors: list[str] = []
     warnings: list[str] = []
-    cta_language = str(options.get("ctaLanguage") or "").strip().lower()
+    cta_language = canonical_cta_key(options.get("ctaLanguage") or options.get("selectedCta") or "")
     intro = intro_mode(options)
     music_genre = preset_music_genre(options)
     preset_music_count = len(list_preset_music_files(music_genre)) if bool(options.get("backgroundMusicUseLibrary", True)) else 0
@@ -10720,7 +10720,23 @@ def warm_cache_status():
     return {"ok": True, **CACHE_WARM_STATUS}
 
 
+def canonical_cta_key(val: Any) -> str:
+    key = str(val or "").strip().lower()
+    mapping = {
+        "pt": "pt", "portugues": "pt", "português": "pt", "portuguese": "pt", "cta_portugues": "pt",
+        "en": "en", "english": "en", "ingles": "en", "inglês": "en", "cta_english": "en",
+        "es": "es", "espanhol": "es", "spanish": "es", "español": "es", "cta_espanol": "es",
+        "de": "de", "alemao": "de", "alemão": "de", "german": "de", "deutsch": "de", "cta_german": "de",
+        "fr": "fr", "frances": "fr", "francês": "fr", "french": "fr", "français": "fr", "cta_francais": "fr",
+        "it": "it", "italiano": "it", "italian": "it", "cta_italiano": "it",
+        "ru": "ru", "russo": "ru", "russian": "ru", "russkiy": "ru", "cta_russian": "ru",
+        "pl": "pl", "polones": "pl", "polonês": "pl", "polish": "pl", "polski": "pl", "cta_polski": "pl",
+    }
+    return mapping.get(key, key)
+
+
 def prepare_cta_asset(job: Job, key: str) -> dict[str, Any]:
+    key = canonical_cta_key(key)
     if key not in CTA_LANGUAGES:
         raise RuntimeError("CTA invalido. Escolha um idioma de CTA antes de renderizar.")
     info = CTA_LANGUAGES[key]
@@ -15510,7 +15526,7 @@ def concat_segments_and_mux(
         sync_graph_summary(job, graph)
 
     video_source = video_concat
-    cta_lang = str(job.options.get("ctaLanguage") or "").strip().lower()
+    cta_lang = canonical_cta_key(job.options.get("ctaLanguage") or job.options.get("selectedCta") or "")
     cta: dict[str, Any] | None = None
     cta_times: list[float] = []
     if CTA_REQUIRED and not cta_lang:
@@ -18325,6 +18341,7 @@ async def upload_file(
 
 
 @app.post("/api/launch-render/{job_id}")
+@app.post("/api/start-render/{job_id}")
 def launch_render(job_id: str):
     job = JOBS.get(job_id)
     if not job:
@@ -18480,8 +18497,8 @@ def status(job_id: str):
         "stage_progress_seconds": round(job.stage_progress_seconds, 1),
         "stage_progress_total": round(job.stage_progress_total, 1),
         "stage_remaining": stage_remaining,
-        "budget_seconds": round(job.render_budget_seconds),
-        "budget_remaining_seconds": round(render_budget_remaining(job)) if job.status == "running" else 0,
+        "budget_seconds": 0 if math.isinf(float(job.render_budget_seconds or 0)) else round(float(job.render_budget_seconds or 0)),
+        "budget_remaining_seconds": (0 if math.isinf(float(render_budget_remaining(job))) else round(float(render_budget_remaining(job)))) if job.status == "running" else 0,
         "budget_state": job.render_budget_state,
         "budget_fallbacks": list(job.render_budget_fallbacks),
     }
@@ -18497,6 +18514,7 @@ def status(job_id: str):
         "error": job.error,
         "error_actions": recommended_error_actions(job.error, None) if job.error else [],
         "download": f"/api/download/{job_id}" if job.output else None,
+        "output": str(job.output) if job.output else None,
         "output_name": Path(job.output).name if job.output else None,
         "output_dir": job.output_dir,
         "created_at": job.created_at,
@@ -18557,9 +18575,9 @@ def status(job_id: str):
         "eta_summary": eta_summary,
         "render_budget": {
             "mode": render_mode_label(render_priority(job)),
-            "limit_seconds": round(job.render_budget_seconds),
+            "limit_seconds": 0 if math.isinf(float(job.render_budget_seconds or 0)) else round(float(job.render_budget_seconds or 0)),
             "elapsed_seconds": round(elapsed),
-            "remaining_seconds": round(render_budget_remaining(job)) if job.status == "running" else 0,
+            "remaining_seconds": (0 if math.isinf(float(render_budget_remaining(job))) else round(float(render_budget_remaining(job)))) if job.status == "running" else 0,
             "deadline_at": (
                 datetime.fromtimestamp(job.render_deadline_at).astimezone().isoformat(timespec="seconds")
                 if job.render_deadline_at
