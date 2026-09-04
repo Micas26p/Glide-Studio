@@ -6296,12 +6296,17 @@ async function applyAutomatorDistribution(options = {}){
     automatorConfirmAndRenderBtn.textContent = 'Preparando...';
   }
   const previousActive = state.activeProjectId;
+  let lastProgressUpdate = 0;
   const progress = (value, text) => {
+    const now = performance.now();
     const percent = Math.max(0, Math.min(100, Math.round(value)));
     if(automatorProgress) automatorProgress.hidden = false;
     if(automatorProgressBar) automatorProgressBar.value = percent;
     if(automatorProgressValue) automatorProgressValue.textContent = `${percent}%`;
-    if(automatorProgressText) automatorProgressText.textContent = text;
+    if(now - lastProgressUpdate > 60 || percent === 100 || percent <= 5){
+      lastProgressUpdate = now;
+      if(automatorProgressText) automatorProgressText.textContent = text;
+    }
   };
   try{
     if(state.automatorSessionId){
@@ -6356,20 +6361,47 @@ async function applyAutomatorDistribution(options = {}){
     const created = await createResponse.json();
     state.automatorSessionId = created.sessionId;
     let uploaded = 0;
-    const poolSize = fileSpecs.length > 120 ? 4 : fileSpecs.length > 30 ? 3 : 2;
-    await runPool(fileSpecs, poolSize, async spec => {
+    const batchSize = 6;
+    const batches = [];
+    for(let i = 0; i < fileSpecs.length; i += batchSize){
+      batches.push(fileSpecs.slice(i, i + batchSize));
+    }
+    const poolSize = batches.length > 50 ? 5 : (batches.length > 15 ? 4 : 2);
+    await runPool(batches, poolSize, async batch => {
       const form = new FormData();
-      form.append('file', spec.file, spec.file.name);
-      form.append('slot', spec.slot);
-      const response = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/file`, {
+      const slots = [];
+      for(const spec of batch){
+        form.append('files', spec.file, spec.file.name);
+        slots.push(spec.slot);
+      }
+      form.append('slots', JSON.stringify(slots));
+      let response = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/batch`, {
         method: 'POST',
         body: form,
         cache: 'no-store',
         signal: state.automatorAbortController.signal,
-      });
-      if(!response.ok) throw new Error(`${spec.name}: ${await response.text()}`);
-      uploaded += 1;
-      progress(5 + uploaded / Math.max(1, fileSpecs.length) * 85, `Enviando ${uploaded}/${fileSpecs.length}: ${spec.name}`);
+      }).catch(() => null);
+
+      if(!response || !response.ok){
+        for(const spec of batch){
+          const singleForm = new FormData();
+          singleForm.append('file', spec.file, spec.file.name);
+          singleForm.append('slot', spec.slot);
+          const singleResp = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/file`, {
+            method: 'POST',
+            body: singleForm,
+            cache: 'no-store',
+            signal: state.automatorAbortController.signal,
+          });
+          if(!singleResp.ok) throw new Error(`${spec.name}: ${await singleResp.text()}`);
+          uploaded += 1;
+          progress(5 + uploaded / Math.max(1, fileSpecs.length) * 85, `Enviando ${uploaded}/${fileSpecs.length}: ${spec.name}`);
+        }
+      } else {
+        uploaded += batch.length;
+        const lastName = batch[batch.length - 1]?.name || '';
+        progress(5 + uploaded / Math.max(1, fileSpecs.length) * 85, `Enviando ${uploaded}/${fileSpecs.length}: ${lastName}`);
+      }
     });
     progress(92, 'Confirmando a distribuição de forma atômica...');
     const commitResponse = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/commit`, {

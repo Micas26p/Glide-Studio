@@ -12528,7 +12528,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
 
 
 @app.post("/api/queue/automator/sessions/{session_id}/file")
-async def upload_automator_session_file(
+def upload_automator_session_file(
     session_id: str,
     file: UploadFile = File(...),
     slot: str = Form(...),
@@ -12553,12 +12553,8 @@ async def upload_automator_session_file(
     size = 0
     try:
         with temporary.open("wb") as handle:
-            while True:
-                chunk = await file.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                size += len(chunk)
+            shutil.copyfileobj(file.file, handle, length=1024 * 1024 * 4)
+        size = temporary.stat().st_size
         if size <= 0:
             raise HTTPException(status_code=400, detail=f"Arquivo vazio: {file.filename}")
         expected_size = int(expected.get("size") or 0)
@@ -12582,6 +12578,66 @@ async def upload_automator_session_file(
         "uploadedFiles": len(session["uploads"]),
         "expectedFiles": len(session["expected"]),
         "size": size,
+    }
+
+
+@app.post("/api/queue/automator/sessions/{session_id}/batch")
+def upload_automator_session_batch(
+    session_id: str,
+    files: list[UploadFile] = File(...),
+    slots: str = Form(...),
+):
+    with AUTOMATOR_SESSION_LOCK:
+        session = AUTOMATOR_SESSIONS.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Sessão AUTO expirada ou inexistente.")
+        session_status = str(session.get("status") or "")
+        if session_status == "committed":
+            return {"ok": True, "alreadyCommitted": True}
+        if session_status != "uploading":
+            raise HTTPException(status_code=409, detail="A sessão AUTO não aceita novos uploads neste estado.")
+    try:
+        slot_list = json.loads(slots) if isinstance(slots, str) else list(slots)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Formato de slots inválido.")
+    if len(files) != len(slot_list):
+        raise HTTPException(status_code=400, detail="Quantidade de arquivos e slots incompatível.")
+
+    results = []
+    for file, slot in zip(files, slot_list):
+        expected = (session.get("expected") or {}).get(slot)
+        if not expected:
+            continue
+        suffix = Path(file.filename or expected.get("name") or "").suffix.lower()
+        if not _automator_kind_allowed(str(expected.get("kind") or ""), suffix):
+            continue
+        destination = Path(session["folder"]) / f"{slot}{suffix}"
+        temporary = destination.with_suffix(destination.suffix + ".part")
+        try:
+            with temporary.open("wb") as handle:
+                shutil.copyfileobj(file.file, handle, length=1024 * 1024 * 4)
+            size = temporary.stat().st_size
+            if size > 0:
+                os.replace(temporary, destination)
+                with AUTOMATOR_SESSION_LOCK:
+                    session["uploads"][slot] = {
+                        "path": destination,
+                        "size": size,
+                        "filename": file.filename or expected.get("name"),
+                    }
+                results.append({"slot": slot, "size": size})
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    with AUTOMATOR_SESSION_LOCK:
+        uploaded_count = len(session["uploads"])
+        expected_count = len(session["expected"])
+
+    return {
+        "ok": True,
+        "processed": len(results),
+        "uploadedFiles": uploaded_count,
+        "expectedFiles": expected_count,
     }
 
 
@@ -12625,6 +12681,7 @@ def commit_automator_session(session_id: str):
                 }
                 index_backups[project_id] = _load_project_media_index(project_id)
 
+            project_media_indices: dict[str, dict[str, Any]] = {}
             for slot, spec in expected.items():
                 upload = uploads[slot]
                 source = Path(upload["path"])
@@ -12637,12 +12694,16 @@ def commit_automator_session(session_id: str):
                 folder.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256(rel_key.lower().encode("utf-8", errors="ignore")).hexdigest()[:20]
                 target = folder / f"{digest}_{session_id[:10]}{source.suffix.lower()}"
-                temp_target = folder / f".{digest}.{uuid.uuid4().hex}.part"
-                shutil.copy2(source, temp_target)
-                os.replace(temp_target, target)
+                try:
+                    os.replace(source, target)
+                except Exception:
+                    temp_target = folder / f".{digest}.{uuid.uuid4().hex}.part"
+                    shutil.copy2(source, temp_target)
+                    os.replace(temp_target, target)
                 created_paths.append(target)
-                items = _load_project_media_index(project_id)
-                items[rel_key] = {
+                if project_id not in project_media_indices:
+                    project_media_indices[project_id] = _load_project_media_index(project_id)
+                project_media_indices[project_id][rel_key] = {
                     "file": target.name,
                     "name": Path(rel_key).name,
                     "kind": kind,
@@ -12650,9 +12711,11 @@ def commit_automator_session(session_id: str):
                     "duration": max(0.0, float(spec.get("duration") or 0.0)),
                     "updatedAt": _now_iso(),
                 }
-                _save_project_media_index(project_id, items)
                 group = "videos" if kind in ("video", "image") else "audios" if kind == "audio" else "script_guides" if kind in ("script_guide", "script") else "texts"
                 project_results[project_id][group].append(rel_key)
+
+            for project_id, items in project_media_indices.items():
+                _save_project_media_index(project_id, items)
 
             for row in session.get("rows") or []:
                 project_id = str(row.get("projectId") or "")
