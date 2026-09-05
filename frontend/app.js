@@ -46,9 +46,11 @@ const state = {
   musicGenre: localStorage.getItem('glide_music_genre') || 'cinematic',
   sidebarCollapsed: localStorage.getItem('glide_sidebar_collapsed') === '1',
   presetMusic: {genres: []},
+  ctaMoment: localStorage.getItem('glide_cta_moment') || 'middle',
   ctaPositionPreset: localStorage.getItem('glide_cta_position') || 'top_right',
   ctaOffsetX: Number.isFinite(Number(localStorage.getItem('glide_cta_offset_x'))) ? Number(localStorage.getItem('glide_cta_offset_x')) : 0,
   ctaOffsetY: Number.isFinite(Number(localStorage.getItem('glide_cta_offset_y'))) ? Number(localStorage.getItem('glide_cta_offset_y')) : 0,
+  renderMaxPercent: 0,
   ctaPreviewSound: false,
   introMode: localStorage.getItem('glide_intro_mode') || 'standard',
   videoListSignature: '',
@@ -204,6 +206,7 @@ const ctaPreviewMedia = $('#ctaPreviewMedia');
 const ctaPreviewVideo = $('#ctaPreviewVideo');
 const ctaPreviewCaption = $('#ctaPreviewCaption');
 const ctaPreviewSoundBtn = $('#ctaPreviewSoundBtn');
+const ctaMomentSelect = $('#ctaMomentSelect');
 const ctaPositionPreset = $('#ctaPositionPreset');
 const ctaOffsetX = $('#ctaOffsetX');
 const ctaOffsetY = $('#ctaOffsetY');
@@ -228,7 +231,7 @@ const autoSoundFxToggle = $('#autoSoundFxToggle');
 const allowAudioTrimToggle = $('#allowAudioTrimToggle');
 const trimSilenceToggle = $('#trimSilenceToggle');
 const dualExportShortsToggle = $('#dualExportShortsToggle');
-const autoThumbnailsToggle = $('#autoThumbnailsToggle');
+const forceShortRenderToggle = $('#forceShortRenderToggle');
 const preflightGrid = $('#preflightGrid');
 const autoFixBtn = $('#autoFixBtn');
 const projectToneSelect = $('#projectToneSelect');
@@ -737,7 +740,7 @@ function storedProjectToModel(raw = {}, index = 0){
   project.options = raw.options && typeof raw.options === 'object' ? raw.options : {};
   if(typeof project.options.trimSilence === 'undefined') project.options.trimSilence = true;
   if(typeof project.options.dualExportShorts === 'undefined') project.options.dualExportShorts = false;
-  if(typeof project.options.autoThumbnails === 'undefined') project.options.autoThumbnails = true;
+  delete project.options.autoThumbnails;
   project.referenceStyleVideo = raw.referenceStyleVideo && typeof raw.referenceStyleVideo === 'object'
     ? raw.referenceStyleVideo
     : (project.options.referenceStyleVideo && typeof project.options.referenceStyleVideo === 'object' ? project.options.referenceStyleVideo : null);
@@ -878,7 +881,7 @@ function captureControlSnapshot(includeSubtitle = true){
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
-    autoThumbnails: autoThumbnailsToggle ? autoThumbnailsToggle.checked : true,
+    forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     backgroundMusicVolumeDb: backgroundVolumeValue(),
     backgroundMusicPreset: backgroundVolumePreset?.value || 'immersive',
     backgroundMusicDucking: true,
@@ -912,6 +915,7 @@ function captureControlSnapshot(includeSubtitle = true){
     subtitleStyle: includeSubtitle ? currentSubtitleStyle() : null,
     captionStyle: includeSubtitle ? currentCaptionStyle() : null,
     cinematicOpeningPolicy: 'auto_contextual',
+    ctaMoment: ctaMomentSelect?.value || state.ctaMoment || 'middle',
     ctaPositionPreset: state.ctaPositionPreset || 'top_right',
     ctaOffsetX: state.ctaOffsetX || 0,
     ctaOffsetY: state.ctaOffsetY || 0,
@@ -949,7 +953,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(allowAudioTrimToggle) allowAudioTrimToggle.checked = options.allowAudioTrim !== false;
   if(trimSilenceToggle) trimSilenceToggle.checked = options.trimSilence !== false;
   if(dualExportShortsToggle) dualExportShortsToggle.checked = Boolean(options.dualExportShorts);
-  if(autoThumbnailsToggle) autoThumbnailsToggle.checked = options.autoThumbnails !== false;
+  if(forceShortRenderToggle) forceShortRenderToggle.checked = Boolean(options.forceShortRender);
   if(backgroundVolumePreset) backgroundVolumePreset.value = options.backgroundMusicPreset || 'immersive';
   if(backgroundVolumeDb) backgroundVolumeDb.value = String(options.backgroundMusicVolumeDb ?? -25);
   if(backgroundDuckingToggle) backgroundDuckingToggle.checked = options.backgroundMusicDucking !== false;
@@ -979,12 +983,15 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   applySubtitleStyleSnapshot(options.textStyle || options.subtitleStyle);
   applyCaptionStyleSnapshot(options.captionStyle);
   applyIntroStyleSnapshot(options.introSubtitleStyle);
+  state.ctaMoment = options.ctaMoment || 'middle';
+  if(ctaMomentSelect) ctaMomentSelect.value = state.ctaMoment;
   state.ctaPositionPreset = options.ctaPositionPreset || 'top_right';
   state.ctaOffsetX = Number(options.ctaOffsetX || 0);
   state.ctaOffsetY = Number(options.ctaOffsetY || 0);
   if(ctaPositionPreset) ctaPositionPreset.value = state.ctaPositionPreset;
   if(ctaOffsetX) ctaOffsetX.value = String(state.ctaOffsetX);
   if(ctaOffsetY) ctaOffsetY.value = String(state.ctaOffsetY);
+  syncAllToggleStates();
   if(deferDecorations) return;
   refreshActiveProjectDecorations();
 }
@@ -2891,7 +2898,7 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
-    autoThumbnails: autoThumbnailsToggle ? autoThumbnailsToggle.checked : true,
+    forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     zoom: $('#zoomSelect')?.value || 'off',
     transitions: $('#transitionSelect')?.value || 'off',
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
@@ -3174,18 +3181,28 @@ function projectChecks(){
   const audioHealth = aggregateAudioHealth();
   const missingRequiredSrt = !state.subtitles.length;
   const introUsesFadeOnly = introModeSelect?.value === 'cinematic' && missingRequiredSrt;
+  const forceShort = forceShortRenderToggle ? forceShortRenderToggle.checked : false;
+  const isTooShortAudio = state.audios.length > 0 && audioTotal > 0 && audioTotal < 15.0 && !forceShort;
+  const isTooShortVideo = state.videos.length > 0 && videoTotal > 0 && videoTotal < 10.0 && !forceShort;
+  const isCriticalDeficit = state.audios.length > 0 && audioTotal >= 30.0 && videoTotal > 0 && videoTotal < 15.0 && !forceShort;
   return [
     {
-      state: state.videos.length ? (invalidVideos ? 'warn' : 'ok') : 'bad',
+      state: (isTooShortVideo || isCriticalDeficit) ? 'bad' : (state.videos.length ? (invalidVideos ? 'warn' : 'ok') : 'bad'),
       title: 'Mídia Visual',
-      text: state.videos.length
-        ? `${state.videos.length} arquivo(s) de mídia. ${invalidVideos ? `${invalidVideos} suspeito(s) podem ser pulados.` : 'Lista pronta.'}`
-        : 'Adicione vídeos ou imagens.',
+      text: isTooShortVideo
+        ? `Mídia visual muito curta (${videoTotal.toFixed(1)}s < 10s). Adicione mais mídias ou ative 'Forçar render curto (<15s)'.`
+        : (isCriticalDeficit
+          ? `Déficit crítico (${videoTotal.toFixed(1)}s de vídeo para ${formatTime(audioTotal)} de voz). Adicione mais mídias ou ative 'Forçar render curto (<15s)'.`
+          : (state.videos.length
+            ? `${state.videos.length} arquivo(s) de mídia. ${invalidVideos ? `${invalidVideos} suspeito(s) podem ser pulados.` : 'Lista pronta.'}`
+            : 'Adicione vídeos ou imagens.')),
     },
     {
-      state: state.audios.length && audioTotal > 0 ? audioHealth.state : 'bad',
+      state: isTooShortAudio ? 'bad' : (state.audios.length && audioTotal > 0 ? audioHealth.state : 'bad'),
       title: 'Narração',
-      text: state.audios.length ? `${state.audios.length} áudio(s), ${formatTime(audioTotal)}. ${audioHealth.text}` : 'Adicione a narração.',
+      text: isTooShortAudio
+        ? `Áudio muito curto (${audioTotal.toFixed(1)}s < 15s). Ative 'Forçar render curto (<15s)' se deseja exportar este áudio.`
+        : (state.audios.length ? `${state.audios.length} áudio(s), ${formatTime(audioTotal)}. ${audioHealth.text}` : 'Adicione a narração.'),
     },
     {
       state: introModeSelect?.value === 'cinematic' ? 'ok' : 'neutral',
@@ -3294,7 +3311,7 @@ function projectChecks(){
     {
       state: 'ok',
       title: 'Entregáveis & Automações',
-      text: `Miniaturas HD: ${autoThumbnailsToggle?.checked ? '3 automáticas' : 'desligado'} | Cadência: ${trimSilenceToggle?.checked ? 'silêncios mortos compactados' : 'original'} | Formato: ${dualExportShortsToggle?.checked ? 'Master 16:9 + Shorts 9:16' : '16:9 único'}.`,
+      text: `Cadência: ${trimSilenceToggle?.checked ? 'silêncios mortos compactados' : 'original'} | Formato: ${dualExportShortsToggle?.checked ? 'Master 16:9 + Shorts 9:16' : '16:9 único'}.`,
     },
   ];
 }
@@ -3400,6 +3417,7 @@ function ctaAnchor(preset){
 }
 
 function updateCtaControlVisuals(){
+  if(ctaMomentSelect) ctaMomentSelect.value = state.ctaMoment || 'middle';
   if(ctaPositionPreset) ctaPositionPreset.value = state.ctaPositionPreset;
   if(ctaOffsetX) ctaOffsetX.value = String(state.ctaOffsetX);
   if(ctaOffsetY) ctaOffsetY.value = String(state.ctaOffsetY);
@@ -4761,7 +4779,13 @@ function updateRenderShowcase(stage){
 }
 
 function setRenderProgress(pct, title, msg){
-  const safe = Math.max(0, Math.min(100, pct || 0));
+  const raw = Math.max(0, Math.min(100, pct || 0));
+  if (raw === 0) {
+    state.renderMaxPercent = 0;
+  } else {
+    state.renderMaxPercent = Math.max(state.renderMaxPercent || 0, raw);
+  }
+  const safe = state.renderMaxPercent || raw;
   progressBar.style.width = safe + '%';
   eyePercent.textContent = Math.round(safe) + '%';
   if(title) renderTitle.textContent = title;
@@ -5039,7 +5063,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : true) !== false,
     trimSilence: optionValue('trimSilence', trimSilenceToggle ? trimSilenceToggle.checked : true) !== false,
     dualExportShorts: Boolean(optionValue('dualExportShorts', dualExportShortsToggle ? dualExportShortsToggle.checked : false)),
-    autoThumbnails: optionValue('autoThumbnails', autoThumbnailsToggle ? autoThumbnailsToggle.checked : true) !== false,
+    forceShortRender: Boolean(optionValue('forceShortRender', forceShortRenderToggle ? forceShortRenderToggle.checked : false)),
     videoOrder: sourceVideos.map(rel),
     imageOrder: sourceVideos.filter(isImage).map(rel),
     imageDefaultDurationSeconds: Number(optionValue('imageDefaultDurationSeconds', 4)) || 4,
@@ -5112,6 +5136,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     ctaRequired: true,
     ctaPolicy: 'manual_position',
     ctaTimingPolicy: 'fixed_start_end',
+    ctaMoment: optionValue('ctaMoment', state.ctaMoment || 'middle'),
     ctaPositionPreset: optionValue('ctaPositionPreset', state.ctaPositionPreset),
     ctaOffsetX: Number(optionValue('ctaOffsetX', state.ctaOffsetX)),
     ctaOffsetY: Number(optionValue('ctaOffsetY', state.ctaOffsetY)),
@@ -5141,6 +5166,24 @@ async function startRender(context = {}){
   if(!hasVisualMedia || !(checkFiles.audios || []).length || !(checkFiles.subtitles || []).length || !checkCta){
     updateStats();
     throw new Error('Projeto incompleto: mídia visual (vídeos ou imagens), narração, Textos e CTA são obrigatórios para renderizar.');
+  }
+  const durationMap = projectSnapshot?.durationMap instanceof Map ? projectSnapshot.durationMap : state.durations;
+  const audioTotal = (checkFiles.audios || []).reduce((sum, file) => sum + (durationMap.get(rel(file)) || 0), 0);
+  const videoTotal = (checkFiles.videos || []).reduce((sum, file) => sum + (durationMap.get(rel(file)) || (isImage(file) ? 4 : 0)), 0);
+  const forceShort = Boolean(projectSnapshot?.options?.forceShortRender ?? (forceShortRenderToggle ? forceShortRenderToggle.checked : false));
+  if(!forceShort){
+    if(audioTotal > 0 && audioTotal < 15.0){
+      updateStats();
+      throw new Error(`Bloqueio de Segurança: A narração tem apenas ${audioTotal.toFixed(1)}s (mínimo seguro é 15s). Para evitar renders acidentais de vídeos incompletos, o Glide bloqueou este render. Se realmente deseja exportar um vídeo curto (<15s), ative a opção "Forçar render curto (<15s)" nas opções avançadas.`);
+    }
+    if(videoTotal > 0 && videoTotal < 10.0){
+      updateStats();
+      throw new Error(`Bloqueio de Segurança: A mídia visual tem apenas ${videoTotal.toFixed(1)}s (mínimo seguro é 10s). Adicione mais clipes/fotos ou ative a opção "Forçar render curto (<15s)" nas opções avançadas para prosseguir.`);
+    }
+    if(audioTotal >= 30.0 && videoTotal > 0 && videoTotal < 15.0){
+      updateStats();
+      throw new Error(`Bloqueio de Segurança: Déficit crítico de mídia (${videoTotal.toFixed(1)}s de mídia para ${audioTotal.toFixed(1)}s de narração). O render foi bloqueado para não amputar seu vídeo por engano. Adicione mais mídias ou ative a opção "Forçar render curto (<15s)" nas opções avançadas.`);
+    }
   }
   if(!projectSnapshot) captureActiveProject();
   state.renderCancelRequested = false;
@@ -5307,7 +5350,9 @@ async function pollStatus(jobId, context = {}){
         renderLabel: renderPriorityLabel(j.render_priority_effective || context.projectSnapshot?.options?.renderPriority || state.renderPriority),
         status: j.stage_label || j.stage || '',
       });
-      const pct = Math.max(0, Math.min(100, j.percent || 0));
+      const rawPct = Math.max(0, Math.min(100, j.percent || 0));
+      state.renderMaxPercent = Math.max(state.renderMaxPercent || 0, rawPct);
+      const pct = state.renderMaxPercent;
       progressBar.style.width = pct + '%';
       eyePercent.textContent = Math.round(pct) + '%';
       renderMsg.textContent = cleanDisplayText(j.message || '');
@@ -7681,6 +7726,14 @@ if(ctaGrid){
   });
 }
 
+if(ctaMomentSelect){
+  ctaMomentSelect.addEventListener('change', () => {
+    state.ctaMoment = ctaMomentSelect.value || 'middle';
+    localStorage.setItem('glide_cta_moment', state.ctaMoment);
+    updateCtaPreview();
+    captureActiveProject();
+  });
+}
 if(ctaPositionPreset){
   ctaPositionPreset.addEventListener('change', () => {
     state.ctaPositionPreset = ctaPositionPreset.value || 'top_right';
@@ -7721,6 +7774,7 @@ const zoomSelectGlobal = $('#zoomSelect');
 if(zoomSelectGlobal) zoomSelectGlobal.addEventListener('change', updateStats);
 const gpuToggleGlobal = $('#gpuToggle');
 if(gpuToggleGlobal) gpuToggleGlobal.addEventListener('change', updateStats);
+if(forceShortRenderToggle) forceShortRenderToggle.addEventListener('change', () => { captureActiveProject(); renderProjectChecks(); });
 
 $('#sortNumericBtn').addEventListener('click', () => {
   state.videos.sort(naturalCompare);
@@ -8430,10 +8484,21 @@ document.querySelectorAll('.nav-item[data-target]').forEach(btn => {
   });
 });
 
+function syncAllToggleStates() {
+  document.querySelectorAll('.toggle input[type="checkbox"]').forEach(input => {
+    const parent = input.closest('.toggle');
+    if (parent) parent.classList.toggle('is-checked', input.checked);
+  });
+}
+
 document.addEventListener('change', (event) => {
   const target = event.target;
-  if(!(target instanceof HTMLElement)) return;
-  if(target.closest('#exportSection, #subtitleSection, #backgroundSection, #introPanel, #queueSection, #preflightPanel')){
+  if (!(target instanceof HTMLElement)) return;
+  if (target instanceof HTMLInputElement && target.type === 'checkbox') {
+    const parent = target.closest('.toggle');
+    if (parent) parent.classList.toggle('is-checked', target.checked);
+  }
+  if (target.closest('#exportSection, #subtitleSection, #backgroundSection, #introPanel, #queueSection, #preflightPanel')) {
     scheduleProjectSync();
   }
 });
