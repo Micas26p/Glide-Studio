@@ -7025,6 +7025,18 @@ def _classify_visual_analysis(
         })
     else:
         classified.update({"category": "clean", "action": "keep", "reason": "clipe limpo", "confidence": 0.0})
+    tr_edges = int(metrics.get("tr_edges") or 0)
+    tl_edges = int(metrics.get("tl_edges") or 0)
+    is_presentation_slide = (
+        (text_score >= 0.40 and med_rows >= 0.20 and med_cols >= 0.35)
+        or (data_score >= 0.60 and med_edge >= 0.14)
+        or (med_stdev >= 75.0 and med_edge >= 0.12 and (med_rows >= 0.20 or med_cols >= 0.35))
+    )
+    is_webcam_pip = bool(
+        (yunet_face_ratio > 0.0 and (tr_edges >= 70 or tl_edges >= 70))
+        or (is_presentation_slide and (tr_edges >= 80 or tl_edges >= 80))
+    )
+
     if med_mean <= VIDEO_BLACK_YAVG_MAX and med_stdev <= 4.0 and med_edge <= 0.004:
         classified.update({"category": "black_screen", "action": "hard_reject", "reason": "tela preta/sem conteudo visual", "confidence": 1.0})
     elif image_quality_low:
@@ -7033,6 +7045,20 @@ def _classify_visual_analysis(
             "action": "hard_reject",
             "reason": "imagem com qualidade visual insuficiente",
             "confidence": 0.88,
+        })
+    elif is_webcam_pip:
+        classified.update({
+            "category": "webcam_pip",
+            "action": "hard_reject",
+            "reason": "avatar de apresentador / webcam embutida no canto",
+            "confidence": 0.96,
+        })
+    elif is_presentation_slide:
+        classified.update({
+            "category": "presentation_slide",
+            "action": "hard_reject",
+            "reason": "slide de apresentacao / documento com texto estruturado",
+            "confidence": 0.98,
         })
     elif ui_status == "reject_ui_screenshot":
         classified.update({
@@ -8621,30 +8647,17 @@ def apply_visual_clean_filter(
         is_unusable = category in {"black_screen", "invalid", "no_frames", "low_quality"}
         is_pollution = (
             action == "hard_reject"
-            or category in {"text_dominant", "data_dominant", "presenter", "watermark_corner"}
+            or category in {
+                "text_dominant", "data_dominant", "presenter", "watermark_corner",
+                "ui_screenshot", "presentation_slide", "webcam_pip",
+            }
             or (media_kind == "image" and is_unusable)
         )
 
         is_opening = (idx < max(2, min(len(valid_pairs) // 5, 12))) or (position_ratio < 0.18)
-        potential_future_duration = accepted_clean_duration + remaining_unscanned_duration
-        current_rejection_ratio = (hard_rejected_count + 1) / max(1, idx + 1)
 
-        # Regra de Salvaguarda Dinâmica:
-        # Se notar que está a eliminar muitos ou se a reserva de mídia atingir o limite para cobrir o áudio:
-        # PARAR de eliminar clipes poluídos (fora da abertura estrita) para garantir 100% da duração final!
-        if is_pollution and not is_unusable and not is_opening:
-            if safety_halted or potential_future_duration < safe_target_duration or (current_rejection_ratio >= 0.35 and potential_future_duration < safe_target_duration * 1.25):
-                safety_halted = True
-                summary["safety_halt_triggered"] = True
-                summary["pollution_retained_for_safety"] += 1
-                item["decision"] = "pollution_retained_for_safety"
-                item["action"] = "retained_for_safety"
-                item["reason"] = f"{reason} | Preservado pela Salvaguarda Dinâmica para proteger 100% da duração final"
-                retained_safety_pairs.append((source, duration, item))
-                summary["items"].append(item)
-                continue
-
-        if is_unusable or (is_pollution and action == "hard_reject"):
+        # Filtro Rigoroso: clipes poluidos/rejeitados sao 100% descartados da timeline (zero penetracao de slides/webcams/dados)
+        if is_unusable or is_pollution or action == "hard_reject":
             summary["hard_rejected"] += 1
             hard_rejected_count += 1
             if category == "text_dominant":
@@ -8655,6 +8668,10 @@ def apply_visual_clean_filter(
                 summary["rejected_ui_screenshots"] += 1
             elif category == "watermark_corner":
                 summary["rejected_watermarks"] += 1
+            elif category == "presentation_slide":
+                summary["rejected_presentation_slides"] = summary.get("rejected_presentation_slides", 0) + 1
+            elif category == "webcam_pip":
+                summary["rejected_webcam_pip"] = summary.get("rejected_webcam_pip", 0) + 1
             elif category == "black_screen":
                 summary["rejected_black"] += 1
             elif category == "presenter":
@@ -8663,6 +8680,7 @@ def apply_visual_clean_filter(
                 summary["images_rejected"] += 1
             item["decision"] = "removed"
             summary["items"].append(item)
+            continue
         elif action == "soft_suspect":
             if category in {"presenter_suspect", "static_center_suspect", "presenter", "suspect"}:
                 summary["presenter_suspects"] += 1
@@ -8704,20 +8722,10 @@ def apply_visual_clean_filter(
                 summary["items"].append(item)
 
     # Montagem da Timeline:
-    # 1. Clipes 100% limpos SEMPRE ocupam o início e corpo principal da timeline (Abertura Limpa Garantida).
-    # 2. Clipes retidos por salvaguarda são alocados estritamente na cauda tardia da timeline caso clean_raw < needed_raw.
+    # 1. Clipes 100% limpos SEMPRE ocupam o início e corpo principal da timeline.
+    # 2. Clipes poluidos NUNCA sao reinseridos. Se faltar midia limpa, o particionamento mutante expande clipes limpos.
     selected_pairs: list[tuple[Path, float]] = list(clean_pairs)
     clean_raw = sum(duration for _, duration in clean_pairs)
-    retained_used = 0
-
-    if clean_raw < needed_raw and retained_safety_pairs:
-        for source, duration, r_item in retained_safety_pairs:
-            selected_pairs.append((source, duration))
-            clean_raw += duration
-            retained_used += 1
-            r_item["used_in_late_timeline"] = True
-            if clean_raw >= needed_raw:
-                break
 
     if clean_raw < needed_raw and fallback_pairs:
         for source, duration in fallback_pairs:
@@ -8727,13 +8735,25 @@ def apply_visual_clean_filter(
             if clean_raw >= needed_raw:
                 break
 
+    if clean_raw < needed_raw:
+        summary["insufficient_clean_media"] = True
+        summary["clean_deficit_seconds"] = round(needed_raw - clean_raw, 2)
+        _append_log(
+            job,
+            f"Filtro Visual Rigoroso: {len(clean_pairs)} clipe(s) limpo(s) aprovado(s) ({clean_raw:.1f}s) "
+            f"para {needed_raw:.1f}s de narracao. "
+            f"Nenhum clipe poluido foi reinserido; o particionamento utilizara reuso mutante dos clipes limpos para cobrir o video."
+        )
+
     summary["clean_clips"] = len(clean_pairs)
     summary["approved"] = len(clean_pairs)
     summary["selected_clips"] = len(selected_pairs)
-    summary["retained_used_in_timeline"] = retained_used
+    summary["retained_used_in_timeline"] = 0
+    summary["pollution_retained_for_safety"] = 0
+    summary["safety_halt_triggered"] = False
     summary["raw_seconds_after_filter"] = round(sum(duration for _, duration in selected_pairs), 3)
     summary["needed_raw_seconds"] = round(needed_raw, 3)
-    summary["status"] = "guardrail_active" if safety_halted else "clean_complete"
+    summary["status"] = "clean_complete"
     _save_visual_clean_cache()
     return selected_pairs, summary
 
@@ -10169,7 +10189,6 @@ def make_background_music(
         fade_out_at = max(0.0, target - fade)
         af = (
             "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
-            f"volume={render_volume_db:.2f}dB,"
             f"afade=t=in:st=0:d={fade:.3f},"
             f"afade=t=out:st={fade_out_at:.3f}:d={fade:.3f}"
         )
@@ -10289,7 +10308,7 @@ def mix_voiceover_with_background(
             mix_filter = (
                 "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
                 + music_shape +
-                "[music_raw2][voice]sidechaincompress=threshold=0.032:ratio=4.0:attack=45:release=650:makeup=1.0,alimiter=limit=0.92[music];"
+                "[music_raw2][voice]sidechaincompress=threshold=0.07:ratio=2.2:attack=35:release=450:makeup=1.0,alimiter=limit=0.94[music];"
                 "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
             )
         else:
@@ -10303,7 +10322,7 @@ def mix_voiceover_with_background(
         mix_filter = (
             f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
             f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB{act_curve}[music_raw];"
-            f"[music_raw][voice]sidechaincompress=threshold=0.032:ratio=4.0:attack=45:release=650:makeup=1.0,alimiter=limit=0.92[music];"
+            f"[music_raw][voice]sidechaincompress=threshold=0.07:ratio=2.2:attack=35:release=450:makeup=1.0,alimiter=limit=0.94[music];"
             f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
         )
         mix_message = "Mixando narração com música dinâmica, curva de 3 atos e respiro suave em pausas"
@@ -12439,10 +12458,10 @@ def tone_allows_suspense_fx(job: Job) -> bool:
 
 
 def transition_sfx_pool_for_job(job: Job, mode: str, idx: int = 0) -> list[str]:
-    mode = str(mode or "off")
-    if mode in {"", "off", "none"}:
-        return []
-    pool = list(TRANSITION_SFX_POOLS.get(mode) or TRANSITION_SFX_POOLS.get("random") or [])
+    mode = str(mode or "off").strip().lower()
+    pool = list(TRANSITION_SFX_POOLS.get(mode) or [])
+    if not pool:
+        pool = ["transition_whoosh", "transition_swipe", "transition_air", "transition_sweep"]
     if mode.startswith("random"):
         tone = str((job.emotion_summary or {}).get("tone") or job.options.get("projectTone") or "auto").lower()
         tone_extra = {
@@ -12659,27 +12678,33 @@ def build_auto_sfx_events(job: Job, audio_total: float, segments: list[Path], wo
 
     transition_mode = str(job.options.get("transitions") or "off")
     boundaries = transition_boundary_times(segments, audio_total, work)
-    if transition_mode not in {"", "off", "none"} and boundaries:
+    if boundaries:
+        total_boundaries = len(boundaries)
+        # Regra Editorial: 30% a 40% das emendas de cena recebem transicoes sonoras (meta equilibrada: 35%)
+        target_transition_sfx_count = max(1, min(total_boundaries, int(round(total_boundaries * 0.35))))
+        step = max(2, int(round(total_boundaries / target_transition_sfx_count))) if target_transition_sfx_count > 0 else 3
+
         last_transition_fx = -99.0
         last_transition_effect = ""
         selected_transition_count = 0
-        for boundary_idx, boundary_time in boundaries:
-            if boundary_time - last_transition_fx < 7.0:
+        for b_idx, (boundary_idx, boundary_time) in enumerate(boundaries):
+            if selected_transition_count >= target_transition_sfx_count:
+                break
+            time_since_last = boundary_time - last_transition_fx
+            if time_since_last < 7.0:
                 continue
-            draw = stable_index(f"{job.id}:transition_draw:{transition_mode}:{boundary_idx}:{boundary_time:.2f}", 100)
-            force_first = selected_transition_count == 0 and (
-                boundary_idx == boundaries[-1][0] or (len(boundaries) >= 3 and boundary_idx == boundaries[min(2, len(boundaries) - 1)][0])
-            )
-            transition_density = max(0.18, min(0.68, _safe_float(dna_profile.get("transitionFxDensity"), 0.38)))
-            if draw >= int(round(transition_density * 100.0)) and not force_first:
+
+            is_step_boundary = (b_idx % step == 0) or time_since_last >= 18.0
+            if not is_step_boundary:
                 continue
+
             pool = transition_sfx_pool_for_job(job, transition_mode, boundary_idx)
             if not pool:
-                continue
+                pool = ["transition_whoosh", "transition_swipe", "transition_air", "transition_sweep"]
             effect = pool[stable_index(f"{job.id}:transition_effect:{transition_mode}:{boundary_idx}", len(pool))]
             if effect == last_transition_effect and len(pool) > 1:
                 effect = pool[(pool.index(effect) + 1) % len(pool)]
-            emphasis = -0.85 if effect != "transition_suspense" else -1.05
+            emphasis = 0.20 if effect != "transition_suspense" else -0.35
             add(
                 boundary_time,
                 effect,
@@ -12892,7 +12917,7 @@ def sfx_asset_tokens(effect: str) -> list[str]:
         "push": ["push_slide", "slide"],
         "blur": ["speed_blur_slide", "blur", "swipe"],
         "sweep": ["sweep", "whoosh", "air", "cinematic", "reverse_cymbal"],
-        "air": ["air", "whoosh", "sweep", "ambience", "calm"],
+        "air": ["soft_whoosh", "cinematic_whoosh", "whoosh", "sweep", "air"],
         "hit": ["powerful_title", "stamp_text", "fast_bullet", "hit", "impact", "boom", "punch", "bang", "blockbuster", "logo", "percussion"],
         "bell": ["bell", "chime", "ding"],
         "click": ["click", "tap", "type", "text"],
@@ -15007,11 +15032,10 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             )
             labels.append(f"[{label}]")
         filters.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0[fxmix]")
-    # Keep FX clearly audible without letting short transients compete with narration.
-    # The old compressor attenuated the FX bus too aggressively under a normalized voice.
-    filters.append("[fxmix]highpass=f=55,lowpass=f=15000[fxclean]")
-    filters.append("[fxclean][voice_ref]sidechaincompress=threshold=0.16:ratio=1.32:attack=2:release=110:makeup=1.06,volume=0.70dB[fxduck]")
-    filters.append("[base][fxduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.93:attack=5:release=55[aout]")
+    # Keep FX clearly audible without letting short transients get crushed by narration.
+    filters.append("[fxmix]highpass=f=65,lowpass=f=15000[fxclean]")
+    filters.append("[fxclean][voice_ref]sidechaincompress=threshold=0.28:ratio=1.18:attack=15:release=75:makeup=1.12,volume=1.80dB[fxduck]")
+    filters.append("[base][fxduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.94:attack=5:release=55[aout]")
     script = work / "sound_fx_mix_filter.txt"
     script.write_text(";".join(filters), encoding="utf-8")
     cmd += [
@@ -17222,6 +17246,12 @@ def concat_segments_and_mux(
         else:
             audio_cached = None
     if not audio_cached:
+        if subtitles and not job.subtitle_cues:
+            try:
+                sub_path = subtitles[0] if subtitles[0].is_absolute() else job.work / subtitles[0]
+                job.subtitle_cues = parse_srt_file(sub_path)
+            except Exception:
+                pass
         if cta:
             audio_file = mix_cta_audio(job, audio_file, cta, cta_times, audio_total, work)
         performance_start(job, "sound_fx")
@@ -19560,6 +19590,11 @@ def render_worker(job_id: str):
                     if isinstance(ass_meta.get("layer_collision_summary"), dict):
                         job.layer_collision_summary = ass_meta["layer_collision_summary"]
                     _append_log(job, "Render Graph: ASS de Textos e Legendas reutilizado.")
+                    if subtitles and not job.subtitle_cues:
+                        try:
+                            job.subtitle_cues = parse_srt_file(subtitle_path)
+                        except Exception:
+                            pass
             if subtitle_ass is None:
                 performance_start(job, "subtitles_ass")
                 try:
