@@ -43,6 +43,7 @@ const state = {
   selectedCta: localStorage.getItem('glide_cta_language') || '',
   themeMode: localStorage.getItem('glide_theme_mode') || 'system',
   uiMode: localStorage.getItem('glide_ui_mode') || 'simple',
+  productionLevel: localStorage.getItem('glide_production_level') || '1',
   musicGenre: localStorage.getItem('glide_music_genre') || 'cinematic',
   sidebarCollapsed: localStorage.getItem('glide_sidebar_collapsed') === '1',
   presetMusic: {genres: []},
@@ -231,6 +232,7 @@ const autoSoundFxToggle = $('#autoSoundFxToggle');
 const allowAudioTrimToggle = $('#allowAudioTrimToggle');
 const trimSilenceToggle = $('#trimSilenceToggle');
 const dualExportShortsToggle = $('#dualExportShortsToggle');
+const dualExportModeSelect = $('#dualExportModeSelect');
 const forceShortRenderToggle = $('#forceShortRenderToggle');
 const preflightGrid = $('#preflightGrid');
 const autoFixBtn = $('#autoFixBtn');
@@ -395,12 +397,13 @@ const subtitleFontPresets = {
 };
 
 const exportBitratePresets = {
-  small_file: {label: 'Arquivo pequeno', hevc: {fast: 1100, standard: 1900}, h264: {fast: 1700, standard: 2800}},
-  capcut_compact: {label: 'Compacto CapCut', hevc: {fast: 1500, standard: 2500}, h264: {fast: 2200, standard: 3600}},
-  youtube_compact: {label: 'YouTube compacto', hevc: {fast: 1800, standard: 2800}, h264: {fast: 2500, standard: 4000}},
+  small_file: {label: 'Arquivo Super Leve', hevc: {fast: 1100, standard: 1900}, h264: {fast: 1700, standard: 2800}},
+  capcut_compact: {label: 'Compacto CapCut (VBR Otimizado)', hevc: {fast: 1500, standard: 2500}, h264: {fast: 2200, standard: 3600}},
+  youtube_compact: {label: 'YouTube Master 1080p (Recomendado)', hevc: {fast: 1800, standard: 2800}, h264: {fast: 2500, standard: 4000}},
   balanced: {label: 'Equilibrado', hevc: {fast: 2200, standard: 3500}, h264: {fast: 3000, standard: 4800}},
-  high_quality: {label: 'Qualidade alta', hevc: {fast: 3000, standard: 5200}, h264: {fast: 4200, standard: 6800}},
-  compatibility: {label: 'Compatibilidade', hevc: {fast: 2200, standard: 3600}, h264: {fast: 3200, standard: 5200}},
+  high_quality: {label: 'Cinematic 4K / Alta Fidelidade', hevc: {fast: 3000, standard: 5200}, h264: {fast: 4200, standard: 6800}},
+  cinematic_4k: {label: 'Cinematic 4K / Alta Fidelidade', hevc: {fast: 4000, standard: 7500}, h264: {fast: 6000, standard: 10500}},
+  compatibility: {label: 'Compatibilidade Universal (H.264)', hevc: {fast: 2200, standard: 3600}, h264: {fast: 3200, standard: 5200}},
 };
 const backgroundVolumePresets = {
   immersive: -22,
@@ -740,6 +743,7 @@ function storedProjectToModel(raw = {}, index = 0){
   project.options = raw.options && typeof raw.options === 'object' ? raw.options : {};
   if(typeof project.options.trimSilence === 'undefined') project.options.trimSilence = true;
   if(typeof project.options.dualExportShorts === 'undefined') project.options.dualExportShorts = false;
+  if(typeof project.options.dualExportMode === 'undefined') project.options.dualExportMode = 'smart_crop';
   delete project.options.autoThumbnails;
   project.referenceStyleVideo = raw.referenceStyleVideo && typeof raw.referenceStyleVideo === 'object'
     ? raw.referenceStyleVideo
@@ -878,9 +882,10 @@ function captureControlSnapshot(includeSubtitle = true){
     adaptiveVisualFilter: Boolean(adaptiveVisualFilterToggle?.checked),
     voiceNormalize: voiceNormalizeToggle ? voiceNormalizeToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
-    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
+    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : false,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
+    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop',
     forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     backgroundMusicVolumeDb: backgroundVolumeValue(),
     backgroundMusicPreset: backgroundVolumePreset?.value || 'immersive',
@@ -950,9 +955,10 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(adaptiveVisualFilterToggle) adaptiveVisualFilterToggle.checked = Boolean(options.adaptiveVisualFilter);
   if(voiceNormalizeToggle) voiceNormalizeToggle.checked = options.voiceNormalize !== false;
   if(autoSoundFxToggle) autoSoundFxToggle.checked = options.autoSoundFx !== false;
-  if(allowAudioTrimToggle) allowAudioTrimToggle.checked = options.allowAudioTrim !== false;
+  if(allowAudioTrimToggle) allowAudioTrimToggle.checked = options.allowAudioTrim === true;
   if(trimSilenceToggle) trimSilenceToggle.checked = options.trimSilence !== false;
   if(dualExportShortsToggle) dualExportShortsToggle.checked = Boolean(options.dualExportShorts);
+  if(dualExportModeSelect && options.dualExportMode) dualExportModeSelect.value = String(options.dualExportMode);
   if(forceShortRenderToggle) forceShortRenderToggle.checked = Boolean(options.forceShortRender);
   if(backgroundVolumePreset) backgroundVolumePreset.value = options.backgroundMusicPreset || 'immersive';
   if(backgroundVolumeDb) backgroundVolumeDb.value = String(options.backgroundMusicVolumeDb ?? -25);
@@ -999,6 +1005,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
 function refreshActiveProjectDecorations(){
   renderCtaAssets();
   refreshExportProfileUi();
+  syncLevel2Controls();
   refreshFinalOutputUi();
   refreshBackgroundMusicUi();
   updateSubtitlePreview({refreshStats: false});
@@ -2240,11 +2247,13 @@ function applyVisualCleanStatusFromSummary(summary){
     if(current.kind === 'invalid') return;
     const decision = item.decision === 'removed'
       ? 'removido do render'
-      : item.decision === 'fallback_only'
-        ? 'rebaixado para fallback'
-        : item.decision === 'kept_late'
-          ? 'permitido no final'
-          : 'marcado pelo filtro';
+      : item.decision === 'pollution_retained_for_safety'
+        ? 'retido por salvaguarda para proteger duração'
+        : item.decision === 'fallback_only'
+          ? 'rebaixado para fallback'
+          : item.decision === 'kept_late'
+            ? 'permitido no final'
+            : 'marcado pelo filtro';
     const label = `${item.reason || 'clipe suspeito'} - ${decision}.`;
     const previous = state.mediaStatus.get(rel(file));
     if(!previous || previous.kind !== category || previous.label !== label){
@@ -2895,9 +2904,10 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     continuityOutliersOnly: true,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
-    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : true,
+    allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : false,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
+    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop',
     forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     zoom: $('#zoomSelect')?.value || 'off',
     transitions: $('#transitionSelect')?.value || 'off',
@@ -2950,16 +2960,77 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
   }
 }
 
-function applyUiMode(){
-  const valid = new Set(['simple', 'advanced']);
-  if(!valid.has(state.uiMode)){
+function applyProductionLevel(){
+  const level = String(state.productionLevel || '1');
+  const valid = new Set(['1', '2', '3']);
+  const normalizedLevel = valid.has(level) ? level : '1';
+  state.productionLevel = normalizedLevel;
+  localStorage.setItem('glide_production_level', normalizedLevel);
+  document.body.dataset.productionLevel = normalizedLevel;
+
+  const tab1 = $('#levelTab1');
+  const tab2 = $('#levelTab2');
+  const tab3 = $('#levelTab3');
+  if(tab1) tab1.classList.toggle('active', normalizedLevel === '1');
+  if(tab2) tab2.classList.toggle('active', normalizedLevel === '2');
+  if(tab3) tab3.classList.toggle('active', normalizedLevel === '3');
+
+  const view1 = $('#levelView1');
+  const view2 = $('#levelView2');
+  const view3 = $('#levelView3');
+  if(view1) view1.style.display = normalizedLevel === '1' ? 'block' : 'none';
+  if(view2) view2.style.display = normalizedLevel === '2' ? 'block' : 'none';
+  if(view3) view3.style.display = normalizedLevel === '3' ? 'block' : 'none';
+
+  if(normalizedLevel === '1'){
     state.uiMode = 'simple';
-    localStorage.setItem('glide_ui_mode', state.uiMode);
+    document.body.dataset.uiMode = 'simple';
+    if(uiModeSelect) uiModeSelect.value = 'simple';
+    const ratioSelect = $('#ratioSelect');
+    if(ratioSelect) ratioSelect.value = '16:9';
+    if(dockSummary) dockSummary.textContent = 'Modo Autônomo 1-Click Pro ativo: diretores inteligentes e salvaguardas nativas em execução.';
+  } else if(normalizedLevel === '2'){
+    state.uiMode = 'simple';
+    document.body.dataset.uiMode = 'simple';
+    if(uiModeSelect) uiModeSelect.value = 'level2';
+    const ratioSelect = $('#ratioSelect');
+    if(ratioSelect) ratioSelect.value = '9:16';
+    syncLevel2Controls();
+    if(dockSummary) dockSummary.textContent = 'Modo Shorts/Reels (9:16) ativo com Reframe Inteligente por Saliência.';
+  } else if(normalizedLevel === '3'){
+    state.uiMode = 'advanced';
+    document.body.dataset.uiMode = 'advanced';
+    if(uiModeSelect) uiModeSelect.value = 'advanced';
+    if(dockSummary) dockSummary.textContent = 'Modo Customizado ativo: gaveta avançada liberada para edição de estilos e efeitos.';
   }
-  document.body.dataset.uiMode = state.uiMode;
-  if(uiModeSelect) uiModeSelect.value = state.uiMode;
-  if(dockSummary && state.uiMode === 'simple'){
-    dockSummary.textContent = 'Modo simples: controles avancados ficam guardados, mas continuam preservados.';
+}
+
+function setProductionLevel(level){
+  state.productionLevel = String(level);
+  applyProductionLevel();
+  updateStats();
+}
+
+function syncLevel2Controls(){
+  const lvl2Mode = $('#level2DualExportModeSelect');
+  const lvl2Dual = $('#level2DualExportToggle');
+  const mainMode = $('#dualExportModeSelect');
+  const mainDual = $('#dualExportShortsToggle');
+  if(lvl2Mode && mainMode){
+    lvl2Mode.value = mainMode.value || 'smart_crop';
+  }
+  if(lvl2Dual && mainDual){
+    lvl2Dual.checked = mainDual.checked;
+  }
+}
+
+function applyUiMode(){
+  if(state.uiMode === 'advanced'){
+    setProductionLevel('3');
+  } else if(state.productionLevel === '3'){
+    setProductionLevel('1');
+  } else {
+    applyProductionLevel();
   }
 }
 
@@ -2990,7 +3061,10 @@ function refreshExportProfileUi(){
   const custom = profile === 'custom';
   if(!custom) videoBitrateInput.value = String(bitrate);
   videoBitrateInput.disabled = !custom;
-  if(bitrateField) bitrateField.classList.toggle('locked', !custom);
+  if(bitrateField){
+    bitrateField.classList.toggle('locked', !custom);
+    bitrateField.style.display = custom ? 'block' : 'none';
+  }
   const modeText = state.mode === 'fast' ? '720p' : '1080p';
   const codecText = codec === 'h264' ? 'H.264' : 'HEVC';
   const target = Number(videoBitrateInput.value || bitrate);
@@ -5060,9 +5134,10 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     adaptiveVisualFilter: Boolean(optionValue('adaptiveVisualFilter', adaptiveVisualFilterToggle?.checked || false)),
     voiceNormalize: optionValue('voiceNormalize', voiceNormalizeToggle ? voiceNormalizeToggle.checked : true) !== false,
     autoSoundFx: optionValue('autoSoundFx', autoSoundFxToggle ? autoSoundFxToggle.checked : true) !== false,
-    allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : true) !== false,
+    allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : false) === true,
     trimSilence: optionValue('trimSilence', trimSilenceToggle ? trimSilenceToggle.checked : true) !== false,
     dualExportShorts: Boolean(optionValue('dualExportShorts', dualExportShortsToggle ? dualExportShortsToggle.checked : false)),
+    dualExportMode: String(optionValue('dualExportMode', dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop')),
     forceShortRender: Boolean(optionValue('forceShortRender', forceShortRenderToggle ? forceShortRenderToggle.checked : false)),
     videoOrder: sourceVideos.map(rel),
     imageOrder: sourceVideos.filter(isImage).map(rel),
@@ -5387,7 +5462,8 @@ async function pollStatus(jobId, context = {}){
       if(j.timeline_summary?.visual_clean_summary?.enabled){
         const clean = j.timeline_summary.visual_clean_summary;
         applyVisualCleanStatusFromSummary(clean);
-        extra.push(`Filtro visual: ${clean.hard_rejected || 0} removido(s), ${clean.soft_demoted || 0} rebaixado(s), ${clean.fallback_used || 0} fallback.`);
+        const safeTxt = clean.pollution_retained_for_safety ? ` | ${clean.pollution_retained_for_safety} retido(s) por salvaguarda` : '';
+        extra.push(`Filtro Anti-Poluição Nativo: ${clean.hard_rejected || 0} removido(s) (texto/dados/apresentador)${safeTxt}, ${clean.clean_clips || 0} limpo(s).`);
       }else if(j.preflight_summary?.visual_clean_filter?.enabled){
         extra.push('Filtro visual inteligente ativo.');
       }
@@ -7354,11 +7430,44 @@ if(themeSelect){
   });
 }
 if(uiModeSelect){
-  uiModeSelect.value = state.uiMode;
+  uiModeSelect.value = state.productionLevel === '2' ? 'level2' : (state.productionLevel === '3' ? 'advanced' : 'simple');
   uiModeSelect.addEventListener('change', () => {
-    state.uiMode = uiModeSelect.value || 'simple';
-    localStorage.setItem('glide_ui_mode', state.uiMode);
-    applyUiMode();
+    const val = uiModeSelect.value || 'simple';
+    if(val === 'level2'){
+      setProductionLevel('2');
+    } else if(val === 'advanced'){
+      setProductionLevel('3');
+    } else {
+      setProductionLevel('1');
+    }
+  });
+}
+
+const levelTab1 = $('#levelTab1');
+const levelTab2 = $('#levelTab2');
+const levelTab3 = $('#levelTab3');
+if(levelTab1) levelTab1.addEventListener('click', () => setProductionLevel('1'));
+if(levelTab2) levelTab2.addEventListener('click', () => setProductionLevel('2'));
+if(levelTab3) levelTab3.addEventListener('click', () => setProductionLevel('3'));
+
+const lvl2Mode = $('#level2DualExportModeSelect');
+const lvl2Dual = $('#level2DualExportToggle');
+const mainMode = $('#dualExportModeSelect');
+const mainDual = $('#dualExportShortsToggle');
+if(lvl2Mode && mainMode){
+  lvl2Mode.addEventListener('change', () => {
+    mainMode.value = lvl2Mode.value;
+  });
+  mainMode.addEventListener('change', () => {
+    lvl2Mode.value = mainMode.value;
+  });
+}
+if(lvl2Dual && mainDual){
+  lvl2Dual.addEventListener('change', () => {
+    mainDual.checked = lvl2Dual.checked;
+  });
+  mainDual.addEventListener('change', () => {
+    lvl2Dual.checked = mainDual.checked;
   });
 }
 if(renderPrioritySelect){
@@ -8147,9 +8256,9 @@ if(automatorAutoHealBtn) automatorAutoHealBtn.addEventListener('click', () => {
   if(!plan.rows.length) return;
   state.projects.forEach(p => {
     if(!p.options) p.options = defaultProjectOptions();
-    p.options.allowAudioTrim = true;
+    p.options.allowAudioTrim = false;
   });
-  if(dockSummary) dockSummary.textContent = '🪄 Auto-Healer aplicado: todos os projetos com déficit de mídia foram ajustados para renderização sem falhas com sacrifício de áudio e ritmo saudável!';
+  if(dockSummary) dockSummary.textContent = '🪄 Auto-Healer aplicado: lote balanceado com ritmo saudável e preservação total de 100% da narração!';
   if(automatorConfirmBtn) automatorConfirmBtn.disabled = false;
   if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = false;
   if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = false;
@@ -8469,11 +8578,8 @@ document.querySelectorAll('.nav-item[data-target]').forEach(btn => {
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     const targetId = btn.dataset.target;
-    if(targetId === 'subtitleSection' && state.uiMode === 'simple'){
-      state.uiMode = 'advanced';
-      document.body.dataset.uiMode = 'advanced';
-      if(uiModeSelect) uiModeSelect.value = 'advanced';
-      localStorage.setItem('glide_ui_mode', 'advanced');
+    if(targetId === 'subtitleSection' && state.productionLevel !== '3'){
+      setProductionLevel('3');
     }
     const el = document.getElementById(targetId);
     if(el){

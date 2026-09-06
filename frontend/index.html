@@ -305,8 +305,98 @@
       </div>
 
       <div class="card options-card" id="exportSection">
-        <h3>Exportação</h3>
-        <p class="engine-note">Render segmentado de baixo uso de memória, feito pelo FFmpeg local.</p>
+        <div class="level-switch-container">
+          <div class="production-level-switch" role="tablist" aria-label="Nível de Produção">
+            <button type="button" class="level-tab active" data-level="1" id="levelTab1" title="Modo 1-Click: Produção 100% autônoma para YouTube com inteligência máxima">
+              <span class="level-pill">NÍVEL 1</span>
+              <strong class="level-title">YouTube 1-Click Pro</strong>
+              <small class="level-desc">Autônomo &amp; Retenção Máxima</small>
+            </button>
+            <button type="button" class="level-tab" data-level="2" id="levelTab2" title="Modo Shorts/Reels: Enquadramento vertical 9:16 com Reframe Inteligente por Saliência">
+              <span class="level-pill">NÍVEL 2</span>
+              <strong class="level-title">Shorts &amp; Reels (9:16)</strong>
+              <small class="level-desc">Saliência &amp; Face Tracking</small>
+            </button>
+            <button type="button" class="level-tab" data-level="3" id="levelTab3" title="Modo Customizado: Abra a Gaveta Avançada para estilizar legendas, cores, fontes, CTA e efeitos">
+              <span class="level-pill">NÍVEL 3</span>
+              <strong class="level-title">Modo Customizado</strong>
+              <small class="level-desc">Gaveta Avançada &amp; Design</small>
+            </button>
+          </div>
+        </div>
+
+        <!-- NÍVEL 1: STACK DO MOTOR AUTÔNOMO 1-CLICK PRO -->
+        <div class="level-view" id="levelView1">
+          <div class="autonomous-stack-card">
+            <div class="autonomous-stack-head">
+              <div class="stack-badge-row">
+                <span class="stack-pulse-dot"></span>
+                <strong>Motor Autônomo 1-Click Pro</strong>
+              </div>
+              <span class="stack-status-badge">100% Ativo</span>
+            </div>
+            <div class="autonomous-chips">
+              <div class="auto-chip" title="Filtro Anti-Poluição Nativo: elimina textos excessivos, gráficos e apresentadores fixos com salvaguarda dinâmica de duração">
+                <span class="chip-dot"></span>
+                <span>Anti-Poluição Nativo</span>
+              </div>
+              <div class="auto-chip" title="Auto B-Roll Pacing Slicer: fatia clipes longos em tomadas dinâmicas de 3.5s a 5.0s com Punch-In alternado 1.12x">
+                <span class="chip-dot"></span>
+                <span>Pacing Slicer (3.5s–5.0s)</span>
+              </div>
+              <div class="auto-chip" title="Sincronia Editorial Magnética de Fala: atrai cortes visuais magneticamente para o término de palavras e pausas">
+                <span class="chip-dot"></span>
+                <span>Sincronia Magnética (SRT)</span>
+              </div>
+              <div class="auto-chip" title="Reuso Cinematográfico Mutante: permutação não-linear coprima, espelhamento seguro e micro-reframing contra Content-ID">
+                <span class="chip-dot"></span>
+                <span>Reuso Mutante</span>
+              </div>
+              <div class="auto-chip" title="Nivelamento profissional de narração vocal e ducking inteligente">
+                <span class="chip-dot"></span>
+                <span>Voz Master &amp; Ducking</span>
+              </div>
+              <div class="auto-chip" title="Diretor Visual Inteligente: curadoria e enquadramento das melhores tomadas">
+                <span class="chip-dot"></span>
+                <span>Diretor Visual</span>
+              </div>
+            </div>
+            <p class="autonomous-note">Basta soltar seus arquivos e clicar em Renderizar. Corte, ritmo, pós-produção e proteções rodam automaticamente.</p>
+          </div>
+        </div>
+
+        <!-- NÍVEL 2: CONTROLES DO MODO SHORTS / REELS 9:16 -->
+        <div class="level-view" id="levelView2" style="display:none">
+          <div class="shorts-mode-card">
+            <div class="shorts-mode-head">
+              <span class="shorts-badge">9:16 VERTICAL</span>
+              <strong>Shorts &amp; Reels com Reframe por Saliência</strong>
+            </div>
+            <p class="engine-note">Exportação direta em Full HD vertical (1080x1920) com rastreamento de pontos focais e rostos via IA.</p>
+            <div class="shorts-controls-grid">
+              <label>Enquadramento Vertical
+                <select id="level2DualExportModeSelect">
+                  <option value="smart_crop" selected>Full-Bleed 9:16 (Reframe por Saliência)</option>
+                  <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
+                  <option value="smart_auto">Automático Adaptativo</option>
+                </select>
+                <small class="field-hint">Full-Bleed preenche a tela inteira acompanhando o centro de interesse.</small>
+              </label>
+              <label class="toggle-card">
+                <input id="level2DualExportToggle" type="checkbox" />
+                <span>Exportar também o Master 16:9 (Dual Export)</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- NÍVEL 3: NOTA DA GAVETA AVANÇADA -->
+        <div class="level-view" id="levelView3" style="display:none">
+          <div class="custom-mode-intro">
+            <p class="engine-note">Gaveta Avançada aberta. Todos os seletores de fontes, cores, transições, animações de texto, CTA e trilha sonora estão disponíveis abaixo.</p>
+          </div>
+        </div>
+
         <div class="preset-switch" role="tablist">
           <button type="button" class="preset active" data-mode="fast">FAST 720p</button>
           <button type="button" class="preset" data-mode="standard">STANDARD 1080p</button>
@@ -350,18 +440,17 @@
               <option value="h264">H.264 MP4 compatível</option>
             </select>
           </label>
-          <label>Perfil de tamanho
+          <label>Perfil de exportação
             <select id="exportProfileSelect">
-              <option value="small_file">Arquivo pequeno</option>
-              <option value="capcut_compact" selected>Compacto CapCut - VBR</option>
-              <option value="youtube_compact">YouTube 1080p compacto</option>
-              <option value="balanced">Equilibrado</option>
-              <option value="high_quality">Qualidade alta</option>
-              <option value="compatibility">Máxima compatibilidade</option>
-              <option value="custom">Personalizado</option>
+              <option value="capcut_compact" selected>Compacto CapCut (VBR Otimizado)</option>
+              <option value="youtube_compact">YouTube Master 1080p (Recomendado)</option>
+              <option value="high_quality">Cinematic 4K / Alta Fidelidade</option>
+              <option value="small_file">Arquivo Super Leve</option>
+              <option value="compatibility">Compatibilidade Universal (H.264)</option>
+              <option value="custom">Personalizado (Manual)</option>
             </select>
           </label>
-          <label class="advanced-only" id="bitrateField">Bitrate alvo
+          <label class="advanced-only" id="bitrateField" style="display:none">Bitrate alvo (kbps)
             <input id="videoBitrateInput" type="number" min="800" max="14000" step="100" value="2500" />
             <small class="field-hint" id="bitrateHint">1080p HEVC compacto: 2500 kbps em VBR, estilo CapCut.</small>
           </label>
@@ -415,21 +504,23 @@
           <label class="toggle"><input id="gpuToggle" type="checkbox" /> <span>Usar NVIDIA NVENC se disponível</span></label>
           <label class="toggle"><input id="qualityBoostToggle" type="checkbox" checked /> <span>Quality Boost natural</span></label>
           <label class="toggle director-source-toggle"><input id="smartVisualDirectorToggle" type="checkbox" checked /> <span>Diretor Visual Inteligente</span></label>
-          <label class="toggle visual-filter-level-control" title="Define a intensidade permanente do filtro visual.">
-            <span>Filtro visual</span>
-            <select id="visualFilterLevelSelect" aria-label="Intensidade do filtro visual">
-              <option value="light">Leve</option>
-              <option value="normal" selected>Normal</option>
-              <option value="strict">Rigoroso</option>
-            </select>
-          </label>
-          <label class="toggle visual-filter-adaptive"><input id="adaptiveVisualFilterToggle" type="checkbox" /> <span>Filtro adaptativo</span></label>
-          <span id="visualFilterHint" class="sr-only">Normal: filtro manual ativo em todo o vídeo; imagens permanecem rigorosas.</span>
+          <div class="system-native-badge" title="Filtro Anti-Poluição Nativo: elimina textos excessivos, gráficos/dados e apresentadores fixos. Possui Salvaguarda Dinâmica que interrompe descartes automaticamente para nunca sacrificar a duração final do vídeo, preservando sempre o início 100% limpo.">
+            <span class="badge-status-dot"></span>
+            <span>Anti-Poluição Visual: Nativo &amp; Ativo</span>
+          </div>
+          <select id="visualFilterLevelSelect" style="display:none" aria-hidden="true"><option value="normal" selected>Normal</option></select>
+          <input id="adaptiveVisualFilterToggle" type="checkbox" style="display:none" aria-hidden="true" checked />
+          <span id="visualFilterHint" class="sr-only">Anti-Poluição nativo e obrigatório no sistema com salvaguarda dinâmica de duração.</span>
           <label class="toggle"><input id="voiceNormalizeToggle" type="checkbox" checked /> <span>Voz nivelada</span></label>
           <label class="toggle"><input id="autoSoundFxToggle" type="checkbox" checked /> <span>Efeitos sonoros automáticos</span></label>
-          <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render."><input id="allowAudioTrimToggle" type="checkbox" checked /> <span>Sacrificar áudio se faltar mídia</span></label>
+          <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render. Desmarcado por padrão para preservar 100% da narração."><input id="allowAudioTrimToggle" type="checkbox" /> <span>Sacrificar áudio se faltar mídia</span></label>
           <label class="toggle" title="Detecta pausas mortas (>1.0s) na narração e compacta suavemente para um respiro natural (~350ms), acelerando o render e aumentando a retenção."><input id="trimSilenceToggle" type="checkbox" checked /> <span>Otimizar silêncios da voz</span></label>
           <label class="toggle" title="Gera automaticamente uma versão vertical 1080x1920 (9:16) para TikTok/Shorts/Reels junto com o master horizontal."><input id="dualExportShortsToggle" type="checkbox" /> <span>Dual Export (Shorts 9:16)</span></label>
+          <select id="dualExportModeSelect" class="advanced-only select-inline" title="Modo de enquadramento vertical para Shorts/TikTok 9:16" style="margin: 0 4px; padding: 4px 8px; border-radius: 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); color: inherit;">
+            <option value="smart_crop" selected>Full-Bleed 9:16 (Reframe por Saliência)</option>
+            <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
+            <option value="smart_auto">Automático Adaptativo</option>
+          </select>
           <label class="toggle" title="Permite exportar vídeos com menos de 15 segundos ou prosseguir com quantidade mínima de mídia (útil para testes rápidos de poucos segundos). Se desmarcado, impede renders acidentais de micro-vídeos."><input id="forceShortRenderToggle" type="checkbox" /> <span>Forçar render curto (&lt;15s)</span></label>
         </div>
         <div class="intro-panel advanced-only" id="introPanel">
@@ -545,11 +636,15 @@
           <span>Sincronia Semântica de B-Rolls</span>
           <span>CTA Dinâmico por Roteiro</span>
         </div>
-        <div class="intelligence-v15-grid">
-          <label class="toggle"><input id="renderRecoveryToggle" type="checkbox" checked /> <span>Recuperação automática</span></label>
-          <label class="toggle"><input id="energyEditingToggle" type="checkbox" checked /> <span>Ritmo pela voz</span></label>
-          <label class="toggle"><input id="antiRepeatToggle" type="checkbox" checked /> <span>Antirrepetição de clipes</span></label>
-          <label class="toggle"><input id="audioMasteringToggle" type="checkbox" checked /> <span>Master YouTube</span></label>
+        <div class="native-guardrails-panel" title="Proteções automáticas de estabilização nativas do Glide Studio">
+          <div class="native-guardrail-pill"><span class="badge-status-dot"></span><span>Recuperação Automática</span></div>
+          <div class="native-guardrail-pill"><span class="badge-status-dot"></span><span>Ritmo pela Voz</span></div>
+          <div class="native-guardrail-pill"><span class="badge-status-dot"></span><span>Antirrepetição Inteligente</span></div>
+          <div class="native-guardrail-pill"><span class="badge-status-dot"></span><span>Master de Áudio YouTube</span></div>
+          <input id="renderRecoveryToggle" type="checkbox" checked hidden />
+          <input id="energyEditingToggle" type="checkbox" checked hidden />
+          <input id="antiRepeatToggle" type="checkbox" checked hidden />
+          <input id="audioMasteringToggle" type="checkbox" checked hidden />
         </div>
       </div>
       <div class="preflight-grid" id="preflightGrid"></div>
@@ -894,11 +989,12 @@
         <button type="button" class="btn ghost small" id="closeSettingsModal">Fechar</button>
       </div>
       <div class="settings-grid">
-        <label class="theme-control" title="Modo de trabalho">
-          <span>Modo</span>
-          <select id="uiModeSelect" aria-label="Modo de trabalho">
-            <option value="simple">Simples</option>
-            <option value="advanced">Avançado</option>
+        <label class="theme-control" title="Modo de trabalho e nível de interface">
+          <span>Nível de Interface</span>
+          <select id="uiModeSelect" aria-label="Nível de trabalho">
+            <option value="simple">Nível 1: 1-Click Pro</option>
+            <option value="level2">Nível 2: Shorts (9:16)</option>
+            <option value="advanced">Nível 3: Customizado</option>
           </select>
         </label>
         <label class="theme-control" title="Tema da interface">
@@ -917,10 +1013,11 @@
           <input type="checkbox" id="renderBudgetToggle" checked />
           <span>Proteção de tempo</span>
         </label>
-        <label class="theme-control" title="Confiança mínima usada por Renderizar saudáveis">
-          <span>Saudável acima de</span>
-          <input id="healthyThresholdInput" type="number" min="40" max="95" step="1" value="70" />
-        </label>
+        <div class="theme-control health-guard-control" title="Salvaguarda dinâmica de integridade: analisa arquivos e evita interrupções por falta de mídia">
+          <span>Saúde de Mídia</span>
+          <strong style="color:var(--accent,#10b981);font-size:0.85rem;">Calibração Nativa 70%+</strong>
+          <input id="healthyThresholdInput" type="hidden" value="70" />
+        </div>
         <label class="theme-control" title="Perfil final de masterização">
           <span>Master</span>
           <select id="platformMasterProfileSelect" aria-label="Perfil de masterização">

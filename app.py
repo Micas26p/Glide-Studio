@@ -615,7 +615,7 @@ def probe_image_focal_anchor(path: Path | str | None, cwd: Path | None = None) -
 def image_motion_for(path: Path | str, index: int = 0) -> str:
     """Retorna um dos 4 movimentos cinematográficos suaves sem repetições consecutivas."""
     return IMAGE_MOTIONS[index % len(IMAGE_MOTIONS)]
-VISUAL_CLEAN_CACHE_VERSION = 9
+VISUAL_CLEAN_CACHE_VERSION = 10
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -1124,6 +1124,10 @@ class SegmentPlan:
     source_offset: float = 0.0
     is_reversed: bool = False
     is_outro: bool = False
+    sub_slice_index: int = 0
+    punch_in: bool = False
+    hflip: bool = False
+    scale_boost: float = 1.0
 
 
 @dataclass
@@ -3781,7 +3785,7 @@ class DropzoneManager:
             "options": {
                 "aspectRatio": "16:9",
                 "qualityBoost": True,
-                "allowAudioTrim": True,
+                "allowAudioTrim": False,
                 "scoreVisualWindows": True,
                 "autoHeal": True,
                 "trimSilence": True,
@@ -5847,8 +5851,8 @@ def enforce_clean_opening_protocol(
         category = str(analysis.get("category") or "clean")
         action = str(analysis.get("action") or "keep")
 
-        # Poluição visual: tela preta, apresentador/avatar ou texto/legenda gravada
-        is_polluted = category in {"black_screen", "presenter", "text_dominant", "low_quality"} or action == "hard_reject"
+        # Poluição visual: tela preta, apresentador/avatar, texto na tela ou dados/gráficos
+        is_polluted = category in {"black_screen", "presenter", "text_dominant", "data_dominant", "low_quality"} or action in {"hard_reject", "retained_for_safety"}
 
         if is_opening and is_polluted:
             polluted_indices_in_opening.append(idx)
@@ -6537,6 +6541,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     )
     side_edges = max(0, edge_count - center_edges)
     side_density = side_edges / max(1, total - ((center_x1 - center_x0 + 1) * h))
+    focal_x_col = sum(idx * val for idx, val in enumerate(cols)) / float(max(1, edge_count))
+    focal_center_x = round(max(0.15, min(0.85, focal_x_col / max(1, w - 1))), 4)
     metrics = {
         "mean": round(mean, 3),
         "stdev": round(stdev, 3),
@@ -6547,6 +6553,7 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         "center_edge_ratio": round(center_ratio, 5),
         "side_edge_density": round(side_density, 5),
         "vertical_span": round(vertical_span, 5),
+        "focal_center_x": focal_center_x,
         "top_edge_share": round(top_edges / max(1, edge_count), 5),
         "middle_edge_share": round(middle_edges / max(1, edge_count), 5),
         "bottom_edge_share": round(bottom_edges / max(1, edge_count), 5),
@@ -6591,12 +6598,16 @@ def _classify_visual_analysis(
     med_head_skin = float(metrics.get("head_skin_ratio") or 0.0)
     med_center = float(metrics.get("center_edge_ratio") or 0.0)
     text_score = float(metrics.get("text_score") or 0.0)
+    data_score = float(metrics.get("data_score") or 0.0)
     presenter_score = float(metrics.get("presenter_score") or 0.0)
     text_ratio = float(temporal.get("text_ratio") or 0.0)
+    data_ratio = float(temporal.get("data_ratio") or 0.0)
     presenter_ratio = float(temporal.get("presenter_ratio") or 0.0)
     max_text = float(temporal.get("max_text_score") or text_score)
+    max_data = float(temporal.get("max_data_score") or data_score)
     max_presenter = float(temporal.get("max_presenter_score") or presenter_score)
     consecutive_text = int(temporal.get("max_consecutive_text") or 0)
+    consecutive_data = int(temporal.get("max_consecutive_data") or 0)
     consecutive_presenter = int(temporal.get("max_consecutive_presenter") or 0)
     scene_change_ratio = float(temporal.get("scene_change_ratio") or 0.0)
     pollution_ratio = float(temporal.get("pollution_ratio") or 0.0)
@@ -6616,9 +6627,9 @@ def _classify_visual_analysis(
     classified["level"] = level
 
     thresholds = {
-        "light": {"ratio": 0.80, "text": 0.82, "presenter": 0.78},
-        "normal": {"ratio": 0.45, "text": 0.72, "presenter": 0.69},
-        "strict": {"ratio": 1.0 / sample_count, "text": 0.66, "presenter": 0.64},
+        "light": {"ratio": 0.75, "text": 0.80, "presenter": 0.75, "data": 0.75},
+        "normal": {"ratio": 0.38, "text": 0.70, "presenter": 0.65, "data": 0.64},
+        "strict": {"ratio": 1.0 / sample_count, "text": 0.64, "presenter": 0.60, "data": 0.58},
     }[level]
     text_confirmed = (
         max_text >= thresholds["text"]
@@ -6628,11 +6639,19 @@ def _classify_visual_analysis(
             or (level == "strict" and text_ratio > 0.0)
         )
     )
+    data_confirmed = (
+        max_data >= thresholds["data"]
+        and (
+            data_ratio >= thresholds["ratio"]
+            or (level == "normal" and consecutive_data >= 2)
+            or (level == "strict" and data_ratio > 0.0)
+        )
+    )
     if yunet_analyzed:
         yunet_thresholds = {
-            "light": {"score": 0.80, "ratio": 0.75},
-            "normal": {"score": 0.69, "ratio": 0.45},
-            "strict": {"score": 0.64, "ratio": 0.25},
+            "light": {"score": 0.78, "ratio": 0.70},
+            "normal": {"score": 0.60, "ratio": 0.35},
+            "strict": {"score": 0.55, "ratio": 0.20},
         }[level]
         presenter_confirmed = bool(
             (
@@ -6648,23 +6667,31 @@ def _classify_visual_analysis(
             or (
                 context.get("presentation_hint")
                 and yunet_face_ratio == 0.0
-                and heuristic_max_presenter >= 0.82
+                and heuristic_max_presenter >= 0.80
             )
         )
     elif level == "strict":
         presenter_confirmed = bool(
             context.get("presentation_hint")
             or (
-                max_presenter >= max(0.80, thresholds["presenter"])
-                and (consecutive_presenter >= 2 or presenter_ratio >= 0.25)
+                max_presenter >= max(0.78, thresholds["presenter"])
+                and (consecutive_presenter >= 2 or presenter_ratio >= 0.20)
             )
         )
     else:
         presenter_confirmed = bool(
-            max_presenter >= thresholds["presenter"]
-            and (
-                presenter_ratio >= thresholds["ratio"]
-                or (level == "normal" and consecutive_presenter >= 2)
+            (
+                max_presenter >= thresholds["presenter"]
+                and (
+                    presenter_ratio >= thresholds["ratio"]
+                    or (level == "normal" and consecutive_presenter >= 2)
+                )
+            )
+            or (
+                med_head_skin >= 0.045
+                and med_torso_skin >= 0.055
+                and med_center >= 0.35
+                and med_persistence >= 0.20
             )
         )
     # Real-world footage tends to have camera/scene variation. A relevant
@@ -6695,7 +6722,15 @@ def _classify_visual_analysis(
         classified.update({
             "category": "text_dominant",
             "action": "hard_reject",
-            "reason": "texto, legenda ou marca visual persistente",
+            "reason": "muitos textos, legenda ou marca visual persistente",
+            "confidence": confidence,
+        })
+    elif data_confirmed:
+        confidence = min(0.99, max(max_data, data_ratio + 0.15))
+        classified.update({
+            "category": "data_dominant",
+            "action": "hard_reject",
+            "reason": "dados na tela, gráficos, tabelas ou telemetria excessiva",
             "confidence": confidence,
         })
     elif presenter_confirmed and contextual_override:
@@ -6710,24 +6745,26 @@ def _classify_visual_analysis(
         classified.update({
             "category": "presenter",
             "action": "hard_reject",
-            "reason": "apresentador, avatar ou talking head persistente",
+            "reason": "apresentador fixo, avatar ou talking head persistente",
             "confidence": confidence,
         })
-    elif max_presenter >= thresholds["presenter"] - 0.10 or text_ratio > 0.0 or pollution_ratio >= 0.45:
+    elif max_presenter >= thresholds["presenter"] - 0.10 or text_ratio > 0.0 or data_ratio > 0.0 or pollution_ratio >= 0.45:
         classified.update({
             "category": "suspect",
             "action": "soft_suspect",
             "reason": "evidencia visual ambigua; preservado para revisao/fallback",
-            "confidence": min(0.79, max(max_presenter, max_text, pollution_ratio)),
+            "confidence": min(0.79, max(max_presenter, max_text, max_data, pollution_ratio)),
         })
     classified["evidence"] = {
         "text_ratio": round(text_ratio, 3),
+        "data_ratio": round(data_ratio, 3),
         "presenter_ratio": round(presenter_ratio, 3),
         "pollution_ratio": round(pollution_ratio, 3),
         "scene_change_ratio": round(scene_change_ratio, 3),
         "subject_relevance": round(subject_relevance, 3),
         "samples": sample_count,
         "text_windows": list(temporal.get("text_windows") or [])[:18],
+        "data_windows": list(temporal.get("data_windows") or [])[:18],
         "presenter_windows": list(temporal.get("presenter_windows") or [])[:18],
         "presenter_heuristic_score": round(heuristic_max_presenter, 3),
         "face_detector": face_detector,
@@ -6991,6 +7028,7 @@ def probe_visual_clean_health(
     med_green = _median([float(item.get("green_mean") or 0.0) for item in metrics])
     med_blue = _median([float(item.get("blue_mean") or 0.0) for item in metrics])
     med_saturation = _median([float(item.get("saturation_mean") or 0.0) for item in metrics])
+    med_focal_x = _median([float(item.get("focal_center_x") or 0.50) for item in metrics])
     med_diff = _median(diffs, 0.0 if len(frames) == 1 else 255.0)
     med_persistence = _median(persistence_values)
     lower_third = med_bottom >= 0.48 and med_cols >= 0.55
@@ -7003,6 +7041,12 @@ def probe_visual_clean_health(
         + max(0.0, 1.0 - med_diff / 22.0) * 0.16
         + min(1.0, column_dominance / 0.35) * 0.22
     ) * (1.18 if lower_third else 1.0) * max(0.58, 1.0 - med_skin * 1.8))
+    data_score = min(1.0, (
+        min(1.0, (med_rows * med_cols) / 0.16) * 0.35
+        + min(1.0, med_cells / 0.22) * 0.25
+        + med_persistence * 0.25
+        + max(0.0, 1.0 - med_diff / 24.0) * 0.15
+    )) if (med_rows >= 0.28 and med_cols >= 0.32 and med_cells >= 0.16) else 0.0
     presenter_score = min(1.0, (
         min(1.0, med_head_skin / 0.11) * 0.34
         + min(1.0, med_torso_skin / 0.13) * 0.19
@@ -7012,6 +7056,7 @@ def probe_visual_clean_health(
         + med_persistence * 0.06
     ))
     sample_text_scores: list[float] = []
+    sample_data_scores: list[float] = []
     sample_presenter_scores: list[float] = []
     sample_pollution_scores: list[float] = []
     for index, item in enumerate(metrics):
@@ -7039,6 +7084,12 @@ def probe_visual_clean_health(
             + min(1.0, column_dominance / 0.32) * 0.23
             + max(0.0, 1.0 - local_motion / 28.0) * 0.12
         ) * max(0.62, 1.0 - skin * 1.4))
+        frame_data = min(1.0, (
+            min(1.0, (rows * cols) / 0.16) * 0.35
+            + min(1.0, cells / 0.22) * 0.25
+            + min(1.0, edge / 0.12) * 0.15
+            + max(0.0, 1.0 - local_motion / 24.0) * 0.25
+        )) if (rows >= 0.28 and cols >= 0.32 and cells >= 0.16) else 0.0
         frame_presenter = min(1.0, (
             min(1.0, head / 0.105) * 0.34
             + min(1.0, torso / 0.14) * 0.18
@@ -7048,9 +7099,11 @@ def probe_visual_clean_health(
         ))
         pollution = min(1.0, edge / 0.19 + cells / 0.42 + max(0.0, cols - 0.72))
         sample_text_scores.append(round(frame_text, 4))
+        sample_data_scores.append(round(frame_data, 4))
         sample_presenter_scores.append(round(frame_presenter, 4))
         sample_pollution_scores.append(round(pollution, 4))
     text_flags = [score >= 0.66 for score in sample_text_scores]
+    data_flags = [score >= 0.60 for score in sample_data_scores]
     presenter_flags = [score >= 0.64 for score in sample_presenter_scores]
     scene_change_flags = [float(value) >= 18.0 for value in diffs]
     pollution_flags = [score >= 0.72 for score in sample_pollution_scores]
@@ -7063,16 +7116,21 @@ def probe_visual_clean_health(
         "sample_count": len(frames),
         "coverage_ratio": 1.0,
         "text_ratio": round(sum(text_flags) / max(1, len(text_flags)), 4),
+        "data_ratio": round(sum(data_flags) / max(1, len(data_flags)), 4),
         "presenter_ratio": round(sum(presenter_flags) / max(1, len(presenter_flags)), 4),
         "pollution_ratio": round(sum(pollution_flags) / max(1, len(pollution_flags)), 4),
         "scene_change_ratio": round(sum(scene_change_flags) / max(1, len(scene_change_flags)), 4),
         "max_text_score": max(sample_text_scores, default=0.0),
+        "max_data_score": max(sample_data_scores, default=0.0),
         "max_presenter_score": max(sample_presenter_scores, default=0.0),
         "max_consecutive_text": _max_consecutive_flags(text_flags),
+        "max_consecutive_data": _max_consecutive_flags(data_flags),
         "max_consecutive_presenter": _max_consecutive_flags(presenter_flags),
         "text_windows": [index + 1 for index, flag in enumerate(text_flags) if flag],
+        "data_windows": [index + 1 for index, flag in enumerate(data_flags) if flag],
         "presenter_windows": [index + 1 for index, flag in enumerate(presenter_flags) if flag],
         "text_scores": sample_text_scores,
+        "data_scores": sample_data_scores,
         "presenter_scores": sample_presenter_scores,
     }
     summary_metrics = {
@@ -7093,7 +7151,9 @@ def probe_visual_clean_health(
         "head_skin_ratio": round(med_head_skin, 3),
         "torso_skin_ratio": round(med_torso_skin, 3),
         "text_score": round(text_score, 3),
+        "data_score": round(data_score, 3),
         "presenter_score": round(presenter_score, 3),
+        "focal_center_x": round(med_focal_x, 4),
         "red_mean": round(med_red, 2),
         "green_mean": round(med_green, 2),
         "blue_mean": round(med_blue, 2),
@@ -7483,54 +7543,58 @@ def apply_visual_clean_filter(
     candidate_sources: set[str] | None = None,
     imported_count: int | None = None,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    enabled = visual_clean_enabled(job.options)
+    # Filtro Anti-Poluição Visual: Nativo e Obrigatório no Glide Studio
+    enabled = True
     priority = render_priority(job)
+    min_speed = float(job.options.get("minSpeed") or MIN_VIDEO_SPEED)
+    needed_raw = max(0.0, audio_total * min_speed)
+    # Salvaguarda Dinâmica: margem de 5% sobre a necessidade de áudio para segurança total
+    safe_target_duration = max(needed_raw * 1.05, needed_raw + 4.0)
+    raw_total = max(0.001, sum(duration for _, duration in valid_pairs))
+
     summary: dict[str, Any] = {
-        "enabled": enabled,
+        "enabled": True,
         "priority": priority,
-        "requested_level": normalized_visual_filter_level(job.options),
-        "adaptive_requested": bool(job.options.get("adaptiveVisualFilter", False)),
-        "adaptive_effective": adaptive_visual_filter_effective(job.options),
-        "policy": "adaptive_visual_clean" if adaptive_visual_filter_effective(job.options) else "manual_full_timeline",
+        "policy": "native_anti_pollution_sequential",
         "imported_clips": int(imported_count if imported_count is not None else len(valid_pairs)),
         "original_valid_clips": len(valid_pairs),
-        "planned_clips": len(candidate_sources or valid_pairs),
-        "clean_clips": len(valid_pairs) if not enabled else 0,
-        "approved": len(valid_pairs) if not enabled else 0,
+        "clean_clips": 0,
+        "approved": 0,
         "hard_rejected": 0,
         "rejected_invalid": max(0, int(imported_count or len(valid_pairs)) - len(valid_pairs)),
         "rejected_text": 0,
+        "rejected_data": 0,
         "rejected_black": 0,
-        "presenter_suspects": 0,
         "presenter_rejected": 0,
+        "presenter_suspects": 0,
         "contextual_people": 0,
         "images_analyzed": 0,
         "images_rejected": 0,
         "context_mismatches": 0,
         "soft_demoted": 0,
         "fallback_used": 0,
-        "kept_late_suspects": 0,
         "analyzed_clips": 0,
         "cache_hits": 0,
         "analysis_unavailable": 0,
         "face_detector": yunet_detector_status(),
         "yunet_analyzed": 0,
         "yunet_face_positive": 0,
-        "skipped_analysis": 0,
         "not_needed": 0,
         "used_in_final": 0,
+        "pollution_retained_for_safety": 0,
+        "safety_halt_triggered": False,
+        "retained_used_in_timeline": 0,
         "items": [],
     }
-    if not enabled or not valid_pairs:
-        summary["status"] = "disabled" if not enabled else "empty"
+    if not valid_pairs:
+        summary["status"] = "empty"
         return valid_pairs, summary
 
-    raw_total = max(0.001, sum(duration for _, duration in valid_pairs))
     clean_pairs: list[tuple[Path, float]] = []
     fallback_pairs: list[tuple[Path, float]] = []
-    guarded_reject_pairs: list[tuple[Path, float, dict[str, Any], str]] = []
-    zone_analyzed = {"first": 0, "rest": 0}
+    retained_safety_pairs: list[tuple[Path, float, dict[str, Any]]] = []
     project_context = visual_filter_project_context(job)
+
     # Pre-scan and dispatch concurrent visual probes across available CPU cores
     precomputed_probes: dict[int, dict[str, Any]] = {}
     tasks: list[tuple[int, Path, float, str, Path, dict[str, Any], str]] = []
@@ -7570,20 +7634,33 @@ def apply_visual_clean_filter(
         except Exception:
             pass
 
+    # Análise Rigorosa Sequencial Front-to-Back com Salvaguarda Dinâmica de Mídia:
+    # A avaliação percorre obrigatoriamente os clipes na ordem sequencial da timeline (do começo ao fim).
+    # Abertura (primeiros ~20% ou primeiros 12 clipes): Rigor Máximo absoluto (zero poluição).
+    # Salvaguarda: Assim que o descarte de clipes poluidos ameaçar o saldo mínimo para cobrir a narração
+    # OU notar que está a eliminar muitos clipes (>35% de descartes com reserva estreita),
+    # o filtro INTERROMPE imediatamente as eliminações para NUNCA sacrificar a duração final do vídeo!
     cumulative = 0.0
+    remaining_unscanned_duration = sum(dur for _, dur in valid_pairs)
+    accepted_clean_duration = 0.0
+    hard_rejected_count = 0
+    safety_halted = False
+
     for idx, (source, duration) in enumerate(valid_pairs):
         position_ratio = cumulative / raw_total
         cumulative += duration
+        remaining_unscanned_duration = max(0.0, remaining_unscanned_duration - duration)
+
         source_key = str(source).replace("\\", "/")
         display = media_display_name(job, source)
         if candidate_sources is not None and source_key not in candidate_sources:
             clean_pairs.append((source, duration))
+            accepted_clean_duration += duration
             summary["not_needed"] += 1
             continue
+
         media_kind = "image" if is_image_path(source) else "video"
         zone, zone_label = visual_clean_zone(job.options, position_ratio, media_kind)
-        guard_zone = "first" if position_ratio < (1.0 / 3.0) else "rest"
-        zone_analyzed[guard_zone] += 1
         source_context = visual_filter_source_context(job, source, project_context)
         analysis = precomputed_probes.get(idx) or probe_visual_clean_health(
             source,
@@ -7598,12 +7675,14 @@ def apply_visual_clean_filter(
             summary["images_analyzed"] += 1
         if analysis.get("cache_hit"):
             summary["cache_hits"] += 1
+
         evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), dict) else {}
         face_detector = evidence.get("face_detector") if isinstance(evidence.get("face_detector"), dict) else {}
         if face_detector.get("analyzed"):
             summary["yunet_analyzed"] += 1
             if int(face_detector.get("face_frames") or 0) > 0:
                 summary["yunet_face_positive"] += 1
+
         action = str(analysis.get("action") or "keep")
         category = str(analysis.get("category") or "clean")
         reason = str(analysis.get("reason") or "clipe limpo")
@@ -7620,6 +7699,7 @@ def apply_visual_clean_filter(
             "evidence": analysis.get("evidence") or {},
             "context": source_context,
         }
+
         if media_kind == "image" and action == "keep" and float(source_context.get("subject_relevance") or 0.0) < 0.12 and project_context.get("terms"):
             action = "soft_suspect"
             category = "context_mismatch"
@@ -7630,32 +7710,64 @@ def apply_visual_clean_filter(
                 "confidence": 0.66,
             })
             summary["context_mismatches"] += 1
-        if action == "hard_reject":
+
+        is_unusable = category in {"black_screen", "invalid", "no_frames", "low_quality"}
+        is_pollution = (
+            action == "hard_reject"
+            or category in {"text_dominant", "data_dominant", "presenter"}
+            or (media_kind == "image" and is_unusable)
+        )
+
+        is_opening = (idx < max(2, min(len(valid_pairs) // 5, 12))) or (position_ratio < 0.18)
+        potential_future_duration = accepted_clean_duration + remaining_unscanned_duration
+        current_rejection_ratio = (hard_rejected_count + 1) / max(1, idx + 1)
+
+        # Regra de Salvaguarda Dinâmica:
+        # Se notar que está a eliminar muitos ou se a reserva de mídia atingir o limite para cobrir o áudio:
+        # PARAR de eliminar clipes poluídos (fora da abertura estrita) para garantir 100% da duração final!
+        if is_pollution and not is_unusable and not is_opening:
+            if safety_halted or potential_future_duration < safe_target_duration or (current_rejection_ratio >= 0.35 and potential_future_duration < safe_target_duration * 1.25):
+                safety_halted = True
+                summary["safety_halt_triggered"] = True
+                summary["pollution_retained_for_safety"] += 1
+                item["decision"] = "pollution_retained_for_safety"
+                item["action"] = "retained_for_safety"
+                item["reason"] = f"{reason} | Preservado pela Salvaguarda Dinâmica para proteger 100% da duração final"
+                retained_safety_pairs.append((source, duration, item))
+                summary["items"].append(item)
+                continue
+
+        if is_unusable or (is_pollution and action == "hard_reject"):
             summary["hard_rejected"] += 1
+            hard_rejected_count += 1
             if category == "text_dominant":
                 summary["rejected_text"] += 1
+            elif category == "data_dominant":
+                summary["rejected_data"] += 1
             elif category == "black_screen":
                 summary["rejected_black"] += 1
             elif category == "presenter":
                 summary["presenter_rejected"] += 1
             if media_kind == "image":
                 summary["images_rejected"] += 1
-            if category not in {"black_screen", "invalid", "no_frames", "analysis_unavailable"}:
-                guarded_reject_pairs.append((source, duration, item, guard_zone))
             item["decision"] = "removed"
+            summary["items"].append(item)
         elif action == "soft_suspect":
             if category in {"presenter_suspect", "static_center_suspect", "presenter", "suspect"}:
                 summary["presenter_suspects"] += 1
-            if zone == "light" and priority != "max":
-                clean_pairs.append((source, duration))
-                summary["kept_late_suspects"] += 1
-                item["decision"] = "kept_late"
-            else:
+            if is_opening or priority == "max":
                 fallback_pairs.append((source, duration))
                 summary["soft_demoted"] += 1
                 item["decision"] = "fallback_only"
+            else:
+                clean_pairs.append((source, duration))
+                accepted_clean_duration += duration
+                summary["kept_late_suspects"] += 1
+                item["decision"] = "kept_late"
+            summary["items"].append(item)
         else:
             clean_pairs.append((source, duration))
+            accepted_clean_duration += duration
             if category == "person_contextual":
                 summary["contextual_people"] += 1
             if category == "analysis_unavailable":
@@ -7663,69 +7775,40 @@ def apply_visual_clean_filter(
                 item["decision"] = "kept_unverified"
             else:
                 item["decision"] = "kept"
-        if item["decision"] != "kept" or category != "clean":
-            summary["items"].append(item)
+            if item["decision"] != "kept" or category != "clean":
+                summary["items"].append(item)
 
-    guardrail_details: dict[str, Any] = {}
-    recovered_count = 0
-    for guard_zone, limit in (("first", 0.25), ("rest", 0.30)):
-        candidates = [
-            item for item in guarded_reject_pairs
-            if item[3] == guard_zone and item[2].get("category") not in {"text_dominant", "black_screen", "low_quality"}
-        ]
-        analyzed = max(0, zone_analyzed[guard_zone])
-        allowed = 0 if analyzed <= 0 else max(1, int(analyzed * limit))
-        overflow = max(0, len(candidates) - allowed)
-        recovered_here = 0
-        if overflow:
-            # Lowest-confidence editorial decisions are recovered first (excluding text/black screen).
-            for source, duration, item, _ in sorted(candidates, key=lambda row: float(row[2].get("confidence") or 0.0))[:overflow]:
-                fallback_pairs.append((source, duration))
-                item["decision"] = "guardrail_fallback"
-                item["action"] = "soft_suspect"
-                item["reason"] = f"{item.get('reason')}; proteção {int(limit * 100)}% converteu a decisão em suspeito"
-                recovered_here += 1
-                if item.get("category") == "presenter":
-                    summary["presenter_rejected"] = max(0, int(summary.get("presenter_rejected") or 0) - 1)
-        recovered_count += recovered_here
-        guardrail_details[guard_zone] = {
-            "limit": limit,
-            "analyzed": analyzed,
-            "editorial_rejected": len(candidates),
-            "allowed": allowed,
-            "recovered_as_suspect": recovered_here,
-        }
-    if recovered_count:
-        summary["guardrail_triggered"] = True
-        summary["guardrail_recovered"] = recovered_count
-        summary["soft_demoted"] += recovered_count
-        summary["hard_rejected"] = max(0, int(summary.get("hard_rejected") or 0) - recovered_count)
-        summary["status"] = "guardrail"
-    summary["guardrail"] = guardrail_details
-
-    min_speed = float(job.options.get("minSpeed") or MIN_VIDEO_SPEED)
-    needed_raw = max(0.0, audio_total * min_speed)
+    # Montagem da Timeline:
+    # 1. Clipes 100% limpos SEMPRE ocupam o início e corpo principal da timeline (Abertura Limpa Garantida).
+    # 2. Clipes retidos por salvaguarda são alocados estritamente na cauda tardia da timeline caso clean_raw < needed_raw.
+    selected_pairs: list[tuple[Path, float]] = list(clean_pairs)
     clean_raw = sum(duration for _, duration in clean_pairs)
-    selected_pairs = list(clean_pairs)
-    fallback_items_used: list[dict[str, Any]] = []
-    # Do not re-inject polluted clips. If clean_raw < needed_raw, the media shortage is handled
-    # gracefully via Case B (clean media reuse) or Case A (clean audio trim) without dirty clips!
+    retained_used = 0
+
+    if clean_raw < needed_raw and retained_safety_pairs:
+        for source, duration, r_item in retained_safety_pairs:
+            selected_pairs.append((source, duration))
+            clean_raw += duration
+            retained_used += 1
+            r_item["used_in_late_timeline"] = True
+            if clean_raw >= needed_raw:
+                break
+
     if clean_raw < needed_raw and fallback_pairs:
         for source, duration in fallback_pairs:
             selected_pairs.append((source, duration))
             clean_raw += duration
             summary["fallback_used"] += 1
-            fallback_items_used.append({"name": media_display_name(job, source), "file": source.name, "duration": round(duration, 3)})
             if clean_raw >= needed_raw:
                 break
+
     summary["clean_clips"] = len(clean_pairs)
     summary["approved"] = len(clean_pairs)
     summary["selected_clips"] = len(selected_pairs)
-    summary["fallback_used_items"] = fallback_items_used[:20]
+    summary["retained_used_in_timeline"] = retained_used
     summary["raw_seconds_after_filter"] = round(sum(duration for _, duration in selected_pairs), 3)
     summary["needed_raw_seconds"] = round(needed_raw, 3)
-    if not summary.get("status"):
-        summary["status"] = "ok"
+    summary["status"] = "guardrail_active" if safety_halted else "clean_complete"
     _save_visual_clean_cache()
     return selected_pairs, summary
 
@@ -7737,19 +7820,24 @@ def log_visual_clean_filter(job: Job, summary: dict[str, Any]) -> None:
     demoted = int(summary.get("soft_demoted") or 0)
     fallback = int(summary.get("fallback_used") or 0)
     analyzed = int(summary.get("analyzed_clips") or 0)
-    yunet_analyzed = int(summary.get("yunet_analyzed") or 0)
-    yunet_positive = int(summary.get("yunet_face_positive") or 0)
+    clean_count = int(summary.get("clean_clips") or 0)
+    retained_safety = int(summary.get("pollution_retained_for_safety") or 0)
+    retained_used = int(summary.get("retained_used_in_timeline") or 0)
+    rejected_text = int(summary.get("rejected_text") or 0)
+    rejected_data = int(summary.get("rejected_data") or 0)
+    presenter_rejected = int(summary.get("presenter_rejected") or 0)
     _append_log(
         job,
-        "Filtro visual inteligente: "
-        f"analisados={analyzed} | removidos={removed} | rebaixados={demoted} | fallback_usado={fallback} | "
-        f"YuNet={yunet_analyzed} ambiguos/{yunet_positive} com rosto | politica={summary.get('policy')}.",
+        "Filtro Anti-Poluição Nativo: "
+        f"analisados={analyzed} | limpos={clean_count} | "
+        f"removidos={removed} (texto={rejected_text}, dados={rejected_data}, apresentador={presenter_rejected}) | "
+        f"salvaguarda_ativa={summary.get('safety_halt_triggered', False)} (retidos_segurança={retained_safety}, usados_final={retained_used}).",
     )
-    notable = [item for item in (summary.get("items") or []) if item.get("decision") in {"removed", "fallback_only", "kept_late"}]
+    notable = [item for item in (summary.get("items") or []) if item.get("decision") in {"removed", "pollution_retained_for_safety", "fallback_only", "kept_late"}]
     if notable:
-        sample = ", ".join(f"{item.get('name')} ({item.get('reason')})" for item in notable[:5])
-        more = "..." if len(notable) > 5 else ""
-        _append_log(job, f"Filtro visual: {sample}{more}")
+        sample = ", ".join(f"{item.get('name')} ({item.get('reason')})" for item in notable[:6])
+        more = "..." if len(notable) > 6 else ""
+        _append_log(job, f"Filtro Anti-Poluição detalhes: {sample}{more}")
 
 
 def compact_visual_clean_summary(summary: dict[str, Any] | None) -> dict[str, Any]:
@@ -7758,14 +7846,15 @@ def compact_visual_clean_summary(summary: dict[str, Any] | None) -> dict[str, An
         "enabled", "priority", "policy", "status", "requested_level",
         "adaptive_requested", "adaptive_effective",
         "imported_clips", "original_valid_clips", "planned_clips",
-        "analyzed_clips", "cache_hits", "approved", "not_needed",
-        "hard_rejected", "rejected_invalid", "rejected_text", "rejected_black",
+        "clean_clips", "analyzed_clips", "cache_hits", "approved", "not_needed",
+        "hard_rejected", "rejected_invalid", "rejected_text", "rejected_data", "rejected_black",
         "analysis_unavailable",
         "face_detector", "yunet_analyzed", "yunet_face_positive",
         "presenter_suspects", "presenter_rejected", "contextual_people",
         "images_analyzed", "images_rejected", "context_mismatches",
         "soft_demoted", "kept_late_suspects",
         "fallback_used", "used_as_fallback", "used_in_final", "selected_clips",
+        "pollution_retained_for_safety", "safety_halt_triggered", "retained_used_in_timeline",
         "guardrail_triggered", "guardrail_recovered", "guardrail",
     )
     return {key: source.get(key) for key in keys if key in source}
@@ -10888,7 +10977,16 @@ def cta_position_expr(job: Job) -> tuple[str, str, str]:
     return preset, x, y
 
 
-def overlay_cta_on_video(job: Job, video_source: Path, cta: dict[str, Any], times: list[float], work: Path) -> Path:
+def overlay_cta_on_video(
+    job: Job,
+    video_source: Path,
+    cta: dict[str, Any],
+    times: list[float],
+    work: Path,
+    target_duration: float | None = None,
+    base: float = 65.0,
+    span: float = 15.0,
+) -> Path:
     set_stage(job, "cta", "Aplicando CTA", "Sobrepondo CTA de inscricao")
     w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
     target_w = cta_scale_width(job, w)
@@ -10942,7 +11040,7 @@ def overlay_cta_on_video(job: Job, video_source: Path, cta: dict[str, Any], time
         "-pix_fmt", "yuv420p",
         str(out),
     ]
-    run_cmd(job, cmd, cwd=work, quiet_success=True)
+    run_cmd(job, cmd, total_duration=target_duration or None, base=base, span=span, cwd=work, quiet_success=True)
     job.cta_summary.update({
         "position_preset": preset,
         "offset_x": clamp_float(job.options.get("ctaOffsetX"), 0.0, -35.0, 35.0),
@@ -11048,8 +11146,8 @@ def compose_final_visuals(
         str(out),
     ]
     has_comp = getattr(job, "has_visual_composition", True)
-    comp_base = 60.0 if has_comp else 94.0
-    comp_span = 34.0 if has_comp else 1.5
+    comp_base = 65.0 if has_comp else 95.0
+    comp_span = 30.0 if has_comp else 1.0
     run_cmd(
         job,
         cmd,
@@ -11170,9 +11268,10 @@ def burn_subtitles_on_video(
     work: Path,
     output_name: str = "video_subtitled.mp4",
     target_duration: float | None = None,
+    base: float | None = None,
+    span: float | None = None,
 ) -> Path:
     set_stage(job, "subtitles", "Aplicando legendas", "Aplicando legendas animadas")
-    job.percent = 95
     subtitle_video = work / output_name
     encoder_args = choose_video_args(
         job.options.get("mode", "standard"),
@@ -11201,8 +11300,8 @@ def burn_subtitles_on_video(
         str(subtitle_video.name),
     ]
     has_comp = getattr(job, "has_visual_composition", False)
-    comp_base = 75.0 if has_comp else 94.0
-    comp_span = 19.0 if has_comp else 2.0
+    comp_base = base if base is not None else (65.0 if has_comp else 94.0)
+    comp_span = span if span is not None else (30.0 if has_comp else 2.0)
     run_cmd(
         job,
         cmd_subtitles,
@@ -11242,7 +11341,10 @@ def mix_cta_audio(job: Job, base_audio: Path, cta: dict[str, Any], times: list[f
         str(out),
     ]
     set_stage(job, "cta", "Mixando audio CTA", "Mantendo som do CTA junto da narracao")
-    run_cmd(job, cmd, total_duration=audio_total or None, base=91, span=2, cwd=work, quiet_success=True)
+    has_comp = getattr(job, "has_visual_composition", False)
+    cta_base = 61.0 if has_comp else 92.5
+    cta_span = 1.0 if has_comp else 1.0
+    run_cmd(job, cmd, total_duration=audio_total or None, base=cta_base, span=cta_span, cwd=work, quiet_success=True)
     return out
 
 
@@ -14000,7 +14102,10 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
         counts[event["reason"]] = counts.get(event["reason"], 0) + 1
     try:
         set_stage(job, "audio", "Sound design automatico", "Aplicando efeitos sonoros cinematicos discretos")
-        run_cmd(job, cmd, total_duration=audio_total or None, base=93, span=1.5, cwd=work, quiet_success=True)
+        has_comp = getattr(job, "has_visual_composition", False)
+        sfx_base = 62.0 if has_comp else 93.5
+        sfx_span = 2.0 if has_comp else 1.5
+        run_cmd(job, cmd, total_duration=audio_total or None, base=sfx_base, span=sfx_span, cwd=work, quiet_success=True)
     except Exception as exc:
         job.sound_fx_summary = {
             "enabled": False,
@@ -14095,6 +14200,10 @@ def export_bitrate_settings(mode: str, codec: str, options: dict[str, Any]) -> d
         "compatibility": {
             "hevc": (2200 if fast else 3600),
             "h264": (3200 if fast else 5200),
+        },
+        "cinematic_4k": {
+            "hevc": (4000 if fast else 7500),
+            "h264": (6000 if fast else 10500),
         },
     }
     key = "hevc" if use_hevc else "h264"
@@ -14526,14 +14635,28 @@ def build_video_filter(
     is_reversed: bool = False,
     is_outro: bool = False,
     filmic_grade: str = "",
+    punch_in: bool = False,
+    hflip: bool = False,
+    scale_boost: float = 1.0,
 ) -> str:
     vf = ""
     if is_reversed:
         vf += "reverse,"
-    vf += (
-        f"fps=30,scale={w}:{h}:force_original_aspect_ratio=increase,"
-        f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
-    )
+    if hflip:
+        vf += "hflip,"
+    eff_scale = (1.12 if punch_in else 1.0) * max(1.0, min(1.25, float(scale_boost or 1.0)))
+    if abs(eff_scale - 1.0) > 0.005:
+        pw = int(math.ceil(w * eff_scale / 2.0) * 2)
+        ph = int(math.ceil(h * eff_scale / 2.0) * 2)
+        vf += (
+            f"fps=30,scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
+        )
+    else:
+        vf += (
+            f"fps=30,scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
+        )
     if quality_boost:
         vf += f",{quality_boost_chain()}"
     if filmic_grade:
@@ -14588,12 +14711,15 @@ def build_image_filter_complex(
     is_outro: bool = False,
     filmic_grade: str = "",
     focal_point: tuple[float, float] | None = None,
+    hflip: bool = False,
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
     progress = f"(on/{frames})"
     motion = motion if motion in {"zoom_in", "zoom_out", "pan_left", "pan_right"} else "zoom_in"
 
     fx, fy = focal_point if focal_point else probe_image_focal_anchor(image_path)
+    if hflip:
+        fx = max(0.0, min(1.0, 1.0 - fx))
 
     # Movimento cinematográfico contínuo, fluido e sem tremor subpixel
     if motion == "zoom_in":
@@ -14634,11 +14760,12 @@ def build_image_filter_complex(
     # Buffer 2.5K supersampling (2560x1440) para eliminar serrilhado e travamento de pixel no zoompan
     ss_w = max(2560, w)
     ss_h = max(1440, h)
+    flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
         # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor e supersampling 2.5K
         return (
-            f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
+            f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
             f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
@@ -14646,13 +14773,58 @@ def build_image_filter_complex(
 
     # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Background blur elegante com supersampling
     return (
-        f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
-        f"[0:v]scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+        f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
+        f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
         f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
     )
+
+
+def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> bool:
+    """Check if media is safe to horizontally flip without inverting readable text or presenter faces."""
+    try:
+        p = Path(str(source_path))
+        key_stem = p.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower():
+                    cat = str(val.get("category", "")).lower()
+                    if cat in {"text_dominant", "data_dominant", "presenter", "talking_head"}:
+                        return False
+                    metrics = val.get("metrics", {})
+                    if float(metrics.get("text_score", 0.0) or 0.0) >= 0.35:
+                        return False
+                    return True
+        return True
+    except Exception:
+        return True
+
+
+def generate_mutant_permutation(candidates: list[Any], cycle: int, last_source_key: str | None = None) -> list[Any]:
+    """Generate a non-linear permutation of candidates for repeat cycles with anti-collision guarantees."""
+    n = len(candidates)
+    if n <= 1:
+        return list(candidates)
+
+    # Coprime stride ensures every item is visited exactly once without duplicates
+    coprimes = [k for k in range(2, max(3, n)) if math.gcd(k, n) == 1]
+    stride = coprimes[(cycle - 1) % len(coprimes)] if coprimes else (n - 1)
+    offset = (cycle * 2 + 1) % n
+
+    permuted_indices = [(offset + i * stride) % n for i in range(n)]
+
+    # Anti-collision: ensure the first item of this cycle doesn't collide with the last item of previous cycle
+    if last_source_key and n > 1:
+        first_idx = permuted_indices[0]
+        first_cand = candidates[first_idx]
+        first_key = str(getattr(first_cand, "source", first_cand[1] if isinstance(first_cand, tuple) and len(first_cand) >= 2 else first_cand))
+        if first_key == last_source_key:
+            mid = n // 2
+            permuted_indices[0], permuted_indices[mid] = permuted_indices[mid], permuted_indices[0]
+
+    return [candidates[i] for i in permuted_indices]
 
 
 def _source_offset_for(source_offsets: dict[str, float] | None, path: Path) -> float:
@@ -14715,13 +14887,131 @@ def find_smart_sentence_snap(
     return round(min(max_duration, candidates[-1][0] + 0.5), 3)
 
 
+def extract_speech_boundaries(srt_path: Path | str | None) -> list[tuple[float, float, str]]:
+    """
+    Extrai do SRT todas as fronteiras naturais de fala (fins de frase, pausas de pontuação e respiros entre cues).
+    Retorna lista ordenada de tuplas: (timestamp_segundos, peso_hierarquico, tipo_fronteira).
+    Tipos:
+      - 'sentence_end' (. ! ?): peso=1.0, tolerância=0.55s
+      - 'clause_pause' (, ; : - —): peso=0.8, tolerância=0.40s
+      - 'cue_breath' (respiro entre falas): peso=0.6, tolerância=0.35s
+    """
+    if not srt_path:
+        return []
+    p = Path(str(srt_path))
+    if not p.exists() or p.stat().st_size <= 0:
+        return []
+    try:
+        content = p.read_text(encoding="utf-8-sig", errors="replace")
+    except Exception:
+        try:
+            content = p.read_text(encoding="latin-1", errors="replace")
+        except Exception:
+            return []
+
+    blocks = re.findall(
+        r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]*?)(?=\n\n|\Z)",
+        content,
+    )
+    if not blocks:
+        return []
+
+    def parse_srt_ts(ts: str) -> float:
+        ts = ts.replace(",", ".")
+        parts = ts.split(":")
+        if len(parts) == 3:
+            return float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        return 0.0
+
+    parsed_cues = []
+    for start_str, end_str, text in blocks:
+        s_sec = parse_srt_ts(start_str)
+        e_sec = parse_srt_ts(end_str)
+        cleaned = re.sub(r"<[^>]+>", "", text).strip()
+        if e_sec > s_sec:
+            parsed_cues.append((s_sec, e_sec, cleaned))
+
+    boundaries: list[tuple[float, float, str]] = []
+    for idx, (s_sec, e_sec, text) in enumerate(parsed_cues):
+        if not text:
+            continue
+        # Verifica pontuação no fim do texto da cue
+        if re.search(r"[\.!\?]['\"»”]?\s*$", text):
+            boundaries.append((round(e_sec, 3), 1.0, "sentence_end"))
+        elif re.search(r"[,;:—\-]['\"»”]?\s*$", text):
+            boundaries.append((round(e_sec, 3), 0.8, "clause_pause"))
+        else:
+            # Se a próxima cue começar com intervalo vocal perceptível (>= 0.15s), registra respiro
+            has_breath = False
+            if idx + 1 < len(parsed_cues):
+                next_start = parsed_cues[idx + 1][0]
+                if next_start - e_sec >= 0.15:
+                    has_breath = True
+            if has_breath:
+                boundaries.append((round(e_sec, 3), 0.6, "cue_breath"))
+            else:
+                boundaries.append((round(e_sec, 3), 0.5, "cue_boundary"))
+
+    boundaries.sort(key=lambda x: x[0])
+    return boundaries
+
+
+def magnetic_speech_snap(
+    current_time: float,
+    planned_duration: float,
+    boundaries: list[tuple[float, float, str]],
+    min_dur: float = 2.2,
+    max_dur: float = 5.8,
+) -> tuple[float, bool, str]:
+    """
+    Ajusta magneticamente a duração planejada de um clipe para que o corte coincida com o término da fala.
+    Retorna: (duracao_efetiva, foi_ajustado, motivo_do_snap)
+    """
+    if not boundaries or planned_duration <= 0.08:
+        return planned_duration, False, ""
+
+    ideal_cut_time = current_time + planned_duration
+
+    TOLERANCE_MAP = {
+        "sentence_end": 0.55,
+        "clause_pause": 0.40,
+        "cue_breath": 0.35,
+        "cue_boundary": 0.25,
+    }
+
+    best_snap_time = None
+    best_diff = 999.0
+    best_reason = ""
+
+    for b_time, weight, b_type in boundaries:
+        if b_time < current_time + min_dur:
+            continue
+        if b_time > current_time + max_dur:
+            break
+
+        diff = abs(b_time - ideal_cut_time)
+        allowed_tol = TOLERANCE_MAP.get(b_type, 0.30)
+
+        if diff <= allowed_tol and diff < best_diff:
+            best_diff = diff
+            best_snap_time = b_time
+            best_reason = b_type
+
+    if best_snap_time is not None:
+        snapped_dur = round(best_snap_time - current_time, 3)
+        if min_dur <= snapped_dur <= max_dur:
+            return snapped_dur, True, best_reason
+
+    return planned_duration, False, ""
+
+
 def build_segment_plan(
     video_files: list[Path],
     video_durs: list[float],
     audio_total: float,
     min_speed: float = MIN_VIDEO_SPEED,
     source_offsets: dict[str, float] | None = None,
-    allow_audio_trim: bool = True,
+    allow_audio_trim: bool = False,
     srt_path: Path | str | None = None,
     force_short: bool = False,
 ) -> tuple[list[SegmentPlan], dict[str, Any]]:
@@ -14735,6 +15025,15 @@ def build_segment_plan(
     pairs = list(zip(video_files, video_durs))
     v_pairs = [(src, dur) for src, dur in pairs if not is_image_path(src)]
     i_pairs = [(src, dur) for src, dur in pairs if is_image_path(src)]
+
+    # Sincronia Editorial Magnética de Fala (carrega marcos do SRT se disponível)
+    speech_boundaries = extract_speech_boundaries(srt_path)
+    magnetic_snap_stats = {
+        "applied": 0,
+        "sentence_ends": 0,
+        "clause_pauses": 0,
+        "cue_breaths": 0,
+    }
 
     # PASSO 1, 2, 3 & 4: Calcular durações originais de vídeos e imagens
     v_effective_durs = [
@@ -14817,17 +15116,20 @@ def build_segment_plan(
                     f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração, apenas {ratio*100:.0f}% de cobertura). "
                     "Adicione mais mídias ou ative 'Forçar render curto (<15s)' nas opções avançadas."
                 )
-            # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop)
-            # Em vez de interromper o render em lotes, expande a sequência de mídias de forma cíclica e harmônica
+            # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop com Permutação Mutante)
+            # Em vez de interromper o render em lotes, expande a sequência de mídias de forma permutada e harmônica
             falta = max(0.0, audio_total - T_total)
             auto_healing_applied.append(f"camada_4_auto_broll_elastic_loop_deficit_{falta:.1f}s")
             initial_pairs = list(pairs)
             cycle_pass = 0
+            last_pair_src = str(ordered_items[-1][0]) if ordered_items else None
             while T_total < audio_total * 1.02 and cycle_pass < 20 and initial_pairs:
                 cycle_pass += 1
-                for src, orig_dur in initial_pairs:
+                permuted_pairs = generate_mutant_permutation(initial_pairs, cycle_pass, last_pair_src)
+                for src, orig_dur in permuted_pairs:
                     dur_contrib = orig_dur if not is_image_path(src) else base_img_dur
                     ordered_items.append((src, orig_dur))
+                    last_pair_src = str(src)
                     T_total += dur_contrib
                     if T_total >= audio_total * 1.05:
                         break
@@ -14864,22 +15166,46 @@ def build_segment_plan(
     # PASSO 10: Montagem da timeline com Organic Micro-Pace Oscillation
     PACE_HARMONICS = [0.92, 1.08, 0.95, 1.05, 1.00]
     plans: list[SegmentPlan] = []
+    initial_count = len(pairs)
     remaining = audio_total
     image_counter = 0
 
     for source_index, (src, orig_dur) in enumerate(ordered_items, start=1):
         if remaining <= 0.08:
             break
+        item_cycle = ((source_index - 1) // initial_count) if initial_count > 0 else 0
+        curr_timeline_pos = audio_total - remaining
         is_img = is_image_path(src)
         if is_img:
             # Organic Micro-Pace: cadência harmônica áurea para evitar ritmo métrico robótico
             pace_factor = PACE_HARMONICS[image_counter % len(PACE_HARMONICS)]
             target_candidate = round(img_dur * pace_factor, 3)
             target = max(2.5, min(6.0, target_candidate))
+
+            # Sincronia Editorial Magnética na Imagem:
+            if speech_boundaries and remaining > target + 1.2:
+                snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
+                    current_time=curr_timeline_pos,
+                    planned_duration=target,
+                    boundaries=speech_boundaries,
+                    min_dur=2.4,
+                    max_dur=min(6.0, remaining),
+                )
+                if was_snapped:
+                    target = snapped_target
+                    magnetic_snap_stats["applied"] += 1
+                    if snap_reason == "sentence_end":
+                        magnetic_snap_stats["sentence_ends"] += 1
+                    elif snap_reason == "clause_pause":
+                        magnetic_snap_stats["clause_pauses"] += 1
+                    else:
+                        magnetic_snap_stats["cue_breaths"] += 1
+
             target = min(target, remaining)
-            motion = IMAGE_MOTIONS[image_counter % len(IMAGE_MOTIONS)]
+            motion = IMAGE_MOTIONS[(image_counter + item_cycle * 2) % len(IMAGE_MOTIONS)]
             image_counter += 1
             if target >= 0.08:
+                apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "image")
                 plans.append(
                     SegmentPlan(
                         source=src,
@@ -14887,30 +15213,128 @@ def build_segment_plan(
                         target_duration=target,
                         source_offset=0.0,
                         source_index=source_index,
-                        cycle=0,
+                        cycle=item_cycle,
                         media_kind="image",
                         image_motion=motion,
+                        hflip=apply_hflip,
+                        scale_boost=1.0,
                     )
                 )
                 remaining -= target
         else:
             offset = _source_offset_for(source_offsets, src)
+            if item_cycle > 0:
+                stride_pct = ((item_cycle * 0.382) % 0.65)
+                offset = max(offset, round(orig_dur * stride_pct, 3))
             eff_dur = max(0.08, orig_dur - offset) * setpts_factor
-            target = min(eff_dur, remaining)
-            if target >= 0.08:
-                plans.append(
-                    SegmentPlan(
-                        source=src,
-                        raw_duration=orig_dur,
-                        target_duration=target,
-                        source_offset=offset,
-                        source_index=source_index,
-                        cycle=0,
-                        media_kind="video",
-                        image_motion="",
+            target_total = min(eff_dur, remaining)
+            if target_total >= 0.08:
+                apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "video")
+                scale_boost = 1.08 if (item_cycle % 2 == 1) else 1.0
+                # AUTO B-ROLL PACING SLICER:
+                # Clipes utilizáveis curtos (<= 5.5s) são preservados como plano único intacto.
+                # Clipes longos (> 5.5s) são particionados proporcionalmente em sub-cortes de 3.5s a 5.2s
+                # com Punch-In alternado (1.12x), gerando ritmo editorial de alta retenção no YouTube.
+                if target_total <= 5.5:
+                    target = target_total
+                    # Sincronia Editorial Magnética em Clipes Curtos:
+                    if speech_boundaries and remaining > target + 1.2:
+                        snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
+                            current_time=curr_timeline_pos,
+                            planned_duration=target,
+                            boundaries=speech_boundaries,
+                            min_dur=2.2,
+                            max_dur=min(5.8, eff_dur, remaining),
+                        )
+                        if was_snapped:
+                            target = snapped_target
+                            magnetic_snap_stats["applied"] += 1
+                            if snap_reason == "sentence_end":
+                                magnetic_snap_stats["sentence_ends"] += 1
+                            elif snap_reason == "clause_pause":
+                                magnetic_snap_stats["clause_pauses"] += 1
+                            else:
+                                magnetic_snap_stats["cue_breaths"] += 1
+
+                    target = min(target, remaining)
+                    plans.append(
+                        SegmentPlan(
+                            source=src,
+                            raw_duration=orig_dur,
+                            target_duration=target,
+                            source_offset=offset,
+                            source_index=source_index,
+                            cycle=item_cycle,
+                            media_kind="video",
+                            image_motion="",
+                            sub_slice_index=0,
+                            punch_in=False,
+                            hflip=apply_hflip,
+                            scale_boost=scale_boost,
+                        )
                     )
-                )
-                remaining -= target
+                    remaining -= target
+                else:
+                    VIDEO_PACE_HARMONICS = [4.4, 3.8, 5.0, 4.2, 4.6]
+                    n_slices = max(2, int(round(target_total / 4.4)))
+                    avg_slice = target_total / n_slices
+
+                    curr_offset = offset
+                    remaining_clip = target_total
+                    for s_idx in range(n_slices):
+                        if remaining <= 0.08 or remaining_clip <= 0.08:
+                            break
+                        slice_timeline_pos = audio_total - remaining
+                        if s_idx == n_slices - 1:
+                            sub_dur = round(remaining_clip, 3)
+                        else:
+                            harmonic = VIDEO_PACE_HARMONICS[s_idx % len(VIDEO_PACE_HARMONICS)]
+                            sub_dur = round(0.5 * avg_slice + 0.5 * harmonic, 3)
+                            if remaining_clip - sub_dur < 2.0:
+                                sub_dur = round(remaining_clip / 2.0, 3)
+                            sub_dur = min(sub_dur, remaining_clip)
+
+                            # Sincronia Editorial Magnética nos Sub-Cortes:
+                            if speech_boundaries and remaining > sub_dur + 1.2 and remaining_clip > sub_dur + 1.5:
+                                max_slice_dur = min(5.6, remaining_clip - 1.5, remaining)
+                                snapped_sub, was_snapped, snap_reason = magnetic_speech_snap(
+                                    current_time=slice_timeline_pos,
+                                    planned_duration=sub_dur,
+                                    boundaries=speech_boundaries,
+                                    min_dur=2.2,
+                                    max_dur=max(2.4, max_slice_dur),
+                                )
+                                if was_snapped:
+                                    sub_dur = snapped_sub
+                                    magnetic_snap_stats["applied"] += 1
+                                    if snap_reason == "sentence_end":
+                                        magnetic_snap_stats["sentence_ends"] += 1
+                                    elif snap_reason == "clause_pause":
+                                        magnetic_snap_stats["clause_pauses"] += 1
+                                    else:
+                                        magnetic_snap_stats["cue_breaths"] += 1
+
+                        sub_dur = min(sub_dur, remaining)
+                        if sub_dur >= 0.08:
+                            plans.append(
+                                SegmentPlan(
+                                    source=src,
+                                    raw_duration=orig_dur,
+                                    target_duration=sub_dur,
+                                    source_offset=curr_offset,
+                                    source_index=source_index,
+                                    cycle=item_cycle,
+                                    media_kind="video",
+                                    image_motion="",
+                                    sub_slice_index=s_idx,
+                                    punch_in=(s_idx % 2 == 1),
+                                    hflip=apply_hflip,
+                                    scale_boost=scale_boost,
+                                )
+                            )
+                            curr_offset = round(curr_offset + sub_dur, 3)
+                            remaining_clip = round(remaining_clip - sub_dur, 3)
+                            remaining = round(remaining - sub_dur, 3)
 
     # -------------------------------------------------------------
     # COBERTURA DE TIMELINE SEM CONGELAMENTO (Case A & Case B)
@@ -14929,22 +15353,40 @@ def build_segment_plan(
             remaining = 0.0
             auto_healing_applied.append(f"case_a_clean_audio_trim_at_{audio_total:.1f}s")
         else:
-            # Case B: Reutilização Inteligente de Mídia Aprovada (cobrindo 100% da voz)
-            v_candidates = [p for p in plans if p.media_kind == "video"]
-            img_candidates = [p for p in plans if p.media_kind == "image"]
+            # Case B: Reutilização Inteligente de Mídia Aprovada (cobrindo 100% da voz) com Reuso Cinematográfico Mutante
+            unique_v_map = {}
+            for p in plans:
+                if p.media_kind == "video" and str(p.source) not in unique_v_map:
+                    unique_v_map[str(p.source)] = p
+            unique_v = list(unique_v_map.values())
 
-            cycle = 1
+            unique_img_map = {}
+            for p in plans:
+                if p.media_kind == "image" and str(p.source) not in unique_img_map:
+                    unique_img_map[str(p.source)] = p
+            unique_img = list(unique_img_map.values())
+
+            base_cycle = max((getattr(p, "cycle", 0) for p in plans), default=0)
+            cycle = base_cycle + 1
+            last_source_key = str(plans[-1].source) if plans else None
+
             while remaining > 0.08 and cycle <= 40:
                 added = False
-                if v_candidates:
-                    for cand in v_candidates:
+                if unique_v:
+                    permuted_v = generate_mutant_permutation(unique_v, cycle, last_source_key)
+                    for cand in permuted_v:
                         if remaining <= 0.08:
                             break
                         raw_dur = float(cand.raw_duration)
-                        slice_offset = round((raw_dur * 0.22 * cycle) % max(0.5, raw_dur * 0.55), 3)
+                        stride_pct = ((cycle * 0.382 + cand.sub_slice_index * 0.236) % 0.65)
+                        slice_offset = round(raw_dur * stride_pct, 3)
                         usable = max(1.2, raw_dur - slice_offset)
-                        seg_dur = round(min(usable, remaining), 3)
+                        # Pacing Slicer em clipes reciclados: teto saudável de 5.2s por tomada
+                        max_reuse_shot = 5.2
+                        seg_dur = round(min(usable, remaining, max_reuse_shot), 3)
                         if seg_dur >= 0.6:
+                            apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "video")
+                            scale_boost = 1.08 if (cycle % 2 == 1) else 1.0
                             plans.append(
                                 SegmentPlan(
                                     source=cand.source,
@@ -14956,17 +15398,24 @@ def build_segment_plan(
                                     media_kind="video",
                                     image_motion="",
                                     is_reversed=(cycle % 3 == 0),
+                                    sub_slice_index=cycle,
+                                    punch_in=((cand.sub_slice_index + cycle) % 2 == 1),
+                                    hflip=apply_hflip,
+                                    scale_boost=scale_boost,
                                 )
                             )
                             remaining -= seg_dur
+                            last_source_key = str(cand.source)
                             added = True
-                elif img_candidates:
-                    for cand in img_candidates:
+                elif unique_img:
+                    permuted_img = generate_mutant_permutation(unique_img, cycle, last_source_key)
+                    for cand in permuted_img:
                         if remaining <= 0.08:
                             break
                         seg_dur = round(min(base_img_dur, remaining), 3)
                         if seg_dur >= 0.6:
-                            motion = IMAGE_MOTIONS[(image_counter + cycle) % len(IMAGE_MOTIONS)]
+                            apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "image")
+                            motion = IMAGE_MOTIONS[(image_counter + cycle * 2 + cand.source_index) % len(IMAGE_MOTIONS)]
                             image_counter += 1
                             plans.append(
                                 SegmentPlan(
@@ -14978,9 +15427,12 @@ def build_segment_plan(
                                     cycle=cycle,
                                     media_kind="image",
                                     image_motion=motion,
+                                    hflip=apply_hflip,
+                                    scale_boost=1.0,
                                 )
                             )
                             remaining -= seg_dur
+                            last_source_key = str(cand.source)
                             added = True
                 if not added:
                     break
@@ -14997,6 +15449,9 @@ def build_segment_plan(
 
     playback_speed = 1.0 / setpts_factor
     actual_duration = sum(p.target_duration for p in plans)
+    mutant_hflips = sum(1 for p in plans if getattr(p, "hflip", False))
+    mutant_scales = sum(1 for p in plans if getattr(p, "scale_boost", 1.0) > 1.0)
+    mutant_cycles = max((getattr(p, "cycle", 0) for p in plans), default=0)
     summary = {
         "audio_duration": round(audio_total, 3),
         "original_audio_duration": round(orig_audio_total, 3),
@@ -15017,6 +15472,24 @@ def build_segment_plan(
         "image_segments": sum(1 for plan in plans if plan.media_kind == "image"),
         "images_used": len({plan.source_index for plan in plans if plan.media_kind == "image"}),
         "unique_clips_used": len({plan.source_index for plan in plans}),
+        "pacing_policy": "auto_broll_pacing_slicer_v1",
+        "total_shots": len(plans),
+        "sliced_sub_shots": sum(1 for plan in plans if plan.media_kind == "video" and plan.sub_slice_index > 0),
+        "punch_in_shots": sum(1 for plan in plans if plan.punch_in),
+        "magnetic_speech_sync": {
+            "enabled": bool(speech_boundaries),
+            "boundaries_found": len(speech_boundaries),
+            "applied": magnetic_snap_stats["applied"],
+            "sentence_ends": magnetic_snap_stats["sentence_ends"],
+            "clause_pauses": magnetic_snap_stats["clause_pauses"],
+            "cue_breaths": magnetic_snap_stats["cue_breaths"],
+        },
+        "mutant_reuse": {
+            "enabled": True,
+            "cycles": mutant_cycles,
+            "hflips_applied": mutant_hflips,
+            "scale_boosts_applied": mutant_scales,
+        },
         "dropped_clips": max(0, len(ordered_items) - len(plans)),
         "image_motion_summary": {
             motion: sum(1 for plan in plans if plan.image_motion == motion)
@@ -15034,9 +15507,13 @@ def visual_clean_candidate_sources(
     audio_total: float,
     min_speed: float,
     force_short: bool = True,
-) -> set[str]:
+) -> set[str] | None:
     if not valid_pairs:
         return set()
+    # Se o usuário enviar 2x mais vídeos (ou até 600 clipes), analisa o lote inteiro
+    # para que clipes limpos de qualquer ponto do lote possam substituir mídias poluídas.
+    if len(valid_pairs) <= 600:
+        return None
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
     try:
@@ -15047,7 +15524,7 @@ def visual_clean_candidate_sources(
         }
     except Exception:
         selected = {str(item[0]).replace("\\", "/") for item in valid_pairs}
-    reserve_target = max(audio_total * min_speed * 1.18, 8.0)
+    reserve_target = max(audio_total * min_speed * 3.5, 300.0)
     covered = 0.0
     for source, duration in valid_pairs:
         key = str(source).replace("\\", "/")
@@ -15227,7 +15704,7 @@ def make_segments_smart(
                     "cache_hit": bool(info.get("cache_hit")),
                 })
         performance_stop(job, "visual_windows")
-    allow_audio_trim = bool(job.options.get("allowAudioTrim", True))
+    allow_audio_trim = bool(job.options.get("allowAudioTrim", False))
     srt_file = None
     if subtitles:
         srt_file = subtitles[0] if Path(str(subtitles[0])).exists() else None
@@ -15300,6 +15777,17 @@ def make_segments_smart(
         f"segmentos={len(plans)} | reutilizados={summary.get('reused_segments', 0)} | "
         f"descartados={summary.get('dropped_clips', 0)} | resolução={w}x{h} | quality_boost={'on' if summary.get('quality_boost') else 'off'}."
     ))
+    _append_log(job, (
+        f"Auto B-Roll Pacing Slicer: {len(plans)} tomadas dinâmicas planejadas a partir de {summary.get('unique_clips_used', 0)} mídias "
+        f"({summary.get('sliced_sub_shots', 0)} cortes derivados, {summary.get('punch_in_shots', 0)} punch-ins de lente alternados)."
+    ))
+    mag_sync = summary.get("magnetic_speech_sync") or {}
+    if mag_sync.get("applied", 0) > 0:
+        _append_log(job, (
+            f"Sincronia Magnética de Fala: {mag_sync['applied']} cortes travados na respiração da locução "
+            f"({mag_sync.get('sentence_ends', 0)} fins de frase, {mag_sync.get('clause_pauses', 0)} pausas de pontuação, "
+            f"{mag_sync.get('cue_breaths', 0)} respiros)."
+        ))
 
     tone = str(
         getattr(job, "audio_analysis", {}).get("tone")
@@ -15344,6 +15832,7 @@ def make_segments_smart(
                 style_profile,
                 is_outro=plan.is_outro,
                 filmic_grade=filmic_grade,
+                hflip=getattr(plan, "hflip", False),
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
@@ -15377,6 +15866,9 @@ def make_segments_smart(
                 is_reversed=plan.is_reversed,
                 is_outro=plan.is_outro,
                 filmic_grade=filmic_grade,
+                punch_in=plan.punch_in,
+                hflip=getattr(plan, "hflip", False),
+                scale_boost=getattr(plan, "scale_boost", 1.0),
             )
             input_limit = max(0.5, (plan.target_duration / max(0.08, float(summary.get("setpts_factor", 1.0)))) + 1.25)
             seek_args = []
@@ -15430,8 +15922,8 @@ def make_segments_smart(
         with render_state_lock:
             completed_planned_duration += min(plan.target_duration, actual)
             has_comp = getattr(job, "has_visual_composition", False)
-            max_seg_pct = 58.0 if has_comp else 90.0
-            seg_span = 43.0 if has_comp else 75.0
+            max_seg_pct = 60.0 if has_comp else 92.0
+            seg_span = 45.0 if has_comp else 77.0
             job.percent = max(job.percent, min(max_seg_pct, 15.0 + (completed_planned_duration / max(1.0, audio_total)) * seg_span))
         return out, actual
 
@@ -15479,13 +15971,14 @@ def make_segments_smart(
         max_attempts = max(20, len(source_infos) * 4)
         attempts = 0
         fill_cycle = 0
+        last_fill_src = str(accepted_plans[-1].source) if accepted_plans else None
         while rendered_duration < target_floor and attempts < max_attempts:
             if fill_cycle == 0 and last_first_cycle < len(source_infos):
                 candidates = source_infos[last_first_cycle:]
                 cycle_value = 0
             else:
-                candidates = source_infos
                 cycle_value = max(1, fill_cycle)
+                candidates = generate_mutant_permutation(source_infos, cycle_value, last_fill_src)
             made_progress = False
             for source_index, src, dur in candidates:
                 if rendered_duration >= target_floor or attempts >= max_attempts:
@@ -15494,9 +15987,12 @@ def make_segments_smart(
                 remaining = audio_total - rendered_duration
                 if remaining <= 0.35:
                     break
-                target = min(max(0.01, dur * summary["setpts_factor"]), remaining + 0.75)
+                target_limit = 5.2 if not is_image_path(src) else 4.5
+                target = min(max(0.01, dur * summary["setpts_factor"]), remaining + 0.75, target_limit)
                 if target < 0.08:
                     continue
+                apply_hflip = (cycle_value % 2 == 1) and is_safe_for_hflip(src, "image" if is_image_path(src) else "video")
+                scale_boost = 1.08 if (cycle_value % 2 == 1 and not is_image_path(src)) else 1.0
                 fill_plan = SegmentPlan(
                     source=src,
                     raw_duration=dur,
@@ -15506,6 +16002,10 @@ def make_segments_smart(
                     cycle=cycle_value,
                     media_kind="image" if is_image_path(src) else "video",
                     image_motion=image_motion_for(src, source_index + cycle_value) if is_image_path(src) else "",
+                    sub_slice_index=fill_cycle,
+                    punch_in=(fill_cycle % 2 == 1),
+                    hflip=apply_hflip,
+                    scale_boost=scale_boost,
                 )
                 out, actual = render_one(fill_plan, next_segment_no)
                 next_segment_no += 1
@@ -15513,6 +16013,7 @@ def make_segments_smart(
                     segments.append(out)
                     accepted_plans.append(fill_plan)
                     rendered_duration += actual
+                    last_fill_src = str(src)
                     summary["fill_segments"] += 1
                     made_progress = True
             fill_cycle += 1
@@ -15584,6 +16085,8 @@ def make_segments_smart(
             f"Autoajuste de timeline: video real={rendered_duration:.2f}s | "
             f"ignorados={summary['skipped_segments']} | falhas_decode={summary['decode_failed_segments']} | extras={summary['fill_segments']}."
         ))
+    job.accepted_plans = list(accepted_plans)
+    job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
     return segments
 
 
@@ -15600,7 +16103,7 @@ def concat_segments_and_mux(
     audio_foundation_key: str = "",
 ):
     job.message = "Juntando segmentos sem estourar memória"
-    job.percent = max(job.percent, 59.0 if getattr(job, "has_visual_composition", False) else 92.0)
+    job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
     concat_list = work / "concat_segments.txt"
     # segment paths are relative to work in this file to keep Windows commands short
     valid_segments = []
@@ -15646,6 +16149,7 @@ def concat_segments_and_mux(
         ]
         run_cmd(job, cmd_concat, cwd=work, quiet_success=True)
         performance_stop(job, "concat")
+        job.percent = max(job.percent, 61.0 if getattr(job, "has_visual_composition", False) else 92.5)
         if graph:
             graph.commit(
                 stage="assembly",
@@ -15867,7 +16371,9 @@ def concat_segments_and_mux(
                     "composition_fallback_reason": human_render_error(exc),
                 })
                 _append_log(job, f"Composição unificada falhou; usando fluxo compatível. Motivo: {human_render_error(exc)}")
-                video_source = overlay_cta_on_video(job, video_source, cta, cta_times, work)
+                video_source = overlay_cta_on_video(
+                    job, video_source, cta, cta_times, work, target_duration=audio_total, base=65.0, span=15.0
+                )
                 if subtitle_ass and subtitle_ass.exists():
                     video_source = burn_subtitles_on_video(
                         job,
@@ -15875,7 +16381,9 @@ def concat_segments_and_mux(
                         subtitle_ass,
                         work,
                         "video_subtitled_fallback.mp4",
-                        audio_total,
+                        target_duration=audio_total,
+                        base=80.0,
+                        span=15.0,
                     )
         elif subtitle_ass and subtitle_ass.exists():
             video_source = burn_subtitles_on_video(
@@ -15906,8 +16414,8 @@ def concat_segments_and_mux(
     verify_anti_freeze_guarantee(job, video_source, audio_total)
 
     job.message = "Muxando áudio + vídeo final"
-    job.percent = 96
-    set_stage(job, "muxing", "Finalizando MP4", job.message, percent=96)
+    job.percent = max(job.percent, 96.0)
+    set_stage(job, "muxing", "Finalizando MP4", job.message, percent=max(job.percent, 96.0))
     # Important: do NOT use -movflags +faststart here. On some Windows PCs/projects it triggers
     # "Cannot allocate memory" during the moov atom second pass, even when the render is complete.
     mux_key = ""
@@ -15944,7 +16452,7 @@ def concat_segments_and_mux(
             "-movflags", "+faststart",
             str(out_file),
         ]
-        run_cmd(job, cmd_mux, cwd=work, quiet_success=True)
+        run_cmd(job, cmd_mux, total_duration=audio_total or None, base=96.0, span=3.0, cwd=work, quiet_success=True)
         performance_stop(job, "mux")
         if graph:
             graph.commit(
@@ -16036,10 +16544,117 @@ def extract_best_thumbnail_candidates(job: Job, out_file: Path, final_duration: 
     return []
 
 
+def _quick_probe_video_focal_x(path: Path | str) -> float:
+    """Calcula centróide de energia visual em <10ms quando o vídeo não possui análise em cache."""
+    try:
+        from PIL import Image, ImageFilter
+        resolved = Path(str(path))
+        if not resolved.exists():
+            return 0.50
+        cmd = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-ss", "0.5", "-i", str(resolved),
+            "-vframes", "1", "-s", "96x54", "-f", "image2pipe", "-vcodec", "ppm", "-"
+        ]
+        res = subprocess.run(cmd, capture_output=True, timeout=5)
+        if res.returncode == 0 and res.stdout:
+            with Image.open(io.BytesIO(res.stdout)) as img:
+                small = img.convert("L")
+                edges = small.filter(ImageFilter.FIND_EDGES)
+                pixels = list(edges.getdata())
+                w, h = small.size
+                weighted_x = 0.0
+                total_w = 0.0
+                for idx, val in enumerate(pixels):
+                    if val > 28:
+                        x = idx % w
+                        weighted_x += x * float(val)
+                        total_w += float(val)
+                if total_w > 50.0:
+                    raw_cx = (weighted_x / total_w) / float(w)
+                    return max(0.20, min(0.80, round(raw_cx, 3)))
+    except Exception:
+        pass
+    return 0.50
+
+
+def probe_media_focal_center_x(source_path: Path | str, media_kind: str = "video") -> float:
+    """Retorna a coordenada horizontal normalizada (0.0 a 1.0) do centro de interesse visual da mídia."""
+    default_focal = 0.50
+    try:
+        p = Path(str(source_path))
+        if is_image_path(p) or media_kind == "image":
+            cx, _ = probe_image_focal_anchor(p)
+            return max(0.20, min(0.80, float(cx)))
+
+        key_stem = p.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower() and isinstance(val, dict):
+                    face_meta = val.get("face_detector") or val.get("face_analysis") or {}
+                    if int(face_meta.get("face_frames", 0) or 0) > 0:
+                        face_cx = float(face_meta.get("median_center_x") or face_meta.get("center_x") or 0.50)
+                        return max(0.20, min(0.80, face_cx))
+                    metrics = val.get("metrics") or {}
+                    if "focal_center_x" in metrics:
+                        return max(0.20, min(0.80, float(metrics["focal_center_x"])))
+
+        return _quick_probe_video_focal_x(p)
+    except Exception:
+        return default_focal
+
+
+def build_saliency_crop_expression(
+    trajectory: list[dict[str, Any]],
+    frame_w: int = 1920,
+    frame_h: int = 1080,
+) -> tuple[int, int, str]:
+    """Constrói as dimensões e a expressão de corte dinâmico no tempo para o filtro crop do FFmpeg.
+    
+    Retorna (crop_w, crop_h, x_expr).
+    """
+    crop_w = int(round(frame_h * 9.0 / 16.0 / 2.0) * 2)
+    crop_h = frame_h
+    max_x = max(0, frame_w - crop_w)
+    default_x = int(round(max_x / 2.0 / 2.0) * 2)
+
+    if not trajectory:
+        return crop_w, crop_h, str(default_x)
+
+    def focal_to_crop_x(focal_pct: float) -> int:
+        target_center = float(focal_pct) * frame_w
+        raw_x = target_center - (crop_w / 2.0)
+        return max(0, min(max_x, int(round(raw_x / 2.0) * 2)))
+
+    simplified_segments: list[tuple[float, int]] = []
+    for seg in trajectory:
+        end_t = round(float(seg.get("end", 0.0)), 3)
+        cx = focal_to_crop_x(float(seg.get("focal_x", 0.50)))
+        if simplified_segments and abs(simplified_segments[-1][1] - cx) <= 24:
+            simplified_segments[-1] = (end_t, simplified_segments[-1][1])
+        else:
+            simplified_segments.append((end_t, cx))
+
+    if not simplified_segments:
+        return crop_w, crop_h, str(default_x)
+
+    if len(simplified_segments) == 1 or len(set(x for _, x in simplified_segments)) == 1:
+        return crop_w, crop_h, str(simplified_segments[0][1])
+
+    if len(simplified_segments) > 40:
+        simplified_segments = simplified_segments[:40]
+
+    x_expr = str(simplified_segments[-1][1])
+    for end_t, cx in reversed(simplified_segments[:-1]):
+        x_expr = f"if(lt(t\\,{end_t:.3f})\\,{cx}\\,{x_expr})"
+
+    return crop_w, crop_h, x_expr
+
+
 def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float) -> Path | None:
     """
     Gera automaticamente uma versão vertical 1080x1920 (9:16) para YouTube Shorts,
-    TikTok e Instagram Reels com fundo borrado (Pillowbox Blur) e áudio original.
+    TikTok e Instagram Reels com Reframe Inteligente por Saliência Visual.
     """
     if not out_file.exists() or final_duration < 1.0:
         return None
@@ -16048,19 +16663,64 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
         return None
 
     shorts_file = target_dir / f"{out_file.stem}_Shorts_9x16.mp4"
-    _append_log(job, f"Dual Export: gerando versão vertical 9:16 para Shorts/TikTok em {shorts_file.name}...")
+    mode = str((job.options or {}).get("dualExportMode") or "smart_crop").lower()
+    if mode not in {"smart_crop", "smart_blur", "smart_auto"}:
+        mode = "smart_crop"
+
+    accepted_plans = getattr(job, "accepted_plans", None) or []
+    trajectory: list[dict[str, Any]] = []
+    timeline_pos = 0.0
+    for plan in accepted_plans:
+        dur = float(plan.target_duration)
+        cx = probe_media_focal_center_x(plan.source, plan.media_kind)
+        if getattr(plan, "hflip", False):
+            cx = 1.0 - cx
+        trajectory.append({
+            "start": timeline_pos,
+            "end": timeline_pos + dur,
+            "duration": dur,
+            "focal_x": cx,
+        })
+        timeline_pos += dur
+
+    effective_mode = mode
+    if mode == "smart_auto":
+        significant_focals = [t for t in trajectory if abs(t["focal_x"] - 0.50) >= 0.08]
+        effective_mode = "smart_crop" if (len(significant_focals) >= max(1, len(trajectory) // 3)) else "smart_blur"
+
+    _append_log(
+        job,
+        f"Dual Export: gerando versão vertical 9:16 (modo: {effective_mode}, {len(trajectory)} tomadas analisadas) em {shorts_file.name}..."
+    )
 
     try:
-        filter_complex = (
-            "[0:v]split=2[bg][fg];"
-            "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=20:5[bg_blur];"
-            "[fg]scale=1080:-1[fg_center];"
-            "[bg_blur][fg_center]overlay=0:(H-h)/2[outv]"
-        )
-        
-        gpu_enabled = bool(job.options.get("gpu", False))
-        vcodec = "h264_nvenc" if gpu_enabled and encoder_available("h264_nvenc") else "libx264"
-        preset = "p4" if vcodec == "h264_nvenc" else "ultrafast"
+        orig_w, orig_h = 1920, 1080
+        try:
+            probe_w, probe_h = probe_image_dimensions(out_file)
+            if probe_w > 0 and probe_h > 0:
+                orig_w, orig_h = probe_w, probe_h
+        except Exception:
+            pass
+
+        crop_w, crop_h, x_expr = build_saliency_crop_expression(trajectory, frame_w=orig_w, frame_h=orig_h)
+
+        if effective_mode == "smart_crop":
+            filter_complex = (
+                f"[0:v]crop=w={crop_w}:h={crop_h}:x='{x_expr}':y=0,"
+                f"scale=1080:1920:flags=lanczos,setsar=1,format=yuv420p[outv]"
+            )
+        else:
+            filter_complex = (
+                "[0:v]split=2[bg][fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,boxblur=25:5[bg_blur];"
+                f"[fg]crop=w={crop_w}:h={crop_h}:x='{x_expr}':y=0,scale=1080:1920:force_original_aspect_ratio=decrease[fg_scaled];"
+                "[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[outv]"
+            )
+
+        gpu_enabled = bool((job.options or {}).get("gpu", False)) or turbo_enabled(job)
+        hw_enc = best_hardware_encoder("h264") if gpu_enabled else None
+        vcodec = hw_enc if (hw_enc and encoder_available(hw_enc)) else "libx264"
+        preset = "p4" if vcodec.endswith("_nvenc") else ("faster" if vcodec.endswith("_qsv") else ("balanced" if vcodec.endswith("_amf") else "ultrafast"))
 
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
@@ -16074,20 +16734,30 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
             str(shorts_file)
         ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
         if res.returncode == 0 and shorts_file.exists() and shorts_file.stat().st_size > 1000:
             mb_size = shorts_file.stat().st_size / (1024 * 1024)
-            _append_log(job, f"Dual Export Concluído: {shorts_file.name} ({mb_size:.1f} MB) gerado com sucesso para Shorts/TikTok.")
+            _append_log(
+                job,
+                f"Dual Export Concluído: {shorts_file.name} ({mb_size:.1f} MB, {effective_mode}) gerado com sucesso para Shorts/TikTok."
+            )
             if hasattr(job, "options") and isinstance(job.options, dict):
                 job.options["shorts_export"] = shorts_file.name
+            job.timeline_summary["shorts_export"] = {
+                "file": shorts_file.name,
+                "mode": effective_mode,
+                "size_mb": round(mb_size, 2),
+                "shots_analyzed": len(trajectory),
+            }
             return shorts_file
         else:
             if vcodec != "libx264":
                 cmd[cmd.index("-c:v") + 1] = "libx264"
                 cmd[cmd.index("-preset") + 1] = "veryfast"
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
                 if res.returncode == 0 and shorts_file.exists():
-                    _append_log(job, f"Dual Export Concluído (CPU fallback): {shorts_file.name} gerado.")
+                    mb_size = shorts_file.stat().st_size / (1024 * 1024)
+                    _append_log(job, f"Dual Export Concluído (CPU fallback): {shorts_file.name} ({mb_size:.1f} MB) gerado.")
                     return shorts_file
     except Exception as exc:
         _append_log(job, f"Aviso no Dual Export 9:16: {exc}")
@@ -17446,6 +18116,8 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
             raise RuntimeError("FFmpeg nao retornou medicao loudness valida")
         mastered = work / "audio_mastered.wav"
         second_filter = second_pass_filter(measurement, master_profile) + f",alimiter=limit={limiter_value(master_profile)}"
+        has_comp = getattr(job, "has_visual_composition", False)
+        job.percent = max(job.percent, 64.0 if has_comp else 95.0)
         run_cmd(
             job,
             [
@@ -17458,6 +18130,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
             cwd=work,
             quiet_success=True,
         )
+        job.percent = max(job.percent, 65.0 if has_comp else 95.5)
         # The measured two-pass parameters deterministically define the second
         # pass. Avoid decoding the complete mastered file a third time merely
         # to repeat the same loudness measurement.
@@ -17881,6 +18554,11 @@ def render_worker(job_id: str):
             f"intro={intro_seconds:.2f}s | timeline_final={timeline_total:.2f}s."
         ))
         job.percent = max(job.percent, 15)
+        job.has_visual_composition = bool(
+            job.options.get("ctaLanguage")
+            or job.options.get("selectedCta")
+            or (subtitles and len(subtitles) > 0 and not job.options.get("noSubtitles"))
+        )
 
         subtitle_ass = None
         if subtitles:
@@ -17985,6 +18663,7 @@ def render_worker(job_id: str):
             else:
                 job.timeline_summary = dict(segment_metadata.get("timeline_summary") or {})
                 job.continuity_summary = dict(segment_metadata.get("continuity_summary") or {})
+                job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
                 _append_log(job, f"Render Graph: {len(segments)} segmento(s) reutilizado(s) do cache.")
         if not segments:
             segments = make_segments_smart(
