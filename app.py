@@ -6899,6 +6899,7 @@ def _classify_visual_analysis(
     med_bottom = float(metrics.get("bottom_edge_share") or 0.0)
     med_skin = float(metrics.get("center_skin_ratio") or 0.0)
     med_head_skin = float(metrics.get("head_skin_ratio") or 0.0)
+    med_torso_skin = float(metrics.get("torso_skin_ratio") or 0.0)
     med_center = float(metrics.get("center_edge_ratio") or 0.0)
     text_score = float(metrics.get("text_score") or 0.0)
     data_score = float(metrics.get("data_score") or 0.0)
@@ -8530,8 +8531,27 @@ def apply_visual_clean_filter(
     accepted_clean_duration = 0.0
     hard_rejected_count = 0
     safety_halted = False
+    total_valid = max(1, len(valid_pairs))
+
+    cur_pct = getattr(job, "percent", 15.0) or 15.0
+    set_stage(
+        job,
+        "rendering",
+        "Filtrando integridade visual",
+        f"Analisando qualidade e integridade visual ({total_valid} clipes)...",
+        percent=max(cur_pct, 16.0),
+    )
 
     for idx, (source, duration) in enumerate(valid_pairs):
+        if idx % 4 == 0 or idx == total_valid - 1:
+            step_pct = round(16.0 + (idx / total_valid) * 6.0, 1)
+            if hasattr(job, "percent"):
+                job.percent = max(getattr(job, "percent", 15.0), step_pct)
+            if hasattr(job, "stage_label"):
+                job.stage_label = f"Filtrando clipes ({idx + 1}/{total_valid})"
+            if hasattr(job, "message"):
+                job.message = f"Analisando integridade visual ({idx + 1}/{total_valid})"
+
         position_ratio = cumulative / raw_total
         cumulative += duration
         remaining_unscanned_duration = max(0.0, remaining_unscanned_duration - duration)
@@ -19114,7 +19134,8 @@ def render_worker(job_id: str):
 
         job.status = "running"
         set_system_keep_awake(True, "render")
-        job.started_at = time.time()
+        if not job.started_at:
+            job.started_at = time.time()
         initial_duration = max(0.0, float(job.options.get("estimatedDurationSeconds") or 0.0))
         initial_estimate = render_time_estimate(initial_duration, job.options) if initial_duration > 0 else {}
         if initial_duration > 0 and not bool(initial_estimate.get("budget_feasible", True)):

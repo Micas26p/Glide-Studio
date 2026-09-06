@@ -1320,7 +1320,9 @@ function mediaSummary(project){
   const vCount = vList.filter(isVideo).length;
   const iCount = vList.filter(isImage).length;
   const mediaLabel = (vCount && iCount) ? `${vCount} vid + ${iCount} foto` : (iCount ? `${iCount} foto` : `${vCount} vid`);
-  return `${mediaLabel} | ${(files.audios || []).length} aud | ${(files.subtitles || []).length} Textos | ${(files.captions || []).length} Legendas | ${formatTime(duration)} | ${missing}${retry}`;
+  const durLabel = duration > 0 ? `${formatTime(duration)} · ` : '';
+  const capLabel = (files.captions || []).length > 0 ? ` | ${(files.captions || []).length} Legendas` : '';
+  return `${durLabel}${mediaLabel} | ${(files.audios || []).length} aud | ${(files.subtitles || []).length} Textos${capLabel} | ${missing}${retry}`;
 }
 function projectVisualReport(project){
   const report = project?.lastRenderSummary || {};
@@ -4642,23 +4644,23 @@ function setRenderProjectMeta({projectName = '', queueIndex = 0, renderLabel = '
 function formatEtaSummary(eta, status = 'running'){
   if(!eta) return 'Tempo restante: calculando...';
   const elapsed = formatTime(eta.elapsed_seconds || 0);
-  if(status !== 'running') return `Tempo total ${elapsed}`;
+  if(status !== 'running') return `Tempo de render: ${elapsed}`;
   const limitText = Number(eta.budget_seconds || 0) > 0 ? ` · limite ${formatTime(eta.budget_seconds || 0)}` : '';
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
   if(stateName === 'warming_up' || stateName === 'unknown'){
-    return `Decorrido ${elapsed} - calculando tempo restante...${limitText}`;
+    return `Decorrido no render ${elapsed} - calculando tempo restante...${limitText}`;
   }
   if(stateName === 'variable' || Number(eta.remaining_min_seconds) || Number(eta.remaining_max_seconds)){
     const min = Number(eta.remaining_min_seconds || 0);
     const max = Number(eta.remaining_max_seconds || 0);
     if(stateName === 'variable' && min && max && max > min){
-      return `Decorrido ${elapsed} - tempo estimado variável: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+      return `Decorrido no render ${elapsed} - restante estimado variável: ${formatTime(min)}-${formatTime(max)}${limitText}`;
     }
     if(min && max && max > min * 1.12){
-      return `Decorrido ${elapsed} - restante aprox. ${formatTime(min)}-${formatTime(max)}${limitText}`;
+      return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(min)}-${formatTime(max)}${limitText}`;
     }
   }
-  return `Decorrido ${elapsed} - restante aprox. ${formatTime(eta.estimated_remaining_seconds || 0)}${limitText}`;
+  return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(eta.estimated_remaining_seconds || 0)}${limitText}`;
 }
 
 function renderDoneIsValidated(job){
@@ -4788,7 +4790,8 @@ function normalizeRenderStage(stage){
   const safe = String(stage || 'preparing').toLowerCase();
   if(safe === 'finalizing') return 'muxing';
   if(safe === 'clips') return 'rendering';
-  if(safe === 'legendas' || safe === 'subtitles' || safe === 'analyzing_subtitles') return 'cta';
+  if(safe === 'analyzing_subtitles') return 'preparing';
+  if(safe === 'legendas' || safe === 'subtitles' || safe === 'composing_cta') return 'cta';
   if(safe === 'queue_done' || safe === 'queue-done') return 'queue_done';
   return RENDER_SHOWCASE[safe] ? safe : 'rendering';
 }
