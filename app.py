@@ -1128,6 +1128,7 @@ class SegmentPlan:
     punch_in: bool = False
     hflip: bool = False
     scale_boost: float = 1.0
+    clean_roi: tuple[float, float, float, float] | None = None
 
 
 @dataclass
@@ -6506,6 +6507,20 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     cells = [0] * (grid_w * grid_h)
     center_x0 = int(w * 0.30)
     center_x1 = int(w * 0.70)
+    ui_top_limit = max(2, int(h * 0.08))
+    ui_bottom_limit = min(h - 2, int(h * 0.90))
+    ui_top_edges = 0
+    ui_bottom_edges = 0
+    ui_top_corners = 0
+    ui_bottom_center = 0
+    corner_x_left = int(w * 0.26)
+    corner_x_right = int(w * 0.74)
+    corner_y_top = int(h * 0.28)
+    corner_y_bottom = int(h * 0.72)
+    tl_edges = 0
+    tr_edges = 0
+    bl_edges = 0
+    br_edges = 0
     for y in range(1, h - 1):
         row_off = y * w
         for x in range(1, w - 1):
@@ -6525,6 +6540,24 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
                     bottom_edges += 1
                 if center_x0 <= x <= center_x1:
                     center_edges += 1
+                if y <= ui_top_limit:
+                    ui_top_edges += 1
+                    if x < int(w * 0.28) or x > int(w * 0.72):
+                        ui_top_corners += 1
+                elif y >= ui_bottom_limit:
+                    ui_bottom_edges += 1
+                    if int(w * 0.30) <= x <= int(w * 0.70):
+                        ui_bottom_center += 1
+                if y <= corner_y_top:
+                    if x <= corner_x_left:
+                        tl_edges += 1
+                    elif x >= corner_x_right:
+                        tr_edges += 1
+                elif y >= corner_y_bottom:
+                    if x <= corner_x_left:
+                        bl_edges += 1
+                    elif x >= corner_x_right:
+                        br_edges += 1
                 cx = min(grid_w - 1, x // cell_w)
                 cy = min(grid_h - 1, y // cell_h)
                 cells[cy * grid_w + cx] += 1
@@ -6557,6 +6590,20 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         "top_edge_share": round(top_edges / max(1, edge_count), 5),
         "middle_edge_share": round(middle_edges / max(1, edge_count), 5),
         "bottom_edge_share": round(bottom_edges / max(1, edge_count), 5),
+        "ui_top_share": round(ui_top_edges / max(1, edge_count), 5),
+        "ui_bottom_share": round(ui_bottom_edges / max(1, edge_count), 5),
+        "ui_top_corner_ratio": round(ui_top_corners / max(1, ui_top_edges), 5),
+        "ui_bottom_center_ratio": round(ui_bottom_center / max(1, ui_bottom_edges), 5),
+        "tl_edges": tl_edges,
+        "tr_edges": tr_edges,
+        "bl_edges": bl_edges,
+        "br_edges": br_edges,
+        "tl_edge_density": round(tl_edges / max(1, corner_x_left * corner_y_top), 5),
+        "tr_edge_density": round(tr_edges / max(1, (w - corner_x_right) * corner_y_top), 5),
+        "bl_edge_density": round(bl_edges / max(1, corner_x_left * (h - corner_y_bottom)), 5),
+        "br_edge_density": round(br_edges / max(1, (w - corner_x_right) * (h - corner_y_bottom)), 5),
+        "min_active_row": min(active_row_indexes) if active_row_indexes else 0,
+        "max_active_row": max(active_row_indexes) if active_row_indexes else h,
         "center_skin_ratio": round(center_skin / max(1, center_pixels), 5),
         "head_skin_ratio": round(head_skin / max(1, head_pixels), 5),
         "torso_skin_ratio": round(torso_skin / max(1, torso_pixels), 5),
@@ -6566,6 +6613,262 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         "saturation_mean": round(saturation_total / total, 5),
     }
     return metrics, bytes(gray), bytes(edge_mask)
+
+
+def detect_ui_chrome_and_screenshot(
+    metrics: dict[str, Any],
+    frame_w: int = VISUAL_CLEAN_FRAME_W,
+    frame_h: int = VISUAL_CLEAN_FRAME_H,
+) -> tuple[str, tuple[float, float, float, float] | None]:
+    """
+    Detects user interface elements (UI Chrome) from smartphone screenshots,
+    app captures, social media prints or desktop browsers.
+
+    Returns:
+    - ("reject_ui_screenshot", None) if the image is an app UI, chat, settings,
+      or text-feed screenshot that should be rejected outright.
+    - ("rescue_ui_crop", (x0, y0, x1, y1)) if the image has a clean photographic/video
+      subject in the center but has mobile/browser UI chrome on the top/bottom borders.
+    - ("clean", None) if no significant UI chrome was detected.
+    """
+    stdev = float(metrics.get("stdev") or 0.0)
+    if stdev < 7.0:
+        return "clean", None
+
+    ui_top_share = float(metrics.get("ui_top_share") or 0.0)
+    ui_bottom_share = float(metrics.get("ui_bottom_share") or 0.0)
+    ui_top_corner_ratio = float(metrics.get("ui_top_corner_ratio") or 0.0)
+    ui_bottom_center_ratio = float(metrics.get("ui_bottom_center_ratio") or 0.0)
+    middle_share = float(metrics.get("middle_edge_share") or 0.0)
+    top_share = float(metrics.get("top_edge_share") or 0.0)
+    bottom_share = float(metrics.get("bottom_edge_share") or 0.0)
+    active_rows = float(metrics.get("active_rows") or 0.0)
+    text_score = float(metrics.get("text_score") or 0.0)
+    data_score = float(metrics.get("data_score") or 0.0)
+
+    # Verifica aspect ratio da imagem se disponível
+    img_w = float(metrics.get("width") or 0)
+    img_h = float(metrics.get("height") or 0)
+    is_mobile_tall = (img_h / max(1.0, img_w)) >= 1.70 if (img_w > 0 and img_h > 0) else False
+
+    # 1. Indicadores de Barra de Status no Topo (Relógio / Bateria / Wi-Fi)
+    has_status_bar = (
+        (ui_top_share >= 0.07 and ui_top_corner_ratio >= 0.48)
+        or (ui_top_share >= 0.12)
+        or (top_share >= 0.38 and ui_top_share >= 0.06 and is_mobile_tall)
+    )
+
+    # 2. Indicadores de Home Bar / Barra de Navegação no Rodapé (iOS Home Indicator / Android Bar / App Tabs)
+    has_home_bar = (
+        (ui_bottom_share >= 0.06 and ui_bottom_center_ratio >= 0.48)
+        or (ui_bottom_share >= 0.11)
+        or (bottom_share >= 0.38 and ui_bottom_share >= 0.06 and is_mobile_tall)
+    )
+
+    is_ui_screen = (has_status_bar and has_home_bar) or (
+        is_mobile_tall and (has_status_bar or has_home_bar)
+    )
+
+    if not is_ui_screen:
+        return "clean", None
+
+    # CASO A: Screenshot de Chat / Feed de Texto / Configurações / Menus de Apps
+    # A tela inteira está tomada por texto ou dados estruturados
+    is_chat_or_feed = (
+        middle_share >= 0.50
+        or text_score >= 0.58
+        or data_score >= 0.55
+        or (active_rows >= 0.40 and text_score >= 0.48)
+    )
+    if is_chat_or_feed:
+        return "reject_ui_screenshot", None
+
+    # CASO B: Foto Válida com UI Chrome nas Bordas (Screenshot de Foto / Post Social com Foto Central)
+    # Recorta as extremidades da interface para resgatar a fotografia limpa
+    top_cut = 0.08 if has_status_bar else 0.0
+    bottom_cut = 0.90 if has_home_bar else 1.0
+
+    # Garantir que sobra pelo menos 58% da imagem útil
+    if (bottom_cut - top_cut) >= 0.58:
+        return "rescue_ui_crop", (0.0, round(top_cut, 3), 1.0, round(bottom_cut, 3))
+
+    return "clean", None
+
+
+def calculate_clean_image_roi(metrics: dict[str, Any], frame_w: int = VISUAL_CLEAN_FRAME_W, frame_h: int = VISUAL_CLEAN_FRAME_H) -> tuple[float, float, float, float] | None:
+    """
+    Identifies whether text or watermarks on an image are localized strictly in the
+    periphery (lower-third or top bar). If so, returns a normalized clean bounding box
+    (x0, y0, x1, y1) that eliminates the pollution while preserving at least 58% of the image.
+    If pollution covers the central subject, returns None.
+    """
+    # Caso 0: Detector Especializado de UI Chrome / Screenshots
+    ui_status, ui_roi = detect_ui_chrome_and_screenshot(metrics, frame_w, frame_h)
+    if ui_status == "reject_ui_screenshot":
+        return None
+    if ui_status == "rescue_ui_crop" and ui_roi:
+        return ui_roi
+
+    bottom_share = float(metrics.get("bottom_edge_share") or 0.0)
+    top_share = float(metrics.get("top_edge_share") or 0.0)
+    middle_share = float(metrics.get("middle_edge_share") or 0.0)
+    min_row = int(metrics.get("min_active_row") or 0)
+    max_row = int(metrics.get("max_active_row") or frame_h)
+    stdev = float(metrics.get("stdev") or 0.0)
+
+    # Imagens sem contraste mínimo ou vazias não devem ser resgatadas
+    if stdev < 7.0:
+        return None
+
+    # Se o centro for excessivamente denso em bordas/texto central (memes, cartazes), não recortar
+    if middle_share >= 0.52:
+        return None
+
+    # Caso 1: Poluição no Rodapé / Terço Inferior (Lower-Third)
+    # Típico de legendas de matérias, créditos de fotógrafos e marcas d'água de agências
+    is_bottom_polluted = (
+        bool(metrics.get("lower_third"))
+        or (bottom_share >= 0.40 and bottom_share > middle_share)
+        or (min_row >= int(frame_h * 0.55) and min_row < frame_h)
+    )
+    if is_bottom_polluted and top_share <= 0.35:
+        if min_row >= int(frame_h * 0.58):
+            cut_y = max(0.60, min(0.82, (min_row - 2) / float(frame_h)))
+        elif bool(metrics.get("lower_third")):
+            cut_y = 0.68
+        else:
+            cut_y = 0.72
+        if cut_y >= 0.58:
+            return (0.0, 0.0, 1.0, round(cut_y, 3))
+
+    # Caso 2: Poluição no Topo / Cabeçalho
+    # Típico de barras de notificação de celulares, títulos em cima, banners
+    is_top_polluted = (
+        (top_share >= 0.42 and top_share > middle_share and bottom_share <= 0.35)
+        or (max_row <= int(frame_h * 0.38) and max_row > 0 and middle_share <= 0.38)
+    )
+    if is_top_polluted:
+        if max_row <= int(frame_h * 0.35):
+            cut_y = min(0.35, max(0.18, (max_row + 2) / float(frame_h)))
+        else:
+            cut_y = 0.25
+        if (1.0 - cut_y) >= 0.58:
+            return (0.0, round(cut_y, 3), 1.0, 1.0)
+
+    return None
+
+
+def _sample_positions_for_video(duration: float, count: int, start_offset: float = 0.0) -> list[float]:
+    if count <= 0:
+        return []
+    safe_window = max(0.12, float(duration or 0.0))
+    sample_start = max(0.0, float(start_offset or 0.0))
+    sample_end = sample_start + max(0.04, safe_window - min(0.08, safe_window * 0.03))
+    return [
+        round(min(sample_end, sample_start + max(0.04, (sample_end - sample_start) * (0.04 + 0.92 * index / max(1, count - 1)))), 3)
+        for index in range(count)
+    ]
+
+
+def calculate_clean_video_trim(
+    metrics: dict[str, Any],
+    duration: float,
+    min_clean_duration: float = 2.5,
+) -> dict[str, Any] | None:
+    """
+    Identifies whether visual pollution (text, intro logo, presenter talking head, data card)
+    is confined strictly to the video's boundaries (intro vignette or outro credits).
+    If a contiguous clean body of >= min_clean_duration seconds exists,
+    calculates safe clean_start and clean_end boundaries.
+    """
+    temporal = metrics.get("temporal") if isinstance(metrics.get("temporal"), dict) else {}
+    sample_count = int(temporal.get("sample_count") or 0)
+    if sample_count < 3 or duration < (min_clean_duration + 0.8):
+        return None
+
+    positions = list(temporal.get("sample_positions") or [])
+    if not positions or len(positions) != sample_count:
+        positions = _sample_positions_for_video(duration, sample_count)
+
+    text_scores = list(temporal.get("text_scores") or [])
+    data_scores = list(temporal.get("data_scores") or [])
+    presenter_scores = list(temporal.get("presenter_scores") or [])
+    pollution_scores = list(temporal.get("pollution_scores") or [])
+
+    is_polluted: list[bool] = []
+    for i in range(sample_count):
+        t_s = text_scores[i] if i < len(text_scores) else 0.0
+        d_s = data_scores[i] if i < len(data_scores) else 0.0
+        p_s = presenter_scores[i] if i < len(presenter_scores) else 0.0
+        pol_s = pollution_scores[i] if i < len(pollution_scores) else 0.0
+        polluted = (t_s >= 0.64) or (d_s >= 0.58) or (p_s >= 0.62) or (pol_s >= 0.70)
+        is_polluted.append(polluted)
+
+    if not any(is_polluted):
+        return None  # Entire clip is clean, no trim needed
+    if all(is_polluted):
+        return None  # 100% polluted, cannot be rescued
+
+    first_clean = 0
+    while first_clean < sample_count and is_polluted[first_clean]:
+        first_clean += 1
+
+    last_clean = sample_count - 1
+    while last_clean >= 0 and is_polluted[last_clean]:
+        last_clean -= 1
+
+    if first_clean > last_clean:
+        return None
+
+    # Middle must be completely clean (no dirty frames between first_clean and last_clean)
+    if any(is_polluted[j] for j in range(first_clean, last_clean + 1)):
+        return None
+
+    clean_sample_count = last_clean - first_clean + 1
+    if clean_sample_count < 2 or (clean_sample_count / float(sample_count)) < 0.30:
+        return None
+
+    if first_clean == 0:
+        clean_start = 0.0
+    else:
+        prev_pos = positions[first_clean - 1]
+        curr_pos = positions[first_clean]
+        clean_start = round(min(duration - min_clean_duration, (prev_pos + curr_pos) / 2.0 + 0.10), 3)
+
+    if last_clean == sample_count - 1:
+        clean_end = round(duration, 3)
+    else:
+        curr_pos = positions[last_clean]
+        next_pos = positions[last_clean + 1]
+        clean_end = round(max(clean_start + min_clean_duration, (curr_pos + next_pos) / 2.0 - 0.10), 3)
+
+    clean_duration = round(clean_end - clean_start, 3)
+    if clean_duration < min_clean_duration:
+        return None
+
+    has_intro_trim = clean_start >= 0.35
+    has_outro_trim = (duration - clean_end) >= 0.35
+    if not has_intro_trim and not has_outro_trim:
+        return None
+
+    if has_intro_trim and has_outro_trim:
+        trim_type = "intro_outro"
+    elif has_intro_trim:
+        trim_type = "intro"
+    else:
+        trim_type = "outro"
+
+    return {
+        "can_trim": True,
+        "trim_type": trim_type,
+        "clean_start": clean_start,
+        "clean_end": clean_end,
+        "clean_duration": clean_duration,
+        "trimmed_intro_seconds": clean_start,
+        "trimmed_outro_seconds": round(duration - clean_end, 3),
+        "clean_sample_count": clean_sample_count,
+        "total_samples": sample_count,
+    }
 
 
 def _classify_visual_analysis(
@@ -6700,14 +7003,27 @@ def _classify_visual_analysis(
     contextual_override = contextual_person and (
         documentary_context or scene_change_ratio >= 0.12 or med_diff >= 8.5
     )
+    is_historical = bool(metrics.get("is_historical_monochrome"))
     image_quality_low = bool(
         is_image and (
-            med_stdev < 8.0
-            or float(metrics.get("quality_score") or 1.0) < 0.42
+            (med_stdev < 6.5 if is_historical else med_stdev < 8.0)
+            or float(metrics.get("quality_score") or 1.0) < (0.35 if is_historical else 0.42)
         )
     )
 
-    classified.update({"category": "clean", "action": "keep", "reason": "clipe limpo", "confidence": 0.0})
+    ui_status, ui_roi = detect_ui_chrome_and_screenshot(metrics) if is_image else ("clean", None)
+    corner_wm = metrics.get("corner_watermark") if isinstance(metrics.get("corner_watermark"), dict) else {}
+    has_corner_wm = bool(corner_wm.get("has_watermark"))
+
+    if is_historical and is_image:
+        classified.update({
+            "category": "historical_photo",
+            "action": "keep",
+            "reason": "fotografia historica/documental monocromatica preservada",
+            "confidence": 0.95,
+        })
+    else:
+        classified.update({"category": "clean", "action": "keep", "reason": "clipe limpo", "confidence": 0.0})
     if med_mean <= VIDEO_BLACK_YAVG_MAX and med_stdev <= 4.0 and med_edge <= 0.004:
         classified.update({"category": "black_screen", "action": "hard_reject", "reason": "tela preta/sem conteudo visual", "confidence": 1.0})
     elif image_quality_low:
@@ -6717,22 +7033,132 @@ def _classify_visual_analysis(
             "reason": "imagem com qualidade visual insuficiente",
             "confidence": 0.88,
         })
+    elif ui_status == "reject_ui_screenshot":
+        classified.update({
+            "category": "ui_screenshot",
+            "action": "hard_reject",
+            "reason": "screenshot de aplicativo, conversa ou interface digital",
+            "confidence": 0.94,
+        })
+    elif ui_status == "rescue_ui_crop" and ui_roi:
+        classified.update({
+            "category": "rescued_clean_roi",
+            "action": "keep",
+            "reason": "imagem resgatada com recorte de interface (eliminou barra de status/navegação)",
+            "confidence": 0.88,
+            "clean_roi": ui_roi,
+        })
+        if isinstance(metrics, dict):
+            metrics["clean_roi"] = ui_roi
+    elif has_corner_wm:
+        worst_c = str(corner_wm.get("worst_corner") or "periferico")
+        c_label = {
+            "top_left": "superior esquerdo",
+            "top_right": "superior direito",
+            "bottom_left": "inferior esquerdo",
+            "bottom_right": "inferior direito",
+        }.get(worst_c, worst_c)
+        clean_roi = calculate_clean_image_roi(metrics) if is_image else None
+        video_trim = calculate_clean_video_trim(metrics, float(classified.get("duration") or 0.0)) if not is_image else None
+        if clean_roi:
+            classified.update({
+                "category": "rescued_clean_roi",
+                "action": "keep",
+                "reason": f"imagem resgatada com recorte limpo (eliminou marca d'agua no canto {c_label})",
+                "confidence": 0.88,
+                "clean_roi": clean_roi,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_roi"] = clean_roi
+        elif video_trim and video_trim["clean_duration"] >= 2.5:
+            classified.update({
+                "category": "rescued_trimmed_video",
+                "action": "keep",
+                "reason": f"video resgatado com recorte de {video_trim['trim_type']} (eliminou marca d'agua de vinheta no canto {c_label})",
+                "confidence": 0.90,
+                "clean_trim": video_trim,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_trim"] = video_trim
+                metrics["clean_start_offset"] = video_trim["clean_start"]
+                metrics["clean_end_offset"] = video_trim["clean_end"]
+                metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        else:
+            classified.update({
+                "category": "watermark_corner",
+                "action": "hard_reject",
+                "reason": f"marca d'agua / logo persistente detectado no canto {c_label}",
+                "confidence": round(float(corner_wm.get("worst_score") or 0.92), 2),
+                "corner_watermark": corner_wm,
+            })
     elif text_confirmed:
-        confidence = min(0.99, max(max_text, text_ratio + 0.15))
-        classified.update({
-            "category": "text_dominant",
-            "action": "hard_reject",
-            "reason": "muitos textos, legenda ou marca visual persistente",
-            "confidence": confidence,
-        })
+        clean_roi = calculate_clean_image_roi(metrics) if is_image else None
+        video_trim = calculate_clean_video_trim(metrics, float(classified.get("duration") or 0.0)) if not is_image else None
+        if clean_roi:
+            classified.update({
+                "category": "rescued_clean_roi",
+                "action": "keep",
+                "reason": "imagem resgatada com recorte limpo (eliminou rodapé/topo poluído)",
+                "confidence": 0.88,
+                "clean_roi": clean_roi,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_roi"] = clean_roi
+        elif video_trim and video_trim["clean_duration"] >= 2.5:
+            classified.update({
+                "category": "rescued_trimmed_video",
+                "action": "keep",
+                "reason": f"video resgatado com recorte de {video_trim['trim_type']} (trecho limpo de {video_trim['clean_duration']:.1f}s preservado)",
+                "confidence": 0.90,
+                "clean_trim": video_trim,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_trim"] = video_trim
+                metrics["clean_start_offset"] = video_trim["clean_start"]
+                metrics["clean_end_offset"] = video_trim["clean_end"]
+                metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        else:
+            confidence = min(0.99, max(max_text, text_ratio + 0.15))
+            classified.update({
+                "category": "text_dominant",
+                "action": "hard_reject",
+                "reason": "muitos textos, legenda ou marca visual persistente",
+                "confidence": confidence,
+            })
     elif data_confirmed:
-        confidence = min(0.99, max(max_data, data_ratio + 0.15))
-        classified.update({
-            "category": "data_dominant",
-            "action": "hard_reject",
-            "reason": "dados na tela, gráficos, tabelas ou telemetria excessiva",
-            "confidence": confidence,
-        })
+        clean_roi = calculate_clean_image_roi(metrics) if is_image else None
+        video_trim = calculate_clean_video_trim(metrics, float(classified.get("duration") or 0.0)) if not is_image else None
+        if clean_roi:
+            classified.update({
+                "category": "rescued_clean_roi",
+                "action": "keep",
+                "reason": "imagem resgatada com recorte limpo (eliminou dados/telemetria de borda)",
+                "confidence": 0.88,
+                "clean_roi": clean_roi,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_roi"] = clean_roi
+        elif video_trim and video_trim["clean_duration"] >= 2.5:
+            classified.update({
+                "category": "rescued_trimmed_video",
+                "action": "keep",
+                "reason": f"video resgatado com recorte de {video_trim['trim_type']} (trecho limpo de {video_trim['clean_duration']:.1f}s preservado)",
+                "confidence": 0.90,
+                "clean_trim": video_trim,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_trim"] = video_trim
+                metrics["clean_start_offset"] = video_trim["clean_start"]
+                metrics["clean_end_offset"] = video_trim["clean_end"]
+                metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        else:
+            confidence = min(0.99, max(max_data, data_ratio + 0.15))
+            classified.update({
+                "category": "data_dominant",
+                "action": "hard_reject",
+                "reason": "dados na tela, gráficos, tabelas ou telemetria excessiva",
+                "confidence": confidence,
+            })
     elif presenter_confirmed and contextual_override:
         classified.update({
             "category": "person_contextual",
@@ -6741,20 +7167,66 @@ def _classify_visual_analysis(
             "confidence": min(0.96, max(subject_relevance, max_presenter)),
         })
     elif presenter_confirmed:
-        confidence = min(0.98, max(max_presenter, presenter_ratio + 0.15))
-        classified.update({
-            "category": "presenter",
-            "action": "hard_reject",
-            "reason": "apresentador fixo, avatar ou talking head persistente",
-            "confidence": confidence,
-        })
-    elif max_presenter >= thresholds["presenter"] - 0.10 or text_ratio > 0.0 or data_ratio > 0.0 or pollution_ratio >= 0.45:
-        classified.update({
-            "category": "suspect",
-            "action": "soft_suspect",
-            "reason": "evidencia visual ambigua; preservado para revisao/fallback",
-            "confidence": min(0.79, max(max_presenter, max_text, max_data, pollution_ratio)),
-        })
+        video_trim = calculate_clean_video_trim(metrics, float(classified.get("duration") or 0.0)) if not is_image else None
+        if video_trim and video_trim["clean_duration"] >= 2.5:
+            classified.update({
+                "category": "rescued_trimmed_video",
+                "action": "keep",
+                "reason": f"video resgatado com recorte de {video_trim['trim_type']} (apresentador de vinheta eliminado; {video_trim['clean_duration']:.1f}s limpos)",
+                "confidence": 0.90,
+                "clean_trim": video_trim,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_trim"] = video_trim
+                metrics["clean_start_offset"] = video_trim["clean_start"]
+                metrics["clean_end_offset"] = video_trim["clean_end"]
+                metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        else:
+            confidence = min(0.98, max(max_presenter, presenter_ratio + 0.15))
+            classified.update({
+                "category": "presenter",
+                "action": "hard_reject",
+                "reason": "apresentador fixo, avatar ou talking head persistente",
+                "confidence": confidence,
+            })
+    elif (
+        max_presenter >= thresholds["presenter"] - 0.10
+        or text_ratio > 0.0
+        or data_ratio > 0.0
+        or (pollution_ratio >= 0.45 and not is_historical)
+    ):
+        clean_roi = calculate_clean_image_roi(metrics) if is_image else None
+        video_trim = calculate_clean_video_trim(metrics, float(classified.get("duration") or 0.0)) if not is_image else None
+        if clean_roi:
+            classified.update({
+                "category": "rescued_clean_roi",
+                "action": "keep",
+                "reason": "imagem resgatada com recorte limpo (eliminou rodapé/topo poluído)",
+                "confidence": 0.88,
+                "clean_roi": clean_roi,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_roi"] = clean_roi
+        elif video_trim and video_trim["clean_duration"] >= 2.5:
+            classified.update({
+                "category": "rescued_trimmed_video",
+                "action": "keep",
+                "reason": f"video resgatado com recorte de {video_trim['trim_type']} (trecho limpo de {video_trim['clean_duration']:.1f}s preservado)",
+                "confidence": 0.90,
+                "clean_trim": video_trim,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_trim"] = video_trim
+                metrics["clean_start_offset"] = video_trim["clean_start"]
+                metrics["clean_end_offset"] = video_trim["clean_end"]
+                metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        else:
+            classified.update({
+                "category": "suspect",
+                "action": "soft_suspect",
+                "reason": "evidencia visual ambigua; preservado para revisao/fallback",
+                "confidence": min(0.79, max(max_presenter, max_text, max_data, pollution_ratio)),
+            })
     classified["evidence"] = {
         "text_ratio": round(text_ratio, 3),
         "data_ratio": round(data_ratio, 3),
@@ -6920,6 +7392,253 @@ def _edge_persistence(a: bytes, b: bytes) -> float:
     return overlap / smaller
 
 
+def _corner_overlap_and_counts(
+    a: bytes | bytearray,
+    b: bytes | bytearray,
+    w: int = VISUAL_CLEAN_FRAME_W,
+    h: int = VISUAL_CLEAN_FRAME_H,
+) -> dict[str, tuple[int, int, int]]:
+    """
+    Measures edge pixel counts and exact spatial overlap between two frames
+    for each of the 4 extreme corners (top_left, top_right, bottom_left, bottom_right).
+    Returns dict mapping corner -> (overlap_count, count_a, count_b).
+    """
+    if not a or not b or len(a) != len(b) or len(a) != (w * h):
+        return {
+            "top_left": (0, 0, 0),
+            "top_right": (0, 0, 0),
+            "bottom_left": (0, 0, 0),
+            "bottom_right": (0, 0, 0),
+        }
+    x_left = int(w * 0.26)
+    x_right = int(w * 0.74)
+    y_top = int(h * 0.28)
+    y_bottom = int(h * 0.72)
+
+    tl_overlap = tl_a = tl_b = 0
+    tr_overlap = tr_a = tr_b = 0
+    bl_overlap = bl_a = bl_b = 0
+    br_overlap = br_a = br_b = 0
+
+    # Top corners
+    for y in range(y_top):
+        row = y * w
+        for x in range(x_left):
+            idx = row + x
+            va = a[idx]
+            vb = b[idx]
+            if va:
+                tl_a += 1
+            if vb:
+                tl_b += 1
+            if va and vb:
+                tl_overlap += 1
+        for x in range(x_right, w):
+            idx = row + x
+            va = a[idx]
+            vb = b[idx]
+            if va:
+                tr_a += 1
+            if vb:
+                tr_b += 1
+            if va and vb:
+                tr_overlap += 1
+
+    # Bottom corners
+    for y in range(y_bottom, h):
+        row = y * w
+        for x in range(x_left):
+            idx = row + x
+            va = a[idx]
+            vb = b[idx]
+            if va:
+                bl_a += 1
+            if vb:
+                bl_b += 1
+            if va and vb:
+                bl_overlap += 1
+        for x in range(x_right, w):
+            idx = row + x
+            va = a[idx]
+            vb = b[idx]
+            if va:
+                br_a += 1
+            if vb:
+                br_b += 1
+            if va and vb:
+                br_overlap += 1
+
+    return {
+        "top_left": (tl_overlap, tl_a, tl_b),
+        "top_right": (tr_overlap, tr_a, tr_b),
+        "bottom_left": (bl_overlap, bl_a, bl_b),
+        "bottom_right": (br_overlap, br_a, br_b),
+    }
+
+
+def detect_corner_watermarks(
+    edge_masks: list[bytes],
+    metrics_list: list[dict[str, Any]],
+    diffs: list[float],
+    med_diff: float,
+    med_persistence: float,
+    w: int = VISUAL_CLEAN_FRAME_W,
+    h: int = VISUAL_CLEAN_FRAME_H,
+    is_image: bool = False,
+) -> dict[str, Any]:
+    """
+    Dedicated 4-Corner Watermark & Station Bug Radar.
+    Evaluates Top-Left, Top-Right, Bottom-Left and Bottom-Right corner zones.
+    Calculates spatial edge concentration and temporal persistence to pinpoint
+    watermark bugs, TV logos (DOG), station IDs and screen-recorder stamps.
+    """
+    corners = ["top_left", "top_right", "bottom_left", "bottom_right"]
+    empty_result = {
+        "has_watermark": False,
+        "worst_corner": None,
+        "worst_score": 0.0,
+        "worst_persistence": 0.0,
+        "detected_corners": [],
+        "corner_scores": {c: 0.0 for c in corners},
+        "corner_persistences": {c: 0.0 for c in corners},
+        "corner_edge_counts": {c: 0 for c in corners},
+    }
+    if not edge_masks or not metrics_list:
+        return empty_result
+
+    # 1. Static Image Analysis (single frame, no temporal diffs)
+    if is_image or len(edge_masks) < 2:
+        m0 = metrics_list[0] if metrics_list else {}
+        corner_counts = {
+            "top_left": int(m0.get("tl_edges") or 0),
+            "top_right": int(m0.get("tr_edges") or 0),
+            "bottom_left": int(m0.get("bl_edges") or 0),
+            "bottom_right": int(m0.get("br_edges") or 0),
+        }
+        corner_densities = {
+            "top_left": float(m0.get("tl_edge_density") or 0.0),
+            "top_right": float(m0.get("tr_edge_density") or 0.0),
+            "bottom_left": float(m0.get("bl_edge_density") or 0.0),
+            "bottom_right": float(m0.get("br_edge_density") or 0.0),
+        }
+        scores: dict[str, float] = {}
+        detected = []
+        for c in corners:
+            count = corner_counts[c]
+            density = corner_densities[c]
+            other_counts = [corner_counts[o] for o in corners if o != c]
+            avg_other = sum(other_counts) / max(1, len(other_counts))
+            score = 0.0
+            if count >= 36 and density >= 0.010 and count >= (avg_other * 2.2 + 16):
+                score = min(1.0, round((count / 65.0) * 0.65 + (density / 0.02) * 0.35, 3))
+                if score >= 0.65:
+                    detected.append(c)
+            scores[c] = round(score, 3)
+        worst_c = max(scores, key=scores.get) if scores else None
+        worst_sc = scores.get(worst_c, 0.0) if worst_c else 0.0
+        return {
+            "has_watermark": bool(detected),
+            "worst_corner": worst_c if detected else None,
+            "worst_score": worst_sc,
+            "worst_persistence": 1.0 if detected else 0.0,
+            "detected_corners": detected,
+            "corner_scores": scores,
+            "corner_persistences": {c: 1.0 for c in corners},
+            "corner_edge_counts": corner_counts,
+        }
+
+    # 2. Multi-Frame Video Analysis
+    corner_persistences_per_pair: dict[str, list[float]] = {c: [] for c in corners}
+    corner_counts_per_frame: dict[str, list[int]] = {c: [] for c in corners}
+
+    for m in metrics_list:
+        corner_counts_per_frame["top_left"].append(int(m.get("tl_edges") or 0))
+        corner_counts_per_frame["top_right"].append(int(m.get("tr_edges") or 0))
+        corner_counts_per_frame["bottom_left"].append(int(m.get("bl_edges") or 0))
+        corner_counts_per_frame["bottom_right"].append(int(m.get("br_edges") or 0))
+
+    has_scene_cut = any(float(d) >= 12.0 for d in diffs)
+
+    for i in range(1, len(edge_masks)):
+        overlap_info = _corner_overlap_and_counts(edge_masks[i - 1], edge_masks[i], w, h)
+        for c in corners:
+            overlap, cnt_a, cnt_b = overlap_info[c]
+            min_c = min(cnt_a, cnt_b)
+            if min_c >= 14:
+                pers = overlap / float(min_c)
+            else:
+                pers = 0.0
+            corner_persistences_per_pair[c].append(pers)
+
+    median_persistences: dict[str, float] = {}
+    median_counts: dict[str, int] = {}
+    for c in corners:
+        p_list = corner_persistences_per_pair[c]
+        median_persistences[c] = round(_median(p_list, 0.0), 4)
+        c_list = corner_counts_per_frame[c]
+        median_counts[c] = int(round(_median([float(x) for x in c_list], 0.0)))
+
+    scores = {}
+    detected_corners = []
+
+    for c in corners:
+        p_c = median_persistences[c]
+        n_c = median_counts[c]
+        other_p = [median_persistences[o] for o in corners if o != c]
+        avg_other_p = sum(other_p) / max(1, len(other_p))
+        delta_other = max(0.0, p_c - avg_other_p)
+        delta_global = max(0.0, p_c - med_persistence)
+
+        is_wm = False
+        # Case 1: Video with active motion (med_diff >= 4.0), but corner has frozen edges
+        if n_c >= 14 and p_c >= 0.58 and (med_diff >= 4.0 or max(diffs, default=0.0) >= 8.0):
+            if delta_other >= 0.14 or delta_global >= 0.14:
+                is_wm = True
+
+        # Case 2: Very high persistence (p_c >= 0.70) with solid edge count in moving/changing video
+        if n_c >= 18 and p_c >= 0.70 and (med_diff >= 2.5 or max(diffs, default=0.0) >= 6.0):
+            if delta_other >= 0.12 or delta_global >= 0.12:
+                is_wm = True
+
+        # Case 3: Fixed corner persisting across scene cut / change
+        if has_scene_cut and n_c >= 14:
+            for idx_diff, d_val in enumerate(diffs):
+                if float(d_val) >= 12.0 and idx_diff < len(corner_persistences_per_pair[c]):
+                    if corner_persistences_per_pair[c][idx_diff] >= 0.48:
+                        is_wm = True
+                        break
+
+        if is_wm:
+            score = min(1.0, round(
+                p_c * 0.60
+                + min(1.0, n_c / 40.0) * 0.25
+                + min(1.0, delta_other / 0.25) * 0.15,
+                3
+            ))
+            if score >= 0.60:
+                detected_corners.append(c)
+                scores[c] = score
+            else:
+                scores[c] = round(score, 3)
+        else:
+            scores[c] = round(min(0.48, p_c * 0.48), 3)
+
+    worst_c = max(scores, key=scores.get) if scores else None
+    worst_sc = scores.get(worst_c, 0.0) if worst_c else 0.0
+    worst_pers = median_persistences.get(worst_c, 0.0) if worst_c else 0.0
+
+    return {
+        "has_watermark": bool(detected_corners),
+        "worst_corner": worst_c if detected_corners else None,
+        "worst_score": worst_sc if detected_corners else 0.0,
+        "worst_persistence": worst_pers if detected_corners else 0.0,
+        "detected_corners": detected_corners,
+        "corner_scores": scores,
+        "corner_persistences": median_persistences,
+        "corner_edge_counts": median_counts,
+    }
+
+
 def _median(values: list[float], fallback: float = 0.0) -> float:
     if not values:
         return fallback
@@ -6953,6 +7672,12 @@ def probe_visual_clean_health(
         cached = VISUAL_CLEAN_CACHE.get(key)
     if cached:
         result = _classify_visual_analysis(dict(cached), level, context=context, media_kind=media_kind)
+        if cached.get("clean_roi"):
+            result["clean_roi"] = cached["clean_roi"]
+        if cached.get("clean_trim"):
+            result["clean_trim"] = cached["clean_trim"]
+        if cached.get("corner_watermark"):
+            result["corner_watermark"] = cached["corner_watermark"]
         result["cache_hit"] = True
         return result
     result: dict[str, Any] = {
@@ -7021,6 +7746,14 @@ def probe_visual_clean_health(
     med_mean = _median([float(item["mean"]) for item in metrics])
     med_span = _median([float(item["vertical_span"]) for item in metrics])
     med_bottom = _median([float(item["bottom_edge_share"]) for item in metrics])
+    med_top = _median([float(item.get("top_edge_share") or 0.0) for item in metrics])
+    med_middle = _median([float(item.get("middle_edge_share") or 0.0) for item in metrics])
+    med_ui_top_share = _median([float(item.get("ui_top_share") or 0.0) for item in metrics])
+    med_ui_bottom_share = _median([float(item.get("ui_bottom_share") or 0.0) for item in metrics])
+    med_ui_top_corner = _median([float(item.get("ui_top_corner_ratio") or 0.0) for item in metrics])
+    med_ui_bottom_center = _median([float(item.get("ui_bottom_center_ratio") or 0.0) for item in metrics])
+    med_min_row = _median([float(item.get("min_active_row") or 0) for item in metrics])
+    med_max_row = _median([float(item.get("max_active_row") or VISUAL_CLEAN_FRAME_H) for item in metrics])
     med_skin = _median([float(item["center_skin_ratio"]) for item in metrics])
     med_head_skin = _median([float(item["head_skin_ratio"]) for item in metrics])
     med_torso_skin = _median([float(item["torso_skin_ratio"]) for item in metrics])
@@ -7107,11 +7840,36 @@ def probe_visual_clean_health(
     presenter_flags = [score >= 0.64 for score in sample_presenter_scores]
     scene_change_flags = [float(value) >= 18.0 for value in diffs]
     pollution_flags = [score >= 0.72 for score in sample_pollution_scores]
-    quality_score = min(1.0, (
-        min(1.0, med_stdev / 30.0) * 0.52
-        + min(1.0, med_edge / 0.08) * 0.28
-        + min(1.0, med_saturation / 0.22) * 0.20
-    ))
+    is_monochrome = (med_saturation <= 0.08) or (
+        abs(med_red - med_green) <= 10.0
+        and abs(med_green - med_blue) <= 10.0
+        and abs(med_red - med_blue) <= 15.0
+    )
+    is_sepia = (
+        med_saturation <= 0.32
+        and med_red >= (med_green - 4.0)
+        and med_green >= (med_blue - 4.0)
+        and (med_red - med_blue) <= 50.0
+        and (med_red - med_blue) >= 4.0
+    )
+    has_photo_texture = (
+        med_stdev >= 9.0
+        and med_edge >= 0.010
+        and med_cells >= 0.05
+        and 15.0 <= med_mean <= 242.0
+    )
+    is_historical_monochrome = bool((is_monochrome or is_sepia) and has_photo_texture)
+    if is_historical_monochrome:
+        quality_score = min(1.0, (
+            min(1.0, med_stdev / 26.0) * 0.65
+            + min(1.0, med_edge / 0.06) * 0.35
+        ))
+    else:
+        quality_score = min(1.0, (
+            min(1.0, med_stdev / 30.0) * 0.52
+            + min(1.0, med_edge / 0.08) * 0.28
+            + min(1.0, med_saturation / 0.22) * 0.20
+        ))
     temporal_metrics = {
         "sample_count": len(frames),
         "coverage_ratio": 1.0,
@@ -7132,7 +7890,20 @@ def probe_visual_clean_health(
         "text_scores": sample_text_scores,
         "data_scores": sample_data_scores,
         "presenter_scores": sample_presenter_scores,
+        "pollution_scores": sample_pollution_scores,
+        "sample_positions": _sample_positions_for_video(duration, len(frames)),
     }
+    is_img = bool(media_kind == "image" or is_image_path(path) or len(frames) == 1)
+    corner_watermark = detect_corner_watermarks(
+        edge_masks=edge_masks,
+        metrics_list=metrics,
+        diffs=diffs,
+        med_diff=med_diff,
+        med_persistence=med_persistence,
+        w=VISUAL_CLEAN_FRAME_W,
+        h=VISUAL_CLEAN_FRAME_H,
+        is_image=is_img,
+    )
     summary_metrics = {
         "edge_density": round(med_edge, 4),
         "active_cells": round(med_cells, 4),
@@ -7145,7 +7916,15 @@ def probe_visual_clean_health(
         "frame_diff": round(med_diff, 2),
         "edge_persistence": round(med_persistence, 3),
         "vertical_span": round(med_span, 3),
+        "top_edge_share": round(med_top, 3),
+        "middle_edge_share": round(med_middle, 3),
         "bottom_edge_share": round(med_bottom, 3),
+        "ui_top_share": round(med_ui_top_share, 4),
+        "ui_bottom_share": round(med_ui_bottom_share, 4),
+        "ui_top_corner_ratio": round(med_ui_top_corner, 4),
+        "ui_bottom_center_ratio": round(med_ui_bottom_center, 4),
+        "min_active_row": int(med_min_row),
+        "max_active_row": int(med_max_row),
         "lower_third": lower_third,
         "center_skin_ratio": round(med_skin, 3),
         "head_skin_ratio": round(med_head_skin, 3),
@@ -7158,7 +7937,9 @@ def probe_visual_clean_health(
         "green_mean": round(med_green, 2),
         "blue_mean": round(med_blue, 2),
         "saturation_mean": round(med_saturation, 4),
+        "is_historical_monochrome": is_historical_monochrome,
         "quality_score": round(quality_score, 4),
+        "corner_watermark": corner_watermark,
         "temporal": temporal_metrics,
         "fingerprint": fingerprint_from_bytes(gray_frames[len(gray_frames) // 2], VISUAL_CLEAN_FRAME_W, VISUAL_CLEAN_FRAME_H),
     }
@@ -7170,7 +7951,7 @@ def probe_visual_clean_health(
         summary_metrics["height"] = height
         summary_metrics["resolution_ok"] = bool(width >= 640 and height >= 360)
         if not summary_metrics["resolution_ok"]:
-            summary_metrics["quality_score"] = min(float(summary_metrics.get("quality_score") or 0.0), 0.35)
+            summary_metrics["quality_score"] = min(float(summary_metrics.get("quality_score") or 0.0), 0.30 if is_historical_monochrome else 0.35)
     clear_text_signal = bool(
         max(sample_text_scores, default=0.0) >= 0.78
         and sum(text_flags) / max(1, len(text_flags)) >= 0.50
@@ -7191,9 +7972,108 @@ def probe_visual_clean_health(
             "reason": "YuNet dispensado: heuristica conclusiva sem ambiguidade facial",
         }
     result.update({"samples": len(frames), "metrics": summary_metrics})
+    classified = _classify_visual_analysis(result, level, context=context, media_kind=media_kind)
+    result.update({
+        "category": classified.get("category", "clean"),
+        "action": classified.get("action", "keep"),
+        "reason": classified.get("reason", "clipe limpo"),
+        "confidence": classified.get("confidence", 0.0),
+    })
+    if classified.get("clean_roi"):
+        result["clean_roi"] = classified["clean_roi"]
+        summary_metrics["clean_roi"] = classified["clean_roi"]
+    if classified.get("clean_trim"):
+        result["clean_trim"] = classified["clean_trim"]
+        summary_metrics["clean_trim"] = classified["clean_trim"]
+    if classified.get("corner_watermark"):
+        result["corner_watermark"] = classified["corner_watermark"]
+        summary_metrics["corner_watermark"] = classified["corner_watermark"]
     with VISUAL_CLEAN_CACHE_LOCK:
         VISUAL_CLEAN_CACHE[key] = dict(result)
-    return _classify_visual_analysis(result, level, context=context, media_kind=media_kind)
+    return classified
+
+
+def get_media_clean_roi(path: Path | str, cwd: Path | None = None) -> tuple[float, float, float, float] | None:
+    """
+    Returns the rescued clean ROI (x0, y0, x1, y1) for an image if it was analyzed
+    and determined to have peripheral pollution (lower-third watermark/text or top bar).
+    If no rescue was needed or possible, returns None.
+    """
+    p = Path(str(path))
+    if not is_image_path(p):
+        return None
+    try:
+        resolved = _resolved_media_path(p, cwd)
+        key_stem = resolved.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower():
+                    clean_roi = val.get("clean_roi")
+                    if not clean_roi and isinstance(val.get("metrics"), dict):
+                        clean_roi = val["metrics"].get("clean_roi")
+                    if clean_roi:
+                        return tuple(clean_roi)
+    except Exception:
+        pass
+    return None
+
+
+def get_media_clean_trim(path: Path | str, cwd: Path | None = None) -> dict[str, Any] | None:
+    """
+    Returns the clean trim info dict (clean_start, clean_end, clean_duration, trim_type)
+    for a video if it was analyzed and determined to have boundary pollution (intro/outro).
+    """
+    p = Path(str(path))
+    if is_image_path(p):
+        return None
+    try:
+        resolved = _resolved_media_path(p, cwd)
+        key_stem = resolved.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower():
+                    clean_trim = val.get("clean_trim")
+                    if not clean_trim and isinstance(val.get("metrics"), dict):
+                        clean_trim = val["metrics"].get("clean_trim")
+                    if isinstance(clean_trim, dict):
+                        return dict(clean_trim)
+    except Exception:
+        pass
+    return None
+
+
+def get_media_clean_start_offset(path: Path | str, cwd: Path | None = None) -> float:
+    """Returns the clean start offset in seconds if a video was rescued by intro trim."""
+    trim = get_media_clean_trim(path, cwd)
+    if trim:
+        return float(trim.get("clean_start") or 0.0)
+    return 0.0
+
+
+def get_media_clean_usable_duration(path: Path | str, fallback_dur: float, cwd: Path | None = None) -> float:
+    """Returns the clean usable duration in seconds after trimming intro/outro."""
+    trim = get_media_clean_trim(path, cwd)
+    if trim:
+        return float(trim.get("clean_duration") or fallback_dur)
+    return fallback_dur
+
+
+def get_media_corner_watermark(path: Path | str, cwd: Path | None = None) -> dict[str, Any] | None:
+    """Returns the corner watermark diagnosis dict for a media file if found in cache."""
+    try:
+        p = Path(str(path))
+        resolved = _resolved_media_path(p, cwd)
+        key_stem = resolved.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower():
+                    metrics = val.get("metrics") if isinstance(val.get("metrics"), dict) else {}
+                    wm = metrics.get("corner_watermark") or val.get("corner_watermark")
+                    if isinstance(wm, dict):
+                        return dict(wm)
+    except Exception:
+        pass
+    return None
 
 
 def semantic_model_status() -> dict[str, Any]:
@@ -7570,6 +8450,11 @@ def apply_visual_clean_filter(
         "contextual_people": 0,
         "images_analyzed": 0,
         "images_rejected": 0,
+        "images_rescued": 0,
+        "rejected_ui_screenshots": 0,
+        "rejected_watermarks": 0,
+        "historical_photos_preserved": 0,
+        "videos_rescued_by_trim": 0,
         "context_mismatches": 0,
         "soft_demoted": 0,
         "fallback_used": 0,
@@ -7699,6 +8584,8 @@ def apply_visual_clean_filter(
             "evidence": analysis.get("evidence") or {},
             "context": source_context,
         }
+        if analysis.get("clean_roi"):
+            item["clean_roi"] = analysis["clean_roi"]
 
         if media_kind == "image" and action == "keep" and float(source_context.get("subject_relevance") or 0.0) < 0.12 and project_context.get("terms"):
             action = "soft_suspect"
@@ -7714,7 +8601,7 @@ def apply_visual_clean_filter(
         is_unusable = category in {"black_screen", "invalid", "no_frames", "low_quality"}
         is_pollution = (
             action == "hard_reject"
-            or category in {"text_dominant", "data_dominant", "presenter"}
+            or category in {"text_dominant", "data_dominant", "presenter", "watermark_corner"}
             or (media_kind == "image" and is_unusable)
         )
 
@@ -7744,6 +8631,10 @@ def apply_visual_clean_filter(
                 summary["rejected_text"] += 1
             elif category == "data_dominant":
                 summary["rejected_data"] += 1
+            elif category == "ui_screenshot":
+                summary["rejected_ui_screenshots"] += 1
+            elif category == "watermark_corner":
+                summary["rejected_watermarks"] += 1
             elif category == "black_screen":
                 summary["rejected_black"] += 1
             elif category == "presenter":
@@ -7766,11 +8657,25 @@ def apply_visual_clean_filter(
                 item["decision"] = "kept_late"
             summary["items"].append(item)
         else:
-            clean_pairs.append((source, duration))
-            accepted_clean_duration += duration
+            trim_info = analysis.get("clean_trim") or (analysis.get("metrics") or {}).get("clean_trim") or {}
+            eff_dur = float(trim_info.get("clean_duration") or duration) if category == "rescued_trimmed_video" else duration
+            clean_pairs.append((source, eff_dur))
+            accepted_clean_duration += eff_dur
             if category == "person_contextual":
                 summary["contextual_people"] += 1
-            if category == "analysis_unavailable":
+            elif category == "rescued_clean_roi":
+                summary["images_rescued"] += 1
+                item["decision"] = "rescued_crop"
+            elif category == "rescued_trimmed_video":
+                summary["videos_rescued_by_trim"] += 1
+                item["decision"] = "rescued_trim"
+                item["clean_trim"] = trim_info
+                item["clean_start_offset"] = trim_info.get("clean_start")
+                item["clean_end_offset"] = trim_info.get("clean_end")
+            elif category == "historical_photo":
+                summary["historical_photos_preserved"] += 1
+                item["decision"] = "kept_historical"
+            elif category == "analysis_unavailable":
                 summary["analysis_unavailable"] += 1
                 item["decision"] = "kept_unverified"
             else:
@@ -14712,12 +15617,22 @@ def build_image_filter_complex(
     filmic_grade: str = "",
     focal_point: tuple[float, float] | None = None,
     hflip: bool = False,
+    clean_roi: tuple[float, float, float, float] | None = None,
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
     progress = f"(on/{frames})"
     motion = motion if motion in {"zoom_in", "zoom_out", "pan_left", "pan_right"} else "zoom_in"
 
     fx, fy = focal_point if focal_point else probe_image_focal_anchor(image_path)
+    crop_filter = ""
+    if clean_roi and len(clean_roi) == 4:
+        rx0, ry0, rx1, ry1 = clean_roi
+        rw = max(0.1, rx1 - rx0)
+        rh = max(0.1, ry1 - ry0)
+        crop_filter = f"crop=iw*{rw:.3f}:ih*{rh:.3f}:iw*{rx0:.3f}:ih*{ry0:.3f},"
+        fx = max(0.0, min(1.0, (fx - rx0) / rw))
+        fy = max(0.0, min(1.0, (fy - ry0) / rh))
+
     if hflip:
         fx = max(0.0, min(1.0, 1.0 - fx))
 
@@ -14752,6 +15667,10 @@ def build_image_filter_complex(
     img_w, img_h = (w, h)
     if image_path and Path(str(image_path)).exists():
         img_w, img_h = probe_image_dimensions(image_path)
+    if clean_roi and len(clean_roi) == 4:
+        rx0, ry0, rx1, ry1 = clean_roi
+        img_w = max(1.0, img_w * (rx1 - rx0))
+        img_h = max(1.0, img_h * (ry1 - ry0))
     img_ratio = float(img_w) / float(max(1, img_h))
     ratio_diff = img_ratio / max(0.01, target_ratio)
 
@@ -14765,7 +15684,7 @@ def build_image_filter_complex(
     if not needs_blur:
         # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor e supersampling 2.5K
         return (
-            f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
+            f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
             f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
@@ -14773,8 +15692,8 @@ def build_image_filter_complex(
 
     # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Background blur elegante com supersampling
     return (
-        f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
-        f"[0:v]{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
+        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
         f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
@@ -14790,8 +15709,15 @@ def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> boo
         with VISUAL_CLEAN_CACHE_LOCK:
             for k, val in VISUAL_CLEAN_CACHE.items():
                 if key_stem in str(k).lower():
+                    if val.get("clean_roi") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_roi")):
+                        return True
+                    if val.get("clean_trim") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_trim")):
+                        return True
                     cat = str(val.get("category", "")).lower()
-                    if cat in {"text_dominant", "data_dominant", "presenter", "talking_head"}:
+                    if cat in {"text_dominant", "data_dominant", "presenter", "talking_head", "watermark_corner"}:
+                        return False
+                    wm = val.get("corner_watermark") or (val.get("metrics") or {}).get("corner_watermark")
+                    if isinstance(wm, dict) and wm.get("has_watermark"):
                         return False
                     metrics = val.get("metrics", {})
                     if float(metrics.get("text_score", 0.0) or 0.0) >= 0.35:
@@ -15218,6 +16144,7 @@ def build_segment_plan(
                         image_motion=motion,
                         hflip=apply_hflip,
                         scale_boost=1.0,
+                        clean_roi=get_media_clean_roi(src),
                     )
                 )
                 remaining -= target
@@ -15378,8 +16305,10 @@ def build_segment_plan(
                         if remaining <= 0.08:
                             break
                         raw_dur = float(cand.raw_duration)
+                        base_trim_offset = _source_offset_for(source_offsets, cand.source)
+                        eff_usable = max(1.2, raw_dur - base_trim_offset)
                         stride_pct = ((cycle * 0.382 + cand.sub_slice_index * 0.236) % 0.65)
-                        slice_offset = round(raw_dur * stride_pct, 3)
+                        slice_offset = round(base_trim_offset + (eff_usable * stride_pct), 3)
                         usable = max(1.2, raw_dur - slice_offset)
                         # Pacing Slicer em clipes reciclados: teto saudável de 5.2s por tomada
                         max_reuse_shot = 5.2
@@ -15429,6 +16358,7 @@ def build_segment_plan(
                                     image_motion=motion,
                                     hflip=apply_hflip,
                                     scale_boost=1.0,
+                                    clean_roi=getattr(cand, "clean_roi", None) or get_media_clean_roi(cand.source),
                                 )
                             )
                             remaining -= seg_dur
@@ -15650,9 +16580,13 @@ def make_segments_smart(
     source_offsets: dict[str, float] = {}
     for src, dur in valid_pairs:
         if not is_image_path(src):
-            v_health = probe_video_render_health(src, dur, cwd=work)
-            if v_health.get("suggested_offset", 0.0) > 0.3:
-                source_offsets[str(src.resolve()).lower()] = float(v_health["suggested_offset"])
+            trim_start = get_media_clean_start_offset(src, cwd=work)
+            if trim_start > 0.15:
+                source_offsets[str(src.resolve()).lower()] = trim_start
+            else:
+                v_health = probe_video_render_health(src, dur, cwd=work)
+                if v_health.get("suggested_offset", 0.0) > 0.3:
+                    source_offsets[str(src.resolve()).lower()] = float(v_health["suggested_offset"])
     visual_window_summary: dict[str, Any] = {
         "enabled": bool(job.options.get("scoreVisualWindows", True)),
         "analyzed": 0,
@@ -15691,6 +16625,9 @@ def make_segments_smart(
                 visual_window_summary["cache_hits"] += 1
             best_offset = max(0.0, float(info.get("best_offset") or 0.0))
             best_score = float(info.get("best_score") or 0.0)
+            trim_start = get_media_clean_start_offset(src, cwd=work)
+            if trim_start > 0.15:
+                best_offset = max(best_offset, trim_start)
             if best_offset >= 0.25 and best_score >= 0.45 and dur - best_offset >= 0.75:
                 source_offsets[key] = best_offset
                 visual_window_summary["adjusted"] += 1
@@ -15833,6 +16770,7 @@ def make_segments_smart(
                 is_outro=plan.is_outro,
                 filmic_grade=filmic_grade,
                 hflip=getattr(plan, "hflip", False),
+                clean_roi=getattr(plan, "clean_roi", None),
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
@@ -16006,6 +16944,7 @@ def make_segments_smart(
                     punch_in=(fill_cycle % 2 == 1),
                     hflip=apply_hflip,
                     scale_boost=scale_boost,
+                    clean_roi=get_media_clean_roi(src, work) if is_image_path(src) else None,
                 )
                 out, actual = render_one(fill_plan, next_segment_no)
                 next_segment_no += 1

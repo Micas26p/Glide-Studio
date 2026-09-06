@@ -7,6 +7,7 @@ renders/
 webview_profile/
 project_media/
 reference_styles/
+scratch/
 
 # Large binary files & temporary database / caches
 *.exe
