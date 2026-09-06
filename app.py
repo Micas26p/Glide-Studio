@@ -615,13 +615,13 @@ def probe_image_focal_anchor(path: Path | str | None, cwd: Path | None = None) -
 def image_motion_for(path: Path | str, index: int = 0) -> str:
     """Retorna um dos 4 movimentos cinematográficos suaves sem repetições consecutivas."""
     return IMAGE_MOTIONS[index % len(IMAGE_MOTIONS)]
-VISUAL_CLEAN_CACHE_VERSION = 10
+VISUAL_CLEAN_CACHE_VERSION = 11
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
-VIDEO_BLACK_YAVG_MAX = 12.0
-VIDEO_BLACK_YMAX_MAX = 28.0
-VIDEO_VISIBLE_RANGE_MIN = 7.0
+VIDEO_BLACK_YAVG_MAX = 14.0
+VIDEO_BLACK_YMAX_MAX = 35.0
+VIDEO_VISIBLE_RANGE_MIN = 8.0
 VISUAL_CLEAN_FRAME_W = 96
 VISUAL_CLEAN_FRAME_H = 54
 VISUAL_CLEAN_SAMPLE_COUNT = 3
@@ -5775,8 +5775,13 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
         yavg = float(stats["yavg"])
         yrange = float(stats["yrange"])
         ymax = float(stats["ymax"])
-        # Detecta telas escuras ou títulos estáticos com fundo preto
-        visible = not (yavg <= 22.0 and ymax <= 36.0 and yrange < 24.0)
+        # Detecta telas pretas, quadros escuros estaticos ou titulos em fundo preto
+        is_black_or_empty = (
+            yavg <= 6.0
+            or (yavg <= 16.0 and (yrange <= 95.0 or ymax <= 100.0))
+            or (yavg <= 24.0 and ymax <= 45.0 and yrange < 35.0)
+        )
+        visible = not is_black_or_empty
         sample = {
             "at": round(at, 3),
             "visible": visible,
@@ -5838,8 +5843,8 @@ def enforce_clean_opening_protocol(
     work: Path,
     max_opening_slots: int = 10,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    """Garante que os primeiros 10 clipes sejam estritamente B-roll limpos (sem telas escuras, sem legendas gravadas e sem avatar falante)."""
-    if len(valid_pairs) <= 3:
+    """Garante que os primeiros 10 clipes sejam estritamente B-roll limpos (sem telas pretas, sem videos estaticos, sem legendas gravadas e sem avatar falante)."""
+    if len(valid_pairs) <= 1:
         return valid_pairs, {"enforced": False, "swapped": 0}
 
     opening_count = min(len(valid_pairs), max_opening_slots)
@@ -5852,12 +5857,22 @@ def enforce_clean_opening_protocol(
         category = str(analysis.get("category") or "clean")
         action = str(analysis.get("action") or "keep")
 
-        # Poluição visual: tela preta, apresentador/avatar, texto na tela ou dados/gráficos
-        is_polluted = category in {"black_screen", "presenter", "text_dominant", "data_dominant", "low_quality"} or action in {"hard_reject", "retained_for_safety"}
+        # Poluição visual: tela preta, vídeo estático, apresentador/avatar, texto na tela ou dados/gráficos
+        is_polluted = (
+            category in {"black_screen", "static_black_screen", "presenter", "text_dominant", "data_dominant", "low_quality", "webcam_pip", "presentation_slide", "ui_screenshot"}
+            or action != "keep"
+        )
+        if not is_polluted:
+            m = analysis.get("metrics") or {}
+            mean_val = float(m.get("mean") or 50.0)
+            black_val = float(m.get("black_ratio") or 0.0)
+            diff_val = float(m.get("frame_diff") or 10.0)
+            if mean_val <= 18.0 or black_val >= 0.60 or (diff_val <= 1.2 and not is_image_path(path)):
+                is_polluted = True
 
         if is_opening and is_polluted:
             polluted_indices_in_opening.append(idx)
-        elif not is_opening and not is_polluted:
+        elif not is_polluted:
             clean_pool_indices.append(idx)
 
     reordered = list(valid_pairs)
@@ -5882,6 +5897,47 @@ def enforce_clean_opening_protocol(
             job,
             f"Clean Opening Protocol: Slot #{bad_idx + 1} protegido. Clipes com poluição visual '{bad_item[0].name}' substituído por B-roll limpo '{good_item[0].name}'.",
         )
+
+    # Seguranca extrema para o primeiro slot (#1): Jamais permitir tela preta ou estatica
+    if reordered:
+        first_path, first_dur = reordered[0]
+        first_analysis = probe_visual_clean_health(first_path, first_dur, "normal", cwd=work)
+        first_cat = str(first_analysis.get("category") or "clean")
+        first_act = str(first_analysis.get("action") or "keep")
+        first_m = first_analysis.get("metrics") or {}
+        first_mean = float(first_m.get("mean") or 50.0)
+        first_black = float(first_m.get("black_ratio") or 0.0)
+        first_diff = float(first_m.get("frame_diff") or 10.0)
+
+        is_bad_start = (
+            first_act != "keep"
+            or first_cat in {"black_screen", "presentation_slide", "webcam_pip", "ui_screenshot"}
+            or first_mean <= 18.0
+            or first_black >= 0.60
+            or (first_diff <= 1.2 and not is_image_path(first_path))
+        )
+        if is_bad_start:
+            for candidate_idx in range(1, len(reordered)):
+                c_path, c_dur = reordered[candidate_idx]
+                c_analysis = probe_visual_clean_health(c_path, c_dur, "normal", cwd=work)
+                c_act = str(c_analysis.get("action") or "keep")
+                c_cat = str(c_analysis.get("category") or "clean")
+                c_m = c_analysis.get("metrics") or {}
+                c_mean = float(c_m.get("mean") or 50.0)
+                c_black = float(c_m.get("black_ratio") or 0.0)
+                c_diff = float(c_m.get("frame_diff") or 10.0)
+                if c_act == "keep" and c_cat in {"clean", "historical_photo", "rescued_clean_roi", "rescued_trimmed_video"} and c_mean > 25.0 and c_black < 0.40 and (c_diff > 1.2 or is_image_path(c_path)):
+                    clean_first = reordered.pop(candidate_idx)
+                    reordered.insert(0, clean_first)
+                    _append_log(
+                        job,
+                        f"Clean Opening Protocol: Slot #1 forcado para clipe limpo e dinamico '{clean_first[0].name}' (eliminou frame escuro/estatico inicial).",
+                    )
+                    swapped_count += 1
+                    break
+            if reordered and reordered[0][0] == first_path and is_bad_start and len(reordered) > 1:
+                reordered.pop(0)
+                swapped_count += 1
 
     summary = {
         "enforced": True,
@@ -6426,15 +6482,19 @@ def _quick_visual_frame_features(frame: bytes) -> tuple[dict[str, float], bytes]
     gray = bytearray(total)
     total_value = 0
     total_square = 0
+    black_count = 0
     for idx in range(total):
         base = idx * 3
         value = (77 * frame[base] + 150 * frame[base + 1] + 29 * frame[base + 2]) >> 8
         gray[idx] = value
         total_value += value
         total_square += value * value
+        if value < 18:
+            black_count += 1
     mean = total_value / total
     variance = max(0.0, total_square / total - mean * mean)
-    return {"mean": mean, "stdev": variance ** 0.5}, bytes(gray)
+    black_ratio = black_count / float(total)
+    return {"mean": mean, "stdev": variance ** 0.5, "black_ratio": black_ratio}, bytes(gray)
 
 
 def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tuple[dict[str, float], bytes, bytes]:
@@ -6490,6 +6550,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     mean = sum(values) / total
     variance = sum((px - mean) * (px - mean) for px in values) / total
     stdev = variance ** 0.5
+    black_count = sum(1 for px in values if px < 18)
+    black_ratio = black_count / float(total)
 
     edge_threshold = 26
     edge_count = 0
@@ -6579,6 +6641,7 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     metrics = {
         "mean": round(mean, 3),
         "stdev": round(stdev, 3),
+        "black_ratio": round(black_ratio, 5),
         "edge_density": round(edge_density, 5),
         "active_rows": round(active_rows, 5),
         "active_cols": round(active_cols, 5),
@@ -6794,6 +6857,7 @@ def calculate_clean_video_trim(
     data_scores = list(temporal.get("data_scores") or [])
     presenter_scores = list(temporal.get("presenter_scores") or [])
     pollution_scores = list(temporal.get("pollution_scores") or [])
+    black_scores = list(temporal.get("black_scores") or [])
 
     is_polluted: list[bool] = []
     for i in range(sample_count):
@@ -6801,7 +6865,8 @@ def calculate_clean_video_trim(
         d_s = data_scores[i] if i < len(data_scores) else 0.0
         p_s = presenter_scores[i] if i < len(presenter_scores) else 0.0
         pol_s = pollution_scores[i] if i < len(pollution_scores) else 0.0
-        polluted = (t_s >= 0.64) or (d_s >= 0.58) or (p_s >= 0.62) or (pol_s >= 0.70)
+        b_s = black_scores[i] if i < len(black_scores) else 0.0
+        polluted = (t_s >= 0.64) or (d_s >= 0.58) or (p_s >= 0.62) or (pol_s >= 0.70) or (b_s >= 0.50)
         is_polluted.append(polluted)
 
     if not any(is_polluted):
@@ -7037,8 +7102,25 @@ def _classify_visual_analysis(
         or (is_presentation_slide and (tr_edges >= 80 or tl_edges >= 80))
     )
 
-    if med_mean <= VIDEO_BLACK_YAVG_MAX and med_stdev <= 4.0 and med_edge <= 0.004:
-        classified.update({"category": "black_screen", "action": "hard_reject", "reason": "tela preta/sem conteudo visual", "confidence": 1.0})
+    med_black = float(metrics.get("black_ratio") or 0.0)
+    is_black_screen = (
+        med_mean <= 6.0
+        or med_black >= 0.88
+        or (med_mean <= VIDEO_BLACK_YAVG_MAX and (med_stdev <= 28.0 or med_edge <= 0.04 or med_black >= 0.75))
+    )
+    is_static_black = bool(
+        (not is_image)
+        and med_diff <= 1.5
+        and (med_mean <= 28.0 or med_black >= 0.65 or is_black_screen)
+    )
+
+    if is_black_screen or is_static_black:
+        classified.update({
+            "category": "black_screen",
+            "action": "hard_reject",
+            "reason": "tela preta ou video estatico sem conteudo visual",
+            "confidence": 1.0,
+        })
     elif image_quality_low:
         classified.update({
             "category": "low_quality",
@@ -7741,14 +7823,26 @@ def probe_visual_clean_health(
     quick_diffs = [_mean_abs_frame_diff(quick_gray[i - 1], quick_gray[i]) for i in range(1, len(quick_gray))]
     quick_mean = _median([float(item["mean"]) for item in quick_metrics])
     quick_stdev = _median([float(item["stdev"]) for item in quick_metrics])
+    quick_black = _median([float(item.get("black_ratio", 0.0)) for item in quick_metrics])
     quick_diff = _median(quick_diffs, 0.0 if len(frames) == 1 else 255.0)
-    if quick_mean <= VIDEO_BLACK_YAVG_MAX and quick_stdev <= 3.5:
+    is_quick_black = (
+        quick_mean <= 6.0
+        or quick_black >= 0.88
+        or (quick_mean <= VIDEO_BLACK_YAVG_MAX and (quick_stdev <= 25.0 or quick_black >= 0.75))
+        or (len(frames) > 1 and quick_diff <= 1.2 and (quick_mean <= 28.0 or quick_black >= 0.70))
+    )
+    if is_quick_black:
         result.update({
             "samples": len(frames),
-            "metrics": {"mean": round(quick_mean, 2), "stdev": round(quick_stdev, 2), "frame_diff": round(quick_diff, 2)},
+            "metrics": {
+                "mean": round(quick_mean, 2),
+                "stdev": round(quick_stdev, 2),
+                "frame_diff": round(quick_diff, 2),
+                "black_ratio": round(quick_black, 4),
+            },
             "category": "black_screen",
             "action": "hard_reject",
-            "reason": "tela preta/sem conteudo visual",
+            "reason": "tela preta ou video estatico sem conteudo visual",
             "confidence": 1.0,
         })
         with VISUAL_CLEAN_CACHE_LOCK:
@@ -7771,6 +7865,7 @@ def probe_visual_clean_health(
     med_side = _median([float(item["side_edge_density"]) for item in metrics])
     med_stdev = _median([float(item["stdev"]) for item in metrics])
     med_mean = _median([float(item["mean"]) for item in metrics])
+    med_black = _median([float(item.get("black_ratio", 0.0)) for item in metrics])
     med_span = _median([float(item["vertical_span"]) for item in metrics])
     med_bottom = _median([float(item["bottom_edge_share"]) for item in metrics])
     med_top = _median([float(item.get("top_edge_share") or 0.0) for item in metrics])
@@ -7819,6 +7914,7 @@ def probe_visual_clean_health(
     sample_data_scores: list[float] = []
     sample_presenter_scores: list[float] = []
     sample_pollution_scores: list[float] = []
+    sample_black_scores: list[float] = []
     for index, item in enumerate(metrics):
         local_motion_values = []
         if index > 0 and index - 1 < len(diffs):
@@ -7857,7 +7953,19 @@ def probe_visual_clean_health(
             + min(1.0, center / 0.60) * 0.14
             + max(0.0, 1.0 - local_motion / 25.0) * 0.18
         ))
-        pollution = min(1.0, edge / 0.19 + cells / 0.42 + max(0.0, cols - 0.72))
+        frame_mean = float(item.get("mean") or 0.0)
+        frame_stdev = float(item.get("stdev") or 0.0)
+        frame_black_r = float(item.get("black_ratio") or 0.0)
+        frame_is_black = bool(
+            frame_mean <= 6.0
+            or frame_black_r >= 0.85
+            or (frame_mean <= VIDEO_BLACK_YAVG_MAX and frame_stdev <= 25.0)
+        )
+        sample_black_scores.append(1.0 if frame_is_black else 0.0)
+        if frame_is_black:
+            pollution = 1.0
+        else:
+            pollution = min(1.0, edge / 0.19 + cells / 0.42 + max(0.0, cols - 0.72))
         sample_text_scores.append(round(frame_text, 4))
         sample_data_scores.append(round(frame_data, 4))
         sample_presenter_scores.append(round(frame_presenter, 4))
@@ -7897,9 +8005,11 @@ def probe_visual_clean_health(
             + min(1.0, med_edge / 0.08) * 0.28
             + min(1.0, med_saturation / 0.22) * 0.20
         ))
+    black_flags = [score >= 0.5 for score in sample_black_scores]
     temporal_metrics = {
         "sample_count": len(frames),
         "coverage_ratio": 1.0,
+        "black_ratio": round(sum(black_flags) / max(1, len(black_flags)), 4),
         "text_ratio": round(sum(text_flags) / max(1, len(text_flags)), 4),
         "data_ratio": round(sum(data_flags) / max(1, len(data_flags)), 4),
         "presenter_ratio": round(sum(presenter_flags) / max(1, len(presenter_flags)), 4),
@@ -7914,10 +8024,12 @@ def probe_visual_clean_health(
         "text_windows": [index + 1 for index, flag in enumerate(text_flags) if flag],
         "data_windows": [index + 1 for index, flag in enumerate(data_flags) if flag],
         "presenter_windows": [index + 1 for index, flag in enumerate(presenter_flags) if flag],
+        "black_windows": [index + 1 for index, flag in enumerate(black_flags) if flag],
         "text_scores": sample_text_scores,
         "data_scores": sample_data_scores,
         "presenter_scores": sample_presenter_scores,
         "pollution_scores": sample_pollution_scores,
+        "black_scores": sample_black_scores,
         "sample_positions": _sample_positions_for_video(duration, len(frames)),
     }
     is_img = bool(media_kind == "image" or is_image_path(path) or len(frames) == 1)
@@ -7940,6 +8052,7 @@ def probe_visual_clean_health(
         "side_edge_density": round(med_side, 4),
         "mean": round(med_mean, 2),
         "stdev": round(med_stdev, 2),
+        "black_ratio": round(med_black, 4),
         "frame_diff": round(med_diff, 2),
         "edge_persistence": round(med_persistence, 3),
         "vertical_span": round(med_span, 3),
