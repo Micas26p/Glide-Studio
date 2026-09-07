@@ -4719,6 +4719,7 @@ function outputValidationError(job){
 
 function resetProgress({preserveMinimized = false} = {}){
   if(!preserveMinimized) modal.classList.remove('minimized');
+  state.renderMaxPercent = 0;
   progressBar.style.width = '0%';
   eyePercent.textContent = '0%';
   renderMsg.textContent = 'Preparando arquivos';

@@ -5658,7 +5658,10 @@ def probe_duration(path: Path, cwd: Path | None = None) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(source),
     ]
-    p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    try:
+        p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=15)
+    except Exception as exc:
+        raise RuntimeError(f"Falha/Timeout ao ler duração de {path}: {exc}") from exc
     if p.returncode != 0:
         raise RuntimeError(f"Falha ao ler duração de {path}: {p.stderr[-700:]}")
     try:
@@ -5889,19 +5892,53 @@ def probe_video_render_health(path: Path, duration: float, cwd: Path | None = No
     }
     if duration <= 0.08:
         summary.update({"valid": False, "reason": "sem duracao legivel"})
-    else:
-        visual = probe_visible_video_frame(path, duration, cwd=cwd)
-        summary.update({
-            "visual_checked": True,
-            "visible_frame": bool(visual.get("visible")),
-            "suggested_offset": float(visual.get("suggested_offset") or 0.0),
-            "visual_samples": visual.get("samples") or [],
-        })
-        if not visual.get("visible"):
+        VIDEO_HEALTH_CACHE[key] = dict(summary)
+        return summary
+
+    # Reutiliza diagnostico previo do VISUAL_CLEAN_CACHE para poupar centenas de subprocessos FFmpeg
+    try:
+        resolved = _resolved_media_path(path, cwd)
+        key_stem = resolved.name.lower()
+        cached_clean = None
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for ck, cv in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(ck).lower() and isinstance(cv, dict):
+                    cached_clean = cv
+                    break
+        if cached_clean is not None:
+            cat = str(cached_clean.get("category") or "")
+            act = str(cached_clean.get("action") or "")
+            is_black = (
+                cat in {"black_screen", "static_black_screen", "no_frames"}
+                or (act == "hard_reject" and "tela preta" in str(cached_clean.get("reason", "")).lower())
+            )
+            clean_trim = cached_clean.get("clean_trim") or cached_clean.get("metrics", {}).get("clean_trim") or {}
+            trim_start = float(clean_trim.get("clean_start") or 0.0) if isinstance(clean_trim, dict) else 0.0
             summary.update({
-                "valid": False,
-                "reason": f"arquivo com tela preta/sem frames visiveis ({size_mb:.2f} MB)",
+                "valid": not is_black,
+                "reason": "ok" if not is_black else f"arquivo com tela preta ({size_mb:.2f} MB)",
+                "visual_checked": True,
+                "visible_frame": not is_black,
+                "suggested_offset": round(trim_start, 3),
+                "visual_samples": [],
             })
+            VIDEO_HEALTH_CACHE[key] = dict(summary)
+            return summary
+    except Exception:
+        pass
+
+    visual = probe_visible_video_frame(path, duration, cwd=cwd)
+    summary.update({
+        "visual_checked": True,
+        "visible_frame": bool(visual.get("visible")),
+        "suggested_offset": float(visual.get("suggested_offset") or 0.0),
+        "visual_samples": visual.get("samples") or [],
+    })
+    if not visual.get("visible"):
+        summary.update({
+            "valid": False,
+            "reason": f"arquivo com tela preta/sem frames visiveis ({size_mb:.2f} MB)",
+        })
     VIDEO_HEALTH_CACHE[key] = dict(summary)
     return summary
 
@@ -5922,6 +5959,8 @@ def enforce_clean_opening_protocol(
 
     for idx, (path, dur) in enumerate(valid_pairs):
         is_opening = idx < opening_count
+        if not is_opening and len(clean_pool_indices) >= len(polluted_indices_in_opening):
+            break
         analysis = probe_visual_clean_health(path, dur, "normal", cwd=work)
         category = str(analysis.get("category") or "clean")
         action = str(analysis.get("action") or "keep")
@@ -9088,9 +9127,20 @@ def apply_visual_clean_filter(
         source_context = visual_filter_source_context(job, source, project_context)
         tasks.append((idx, source, duration, zone, work, source_context, media_kind))
 
+    cur_pct = getattr(job, "percent", 15.0) or 15.0
+    total_tasks = max(1, len(tasks))
+    set_stage(
+        job,
+        "rendering",
+        f"Filtrando clipes (0/{total_tasks})" if tasks else "Filtrando integridade visual",
+        f"Analisando qualidade e integridade visual ({total_tasks} clipes)..." if tasks else "Verificando integridade visual...",
+        percent=max(cur_pct, 16.0),
+    )
+
     if len(tasks) > 1:
         logical_cpus = max(2, int(os.cpu_count() or 4))
         max_workers = min(6, logical_cpus)
+        completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(
@@ -9100,17 +9150,32 @@ def apply_visual_clean_filter(
                 for task in tasks
             ]
             for f in as_completed(futures):
+                completed_tasks += 1
                 try:
                     res_idx, res_data = f.result()
                     precomputed_probes[res_idx] = res_data
                 except Exception:
                     pass
+                if completed_tasks % 2 == 0 or completed_tasks == total_tasks:
+                    step_pct = round(16.0 + (completed_tasks / total_tasks) * 6.0, 1)
+                    if hasattr(job, "percent"):
+                        job.percent = max(getattr(job, "percent", 15.0), step_pct)
+                    if hasattr(job, "stage_label"):
+                        job.stage_label = f"Filtrando clipes ({completed_tasks}/{total_tasks})"
+                    if hasattr(job, "message"):
+                        job.message = f"Analisando integridade visual ({completed_tasks}/{total_tasks})"
     elif len(tasks) == 1:
         t = tasks[0]
         try:
             precomputed_probes[t[0]] = probe_visual_clean_health(t[1], t[2], t[3], cwd=t[4], context=t[5], media_kind=t[6])
         except Exception:
             pass
+        if hasattr(job, "percent"):
+            job.percent = max(getattr(job, "percent", 15.0), 22.0)
+        if hasattr(job, "stage_label"):
+            job.stage_label = "Filtrando clipes (1/1)"
+        if hasattr(job, "message"):
+            job.message = "Análise de integridade concluída"
 
     # Análise Rigorosa Sequencial Front-to-Back com Salvaguarda Dinâmica de Mídia:
     # A avaliação percorre obrigatoriamente os clipes na ordem sequencial da timeline (do começo ao fim).
@@ -9125,24 +9190,11 @@ def apply_visual_clean_filter(
     safety_halted = False
     total_valid = max(1, len(valid_pairs))
 
-    cur_pct = getattr(job, "percent", 15.0) or 15.0
-    set_stage(
-        job,
-        "rendering",
-        "Filtrando integridade visual",
-        f"Analisando qualidade e integridade visual ({total_valid} clipes)...",
-        percent=max(cur_pct, 16.0),
-    )
-
     for idx, (source, duration) in enumerate(valid_pairs):
-        if idx % 4 == 0 or idx == total_valid - 1:
+        if idx % 8 == 0 or idx == total_valid - 1:
             step_pct = round(16.0 + (idx / total_valid) * 6.0, 1)
             if hasattr(job, "percent"):
                 job.percent = max(getattr(job, "percent", 15.0), step_pct)
-            if hasattr(job, "stage_label"):
-                job.stage_label = f"Filtrando clipes ({idx + 1}/{total_valid})"
-            if hasattr(job, "message"):
-                job.message = f"Analisando integridade visual ({idx + 1}/{total_valid})"
 
         position_ratio = cumulative / raw_total
         cumulative += duration
@@ -10129,6 +10181,7 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
         script = work / "audio_filter_complex.txt"
         script.write_text(";".join(filters), encoding="utf-8")
         cmd += ["-filter_complex_script", script.name, "-map", "[aout]", "-ac", "2", "-ar", "48000", str(out)]
+        run_cmd(job, cmd, total_duration=total or None, base=10, span=5, cwd=work)
     return out, total
 
 
@@ -12197,10 +12250,10 @@ def prune_generated_media_cache() -> dict[str, Any]:
         CACHE_MAINTENANCE_LOCK.release()
 
 
-def run_hidden_checked(cmd: list[str], cwd: Path | None = None):
+def run_hidden_checked(cmd: list[str], cwd: Path | None = None, timeout: float | None = 180.0):
     if not FFMPEG:
         raise RuntimeError("FFmpeg nao encontrado.")
-    p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, text=True, encoding="utf-8", errors="ignore")
+    p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=timeout)
     if p.returncode != 0:
         raise RuntimeError((p.stderr or p.stdout or "FFmpeg falhou")[-1200:])
     return p
@@ -17820,6 +17873,7 @@ def make_segments_smart(
         imported_count=len(video_files),
     )
     # Semantic B-Roll Matcher: alinha tematicamente clipes com as falas da narracao
+    set_stage(job, "rendering", "Alinhando B-roll semântico", "Alinhando mídias à narração...", percent=22.5)
     cues_for_matching = list(job.subtitle_cues or [])
     if not cues_for_matching and subtitles:
         for srt_f in subtitles:
@@ -17829,6 +17883,7 @@ def make_segments_smart(
     valid_pairs, semantic_b_roll_summary = match_media_to_subtitles(job, valid_pairs, cues_for_matching, audio_total)
     job.preflight_summary["semantic_b_roll"] = semantic_b_roll_summary
     # Clean Opening Protocol: protege estritamente os primeiros 10 slots com B-roll limpo
+    set_stage(job, "rendering", "Protegendo abertura", "Aplicando protocolo de abertura limpa...", percent=23.5)
     valid_pairs, clean_opening_summary = enforce_clean_opening_protocol(job, valid_pairs, work, max_opening_slots=10)
     job.preflight_summary["clean_opening"] = clean_opening_summary
     performance_stop(job, "visual_analysis")
@@ -17837,11 +17892,13 @@ def make_segments_smart(
         raise RuntimeError("Nenhum video valido foi encontrado. Remova arquivos corrompidos ou adicione novos clipes.")
     original_video_count = len(video_files)
     performance_start(job, "continuity")
+    set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=24.5)
     continuity_filters, continuity_summary = continuity_adjustments(job, valid_pairs, work)
     performance_stop(job, "continuity")
     job.continuity_summary = continuity_summary
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
+    set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=25.5)
     source_offsets: dict[str, float] = {}
     for src, dur in valid_pairs:
         if not is_image_path(src):
@@ -17863,6 +17920,7 @@ def make_segments_smart(
     }
     window_scores_by_source: dict[str, dict[str, Any]] = {}
     if visual_window_summary["enabled"]:
+        set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=27.0)
         performance_start(job, "visual_windows")
         for src, dur in valid_pairs:
             if is_image_path(src) or dur <= 1.2:
@@ -17917,6 +17975,7 @@ def make_segments_smart(
                 break
     if not srt_file and getattr(job, "srt_path", None) and Path(str(job.srt_path)).exists():
         srt_file = Path(str(job.srt_path))
+    set_stage(job, "rendering", "Planejando timeline", "Montando plano de edição, cortes e ritmo...", percent=28.5)
     plans, summary = build_segment_plan(
         video_files,
         video_durs,
@@ -17987,6 +18046,7 @@ def make_segments_smart(
     segments: list[Path] = []
     accepted_plans: list[SegmentPlan] = []
     failed_sources: set[str] = set()
+    set_stage(job, "rendering", "Preparando segmentos", f"Iniciando renderização de {len(plans)} tomada(s)...", percent=30.0)
     _append_log(job, (
         f"Motor v0.8 otimizado: áudio={summary.get('audio_duration', audio_total):.2f}s | "
         f"vídeo bruto={summary.get('raw_video_duration', 0.0):.2f}s | velocidade={summary.get('playback_speed', 1.0):.2f}x | "
@@ -18165,8 +18225,9 @@ def make_segments_smart(
             completed_planned_duration += min(plan.target_duration, actual)
             has_comp = getattr(job, "has_visual_composition", False)
             max_seg_pct = 60.0 if has_comp else 92.0
-            seg_span = 45.0 if has_comp else 77.0
-            job.percent = max(job.percent, min(max_seg_pct, 15.0 + (completed_planned_duration / max(1.0, audio_total)) * seg_span))
+            seg_base = 30.0
+            seg_span = max_seg_pct - seg_base
+            job.percent = max(job.percent, min(max_seg_pct, seg_base + (completed_planned_duration / max(1.0, audio_total)) * seg_span))
         return out, actual
 
     performance_start(job, "segments")
