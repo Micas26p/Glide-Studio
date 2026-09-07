@@ -556,6 +556,64 @@ def probe_image_dimensions(path: Path | str) -> tuple[int, int]:
     return 1920, 1080
 
 
+MEDIA_DIMENSIONS_CACHE: dict[str, tuple[int, int]] = {}
+
+
+def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
+    """Obtém largura e altura (w, h) de vídeo ou imagem com autorotate e cache em memória."""
+    key = str(path).lower()
+    if key in MEDIA_DIMENSIONS_CACHE:
+        return MEDIA_DIMENSIONS_CACHE[key]
+    p = Path(str(path))
+    if is_image_path(p):
+        dims = probe_image_dimensions(p)
+        MEDIA_DIMENSIONS_CACHE[key] = dims
+        return dims
+
+    # 1. Leitura ultra-rápida via OpenCV (<1ms)
+    try:
+        import cv2
+        cap = cv2.VideoCapture(str(p))
+        if cap.isOpened():
+            vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            cap.release()
+            if vw > 0 and vh > 0:
+                MEDIA_DIMENSIONS_CACHE[key] = (vw, vh)
+                return vw, vh
+    except Exception:
+        pass
+
+    # 2. Fallback robusto via FFprobe com suporte a metadados de rotação
+    try:
+        cmd = [
+            FFPROBE, "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height,rotation:stream_tags=rotate",
+            "-of", "json",
+            str(p)
+        ]
+        out = subprocess.check_output(cmd, timeout=3.0, stderr=subprocess.DEVNULL).decode()
+        data = json.loads(out)
+        streams = data.get("streams", [])
+        if streams:
+            s = streams[0]
+            vw = int(s.get("width", 0))
+            vh = int(s.get("height", 0))
+            rot = s.get("rotation") or (s.get("tags") or {}).get("rotate")
+            if rot and abs(int(float(rot))) in (90, 270):
+                vw, vh = vh, vw
+            if vw > 0 and vh > 0:
+                MEDIA_DIMENSIONS_CACHE[key] = (vw, vh)
+                return vw, vh
+    except Exception:
+        pass
+
+    dims = (1920, 1080)
+    MEDIA_DIMENSIONS_CACHE[key] = dims
+    return dims
+
+
 IMAGE_FOCAL_CACHE: dict[str, tuple[float, float]] = {}
 
 
@@ -1134,6 +1192,7 @@ class SegmentPlan:
     scale_boost: float = 1.0
     clean_roi: tuple[float, float, float, float] | None = None
     timeline_zone: str = "body"
+    delogo_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
 
 
 @dataclass
@@ -7287,6 +7346,18 @@ def _classify_visual_analysis(
                 metrics["clean_start_offset"] = video_trim["clean_start"]
                 metrics["clean_end_offset"] = video_trim["clean_end"]
                 metrics["clean_usable_duration"] = video_trim["clean_duration"]
+        elif not is_image and corner_wm.get("worst_corner"):
+            classified.update({
+                "category": "rescued_delogo_video",
+                "action": "keep",
+                "reason": f"video resgatado com delogo cirurgico (neutralizou marca d'agua no canto {c_label})",
+                "confidence": 0.88,
+                "corner_watermark": corner_wm,
+                "delogo_rescued": True,
+            })
+            if isinstance(metrics, dict):
+                metrics["delogo_rescued"] = True
+                metrics["corner_watermark"] = corner_wm
         else:
             classified.update({
                 "category": "watermark_corner",
@@ -8362,6 +8433,54 @@ def get_media_corner_watermark(path: Path | str, cwd: Path | None = None) -> dic
     return None
 
 
+def calculate_video_delogo_boxes(
+    corner_info: dict[str, Any] | None,
+    src_w: int,
+    src_h: int,
+) -> list[tuple[int, int, int, int]]:
+    """Calcula caixas (x, y, w, h) alinhadas para o filtro delogo do FFmpeg."""
+    if not corner_info or not corner_info.get("has_watermark") or src_w <= 0 or src_h <= 0:
+        return []
+    corners = list(corner_info.get("detected_corners") or [])
+    if not corners and corner_info.get("worst_corner"):
+        corners = [corner_info["worst_corner"]]
+    boxes: list[tuple[int, int, int, int]] = []
+    box_w = max(40, min(src_w - 4, int(src_w * 0.22)))
+    box_h = max(24, min(src_h - 4, int(src_h * 0.15)))
+    margin_x = max(4, int(src_w * 0.015))
+    margin_y = max(4, int(src_h * 0.015))
+    for c in corners:
+        if c == "top_left":
+            x, y = margin_x, margin_y
+        elif c == "top_right":
+            x, y = max(0, src_w - box_w - margin_x), margin_y
+        elif c == "bottom_left":
+            x, y = margin_x, max(0, src_h - box_h - margin_y)
+        elif c == "bottom_right":
+            x, y = max(0, src_w - box_w - margin_x), max(0, src_h - box_h - margin_y)
+        else:
+            continue
+        # Alinhamento par para amostragem YUV420p
+        x = int(x - (x % 2))
+        y = int(y - (y % 2))
+        bw = int(min(box_w, src_w - x))
+        bh = int(min(box_h, src_h - y))
+        bw = int(bw - (bw % 2)) if bw > 2 else bw
+        bh = int(bh - (bh % 2)) if bh > 2 else bh
+        if bw > 0 and bh > 0 and (x + bw <= src_w) and (y + bh <= src_h):
+            boxes.append((x, y, bw, bh))
+    return boxes
+
+
+def get_media_delogo_boxes(path: Path | str, cwd: Path | None = None) -> list[tuple[int, int, int, int]]:
+    """Recupera caixas de delogo para uma mídia caso marca d'água de canto tenha sido detectada."""
+    wm = get_media_corner_watermark(path, cwd)
+    if not wm or not wm.get("has_watermark"):
+        return []
+    w, h = probe_media_dimensions(path)
+    return calculate_video_delogo_boxes(wm, w, h)
+
+
 def semantic_model_status() -> dict[str, Any]:
     model_file = MODEL_PACK_ROOT / "model.onnx"
     labels_file = MODEL_PACK_ROOT / "labels.json"
@@ -8741,6 +8860,7 @@ def apply_visual_clean_filter(
         "rejected_watermarks": 0,
         "historical_photos_preserved": 0,
         "videos_rescued_by_trim": 0,
+        "delogo_rescued_segments": 0,
         "context_mismatches": 0,
         "soft_demoted": 0,
         "fallback_used": 0,
@@ -8969,6 +9089,9 @@ def apply_visual_clean_filter(
                 item["clean_trim"] = trim_info
                 item["clean_start_offset"] = trim_info.get("clean_start")
                 item["clean_end_offset"] = trim_info.get("clean_end")
+            elif category == "rescued_delogo_video":
+                summary["delogo_rescued_segments"] += 1
+                item["decision"] = "rescued_delogo"
             elif category == "historical_photo":
                 summary["historical_photos_preserved"] += 1
                 item["decision"] = "kept_historical"
@@ -15846,14 +15969,39 @@ def build_video_filter(
     punch_in: bool = False,
     hflip: bool = False,
     scale_boost: float = 1.0,
+    source_w: int = 0,
+    source_h: int = 0,
+    delogo_boxes: list[tuple[int, int, int, int]] | None = None,
 ) -> str:
     vf = ""
+    if delogo_boxes:
+        for dx, dy, dw, dh in delogo_boxes:
+            if dw > 0 and dh > 0:
+                vf += f"delogo=x={dx}:y={dy}:w={dw}:h={dh},"
     if is_reversed:
         vf += "reverse,"
     if hflip:
         vf += "hflip,"
+
+    target_ratio = float(w) / float(max(1, h))
+    src_ratio = float(source_w) / float(max(1, source_h)) if (source_w > 0 and source_h > 0) else target_ratio
+    ratio_diff = src_ratio / max(0.01, target_ratio)
+    needs_ambient_fill = (source_w > 0 and source_h > 0) and (ratio_diff < 0.82 or ratio_diff > 1.30)
+
     eff_scale = (1.12 if punch_in else 1.0) * max(1.0, min(1.25, float(scale_boost or 1.0)))
-    if abs(eff_scale - 1.0) > 0.005:
+
+    if needs_ambient_fill:
+        # Inovação 2: Gestão Inteligente de Mídia Mista — Ambient Glass Fill
+        # Clipes verticais (9:16) ou 4:3 são preservados 100% visíveis e nítidos no centro,
+        # com reflexo ampliado, desfocado e sutilmente escurecido nas laterais.
+        vf += (
+            f"split=2[bg][fg];"
+            f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
+            f"boxblur=25:5,eq=brightness=-0.08:saturation=0.85,setsar=1[bg_glass];"
+            f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg_sharp];"
+            f"[bg_glass][fg_sharp]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,settb=AVTB,setpts=PTS-STARTPTS"
+        )
+    elif abs(eff_scale - 1.0) > 0.005:
         pw = int(math.ceil(w * eff_scale / 2.0) * 2)
         ph = int(math.ceil(h * eff_scale / 2.0) * 2)
         vf += (
@@ -15993,9 +16141,9 @@ def build_image_filter_complex(
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
 
-    # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Background blur elegante com supersampling
+    # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Ambient Glass blur elegante com supersampling
     return (
-        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=24:3,setsar=1[bg];"
+        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=25:5,eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
         f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
@@ -17037,6 +17185,8 @@ def make_segments_smart(
     summary["decode_failed_names"] = []
     summary["fill_segments"] = 0
     summary["actual_rendered_duration"] = 0.0
+    summary["ambient_glass_segments"] = 0
+    summary["delogo_applied_segments"] = 0
     visual = effective_visual_options(job)
     summary["quality_boost_requested"] = bool(job.options.get("qualityBoost", True))
     summary["quality_boost"] = visual["quality_boost"]
@@ -17118,6 +17268,12 @@ def make_segments_smart(
         segment_threads = max(1, int(performance_budget.get("segment_threads") or 2))
         segment_thread_args = ["-threads", str(segment_threads), "-filter_threads", str(segment_filter_threads)]
         if plan.media_kind == "image" or is_image_path(plan.source):
+            img_w, img_h = probe_image_dimensions(plan.source)
+            target_ratio = float(w) / float(max(1, h))
+            img_ratio = float(img_w) / float(max(1, img_h))
+            ratio_diff = img_ratio / max(0.01, target_ratio)
+            if ratio_diff < 0.85 or ratio_diff > 1.28:
+                summary["ambient_glass_segments"] = summary.get("ambient_glass_segments", 0) + 1
             style_profile = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
             filter_complex = build_image_filter_complex(
                 w,
@@ -17142,6 +17298,16 @@ def make_segments_smart(
                 str(out),
             ]
         else:
+            src_w, src_h = probe_media_dimensions(plan.source)
+            delogo_boxes = getattr(plan, "delogo_boxes", None) or get_media_delogo_boxes(plan.source, work)
+            target_ratio = float(w) / float(max(1, h))
+            src_ratio = float(src_w) / float(max(1, src_h)) if (src_w > 0 and src_h > 0) else target_ratio
+            ratio_diff = src_ratio / max(0.01, target_ratio)
+            if ratio_diff < 0.82 or ratio_diff > 1.30:
+                summary["ambient_glass_segments"] = summary.get("ambient_glass_segments", 0) + 1
+            if delogo_boxes:
+                summary["delogo_applied_segments"] = summary.get("delogo_applied_segments", 0) + 1
+
             vf = build_video_filter(
                 w,
                 h,
@@ -17166,6 +17332,9 @@ def make_segments_smart(
                 punch_in=plan.punch_in,
                 hflip=getattr(plan, "hflip", False),
                 scale_boost=getattr(plan, "scale_boost", 1.0),
+                source_w=src_w,
+                source_h=src_h,
+                delogo_boxes=delogo_boxes,
             )
             input_limit = max(0.5, (plan.target_duration / max(0.08, float(summary.get("setpts_factor", 1.0)))) + 1.25)
             seek_args = []
@@ -17382,6 +17551,12 @@ def make_segments_smart(
         _append_log(job, (
             f"Autoajuste de timeline: video real={rendered_duration:.2f}s | "
             f"ignorados={summary['skipped_segments']} | falhas_decode={summary['decode_failed_segments']} | extras={summary['fill_segments']}."
+        ))
+    if summary.get("ambient_glass_segments") or summary.get("delogo_applied_segments"):
+        _append_log(job, (
+            f"Gestao Inteligente de Midia Mista: ambient_glass={summary.get('ambient_glass_segments', 0)} "
+            f"(zero barras pretas / sem corte vertical) | delogo_cirurgico={summary.get('delogo_applied_segments', 0)} "
+            f"(marcas neutralizadas)."
         ))
     job.accepted_plans = list(accepted_plans)
     job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
