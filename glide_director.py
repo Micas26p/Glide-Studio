@@ -743,3 +743,147 @@ def extract_script_visual_intent(text: str) -> dict[str, Any]:
         "matched_keywords": matched_keywords,
     }
 
+
+SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
+    "WAR_CONFLICT_CRISIS": {
+        "guerra", "batalha", "soldado", "soldados", "exercito", "forcas", "tropas", "missil", "bomba", "bombardeio",
+        "tiro", "tiros", "trincheira", "conflito", "confronto", "invasao", "combate", "militar", "ataque", "perigo",
+        "inimigo", "inimigos", "destruicao", "ruina", "colapso", "crise", "ameaca", "sangue", "morte", "armas", "fuzil",
+        "tanque", "tanques", "violencia", "guerreiro", "derrota", "ofensiva",
+        "war", "battle", "soldier", "soldiers", "army", "military", "forces", "troops", "missile", "bomb", "tanks",
+        "combat", "trench", "conflict", "invasion", "danger", "enemy", "destruction", "ruin", "collapse", "crisis",
+        "threat", "blood", "death", "weapons", "weapon", "gun", "guns", "attack", "fighting", "warrior", "offensive",
+        "guerra", "batalla", "soldado", "ejercito", "tropas", "misil", "bomba", "combate", "conflicto", "peligro",
+        "enemigo", "destruccion", "colapso", "amenaza", "violencia",
+        "guerre", "bataille", "soldat", "armee", "troupes", "missile", "bombe", "conflit", "danger", "ennemi",
+        "krieg", "schlacht", "soldat", "armee", "truppen", "rakete", "bombe", "kampf", "feind", "waffen",
+    },
+    "WEALTH_POWER_BUSINESS": {
+        "dinheiro", "riqueza", "fortuna", "bilionario", "bilionarios", "milionario", "imperio", "poder", "ouro",
+        "dolar", "dolares", "banco", "bancos", "banqueiro", "mercado", "acoes", "investimento", "lucro", "lucros",
+        "empresa", "empresas", "corporacao", "negociacao", "negocio", "mansao", "luxo", "capitalismo", "financas",
+        "economia", "capital", "heranca", "sucesso", "patrimonio", "riquezas",
+        "money", "wealth", "fortune", "billionaire", "billionaires", "millionaire", "empire", "power", "gold", "dollar",
+        "dollars", "bank", "banks", "banker", "market", "stocks", "investment", "profit", "profits", "business",
+        "corporate", "corporation", "luxury", "mansion", "rich", "capital", "finance", "finances", "economy", "success",
+        "dinero", "riqueza", "fortuna", "multimillonario", "imperio", "poder", "oro", "banco", "acciones", "inversion",
+        "ganancia", "empresa", "lujo", "mansion", "economia",
+        "argent", "richesse", "fortune", "milliardaire", "empire", "pouvoir", "or", "banque", "bourse", "investissement",
+        "geld", "reichtum", "vermoegen", "milliardaer", "imperium", "macht", "gold", "bank", "aktien", "gewinn",
+    },
+    "MYSTERY_INVESTIGATION": {
+        "segredo", "segredos", "misterio", "misterios", "oculto", "conspiracao", "verdade", "revelacao", "investigacao",
+        "tribunal", "juiz", "julgamento", "prova", "provas", "documento", "documentos", "dossie", "espiao", "espioes",
+        "espionagem", "arquivo", "arquivos", "caso", "crime", "crimes", "suspeito", "pista", "pistas", "testemunha",
+        "escandalo", "policia", "fraude", "acusacao", "conspiradores",
+        "secret", "secrets", "mystery", "mysteries", "hidden", "conspiracy", "truth", "revelation", "investigation",
+        "court", "judge", "trial", "evidence", "proof", "document", "documents", "dossier", "spy", "spies",
+        "espionage", "archive", "archives", "case", "crime", "suspect", "clue", "clues", "witness", "scandal", "police",
+        "fraud", "detective",
+        "secreto", "misterio", "oculto", "conspiracion", "verdad", "investigacion", "tribunal", "juicio", "evidencia",
+        "archivo", "crimen", "sospechoso", "pista", "escandalo",
+        "secret", "mystere", "cache", "conspiration", "verite", "enquete", "tribunal", "proces", "preuve", "espion",
+        "geheimnis", "mysterium", "verschwoerung", "wahrheit", "ermittlung", "gericht", "beweis", "spion", "archiv",
+    },
+    "SCIENCE_INNOVATION_TECH": {
+        "tecnologia", "ciencia", "inovacao", "computador", "computadores", "software", "digital", "algoritmo",
+        "inteligencia", "artificial", "maquina", "maquinas", "robo", "robos", "automacao", "futuro", "espaco",
+        "satelite", "foguete", "laboratorio", "pesquisa", "dados", "chip", "rede", "internet", "sistema", "sistemas",
+        "invencao", "cientista", "cientistas", "energia", "nuclear", "genetica",
+        "technology", "science", "innovation", "computer", "computers", "software", "digital", "algorithm",
+        "intelligence", "artificial", "machine", "machines", "robot", "robots", "automation", "future", "space",
+        "satellite", "rocket", "lab", "laboratory", "research", "data", "chip", "network", "internet", "system",
+        "systems", "invention", "scientist", "scientists", "energy", "nuclear", "ai",
+        "tecnologia", "ciencia", "innovacion", "computadora", "algoritmo", "inteligencia", "maquina", "robot",
+        "futuro", "espacio", "satelite", "laboratorio", "datos", "sistema",
+        "technologie", "science", "innovation", "ordinateur", "algorithme", "intelligence", "machine", "robot",
+        "espace", "satellite", "laboratoire", "donnees",
+        "technologie", "wissenschaft", "innovation", "computer", "algorithmus", "intelligenz", "maschine", "roboter",
+        "weltraum", "satellit", "labor", "daten",
+    },
+    "NATURE_JOURNEY_EXPLORATION": {
+        "natureza", "floresta", "mata", "selva", "oceano", "mar", "rio", "agua", "aguas", "montanha", "montanhas",
+        "cordilheira", "deserto", "areia", "terra", "horizonte", "estrada", "viagem", "jornada", "expedicao",
+        "exploracao", "planeta", "animal", "animais", "fauna", "flora", "tempestade", "ceu", "nuvens", "arvore",
+        "arvores", "paisagem", "selvagem", "vento", "sol",
+        "nature", "forest", "jungle", "ocean", "sea", "river", "water", "waters", "mountain", "mountains", "desert",
+        "sand", "earth", "horizon", "road", "journey", "travel", "trip", "expedition", "exploration", "planet",
+        "animal", "animals", "wildlife", "storm", "sky", "clouds", "tree", "trees", "landscape", "wild", "wind", "sun",
+        "naturaleza", "bosque", "selva", "oceano", "mar", "rio", "montana", "desierto", "arena", "tierra", "horizonte",
+        "carretera", "viaje", "expedicion", "planeta", "animal", "paisaje",
+        "nature", "foret", "jungle", "ocean", "mer", "riviere", "montagne", "desert", "voyage", "expedition", "animal",
+        "natur", "wald", "dschungel", "ozean", "meer", "fluss", "berg", "berge", "wueste", "reise", "expedition", "tier",
+    },
+    "HUMAN_DRAMA_PASSION": {
+        "pessoa", "pessoas", "humano", "humanos", "homem", "mulher", "crianca", "familia", "povo", "multidao",
+        "sociedade", "sentimento", "emocao", "emocoes", "amor", "odio", "esperanca", "medo", "lagrimas", "dor",
+        "sofrimento", "coragem", "heroi", "lider", "lideres", "discurso", "destino", "sobrevivencia", "vida", "alma",
+        "paixao", "olhar", "rosto", "voz",
+        "person", "people", "human", "humans", "man", "woman", "child", "family", "society", "crowd", "emotion",
+        "emotions", "feeling", "feelings", "love", "hate", "hope", "fear", "tears", "pain", "suffering", "courage",
+        "hero", "leader", "leaders", "speech", "destiny", "survival", "life", "soul", "passion", "face", "voice",
+        "persona", "personas", "humano", "hombre", "mujer", "familia", "pueblo", "multitud", "emocion", "amor",
+        "esperanza", "miedo", "lagrimas", "dolor", "coraje", "heroe", "lider", "vida",
+        "personne", "gens", "humain", "homme", "femme", "famille", "foule", "emotion", "amour", "peur", "larmes", "vie",
+        "person", "menschen", "mensch", "mann", "frau", "familie", "volk", "menge", "gefuehl", "liebe", "angst", "leben",
+    },
+    "ANCIENT_HISTORY_TIME": {
+        "historia", "historico", "historica", "antigo", "antigos", "seculo", "seculos", "passado", "memoria",
+        "ancestral", "imperio", "reino", "rei", "rainha", "dinastia", "piramide", "piramides", "castelo", "ruinas",
+        "templo", "arqueologia", "monumento", "civilizacao", "antiguidade", "reliquia", "tradicao", "mito", "lenda",
+        "history", "historical", "ancient", "century", "centuries", "past", "memory", "ancestral", "empire",
+        "kingdom", "king", "queen", "dynasty", "pyramid", "pyramids", "castle", "ruins", "temple", "archaeology",
+        "monument", "civilization", "antiquity", "relic", "heritage", "myth", "legend",
+        "historia", "historico", "antiguo", "siglo", "siglos", "pasado", "imperio", "reino", "rey", "dinastia",
+        "piramide", "ruinas", "templo", "arqueologia", "civilizacion",
+        "histoire", "historique", "ancien", "siecle", "siecles", "passe", "empire", "royaume", "pyramide", "ruines",
+        "geschichte", "historisch", "antik", "jahrhundert", "vergangenheit", "imperium", "koenig", "pyramide", "ruinen",
+    },
+    "URBAN_METROPOLIS": {
+        "cidade", "cidades", "metropole", "urbano", "urbana", "predio", "predios", "arranha-ceu", "rua", "ruas",
+        "avenida", "trafego", "carros", "concreto", "asfalto", "arquitetura", "centro", "capital", "iluminacao",
+        "luzes", "noite", "noturno", "construcao", "viaduto",
+        "city", "cities", "metropolis", "urban", "building", "buildings", "skyscraper", "skyscrapers", "street",
+        "streets", "avenue", "traffic", "cars", "concrete", "asphalt", "architecture", "downtown", "capital",
+        "lighting", "lights", "night", "construction",
+        "ciudad", "metropolis", "urbano", "edificio", "edificios", "rascacielos", "calle", "trafico", "concreto",
+        "arquitectura", "luces", "noche",
+        "ville", "metropole", "urbain", "batiment", "gratte-ciel", "rue", "trafic", "architecture", "lumieres", "nuit",
+        "stadt", "metropole", "urban", "gebaeude", "wolkenkratzer", "strasse", "verkehr", "architektur", "lichter", "nacht",
+    },
+}
+
+
+def extract_narrative_semantic_vector(text: str) -> dict[str, float]:
+    """Calcula a distribuição semântica normalizada do texto sobre os 8 clusters conceituais."""
+    folded = fold_text(text)
+    words = set(re.findall(r"[a-z0-9]{3,}", folded))
+    raw_scores: dict[str, float] = {}
+
+    for cluster_name, kws in SEMANTIC_CONCEPT_CLUSTERS.items():
+        matched = words.intersection(kws)
+        if matched:
+            raw_scores[cluster_name] = float(len(matched))
+
+    total = sum(raw_scores.values())
+    if total <= 0.0:
+        return {k: 0.125 for k in SEMANTIC_CONCEPT_CLUSTERS}
+
+    return {k: round(raw_scores.get(k, 0.0) / total, 4) for k in SEMANTIC_CONCEPT_CLUSTERS}
+
+
+def compute_semantic_cosine_similarity(vec_a: dict[str, float], vec_b: dict[str, float]) -> float:
+    """Calcula a similaridade de cosseno ponderada entre dois perfis semânticos de 8 dimensões."""
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for k in SEMANTIC_CONCEPT_CLUSTERS:
+        va = float(vec_a.get(k, 0.0))
+        vb = float(vec_b.get(k, 0.0))
+        dot += va * vb
+        norm_a += va * va
+        norm_b += vb * vb
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (math.sqrt(norm_a) * math.sqrt(norm_b))))
+

@@ -48,6 +48,9 @@ from glide_director import (
     extract_script_visual_intent,
     VISUAL_MOODS,
     MOTION_DYNAMICS,
+    SEMANTIC_CONCEPT_CLUSTERS,
+    extract_narrative_semantic_vector,
+    compute_semantic_cosine_similarity,
 )
 from glide_intelligence_db import IntelligenceDB, stable_hash
 from glide_music_history import avoid_recent_music, channel_music_scores, load_music_history, record_music_usage
@@ -6043,29 +6046,208 @@ def _token_stem_match(t: str, w: str) -> bool:
     return False
 
 
+def classify_scene_visual_topology(prof: dict[str, Any]) -> dict[str, float]:
+    """Classifica a topologia visual do clipe em 8 arquétipos semânticos usando métricas do OpenCV."""
+    primary_mood = str(prof.get("primary_mood", "neutral"))
+    mood_scores = prof.get("mood_scores", {})
+    motion = str(prof.get("motion", "steady_motion"))
+    motion_score = float(prof.get("motion_score") or prof.get("frame_diff") or 5.0)
+    has_human = bool(prof.get("has_human"))
+    mean_b = float(prof.get("mean_brightness") or prof.get("mean") or 110.0)
+    contrast = float(prof.get("contrast") or prof.get("stdev") or 45.0)
+    is_historical = bool(prof.get("is_historical_monochrome") or prof.get("is_sepia") or prof.get("is_monochrome"))
+    edge_density = float(prof.get("edge_density") or prof.get("med_edge") or 0.02)
+
+    weights: dict[str, float] = {
+        "WAR_CONFLICT_CRISIS": 0.05,
+        "WEALTH_POWER_BUSINESS": 0.05,
+        "MYSTERY_INVESTIGATION": 0.05,
+        "SCIENCE_INNOVATION_TECH": 0.05,
+        "NATURE_JOURNEY_EXPLORATION": 0.05,
+        "HUMAN_DRAMA_PASSION": 0.05,
+        "ANCIENT_HISTORY_TIME": 0.05,
+        "URBAN_METROPOLIS": 0.05,
+    }
+
+    # 1. WAR_CONFLICT_CRISIS: Vermelho perigo, alto contraste, alta ação
+    if primary_mood in ("danger_red", "high_contrast"):
+        weights["WAR_CONFLICT_CRISIS"] += 0.40 * float(prof.get("confidence") or 0.7)
+    if motion == "high_action" or motion_score >= 11.0:
+        weights["WAR_CONFLICT_CRISIS"] += 0.25
+    if contrast >= 55.0:
+        weights["WAR_CONFLICT_CRISIS"] += 0.15
+
+    # 2. WEALTH_POWER_BUSINESS: Warm gold, alta saturação, iluminação rica e estável
+    if primary_mood == "warm_gold":
+        weights["WEALTH_POWER_BUSINESS"] += 0.45 * float(prof.get("confidence") or 0.7)
+    elif "warm_gold" in mood_scores:
+        weights["WEALTH_POWER_BUSINESS"] += 0.25 * float(mood_scores["warm_gold"])
+    if motion in ("steady_motion", "calm_contemplation") and mean_b >= 90.0:
+        weights["WEALTH_POWER_BUSINESS"] += 0.15
+
+    # 3. MYSTERY_INVESTIGATION: Baixa luminância (Dark mystery), sombras, contraste local
+    if primary_mood == "dark_mystery" or mean_b <= 48.0:
+        weights["MYSTERY_INVESTIGATION"] += 0.50
+    elif primary_mood == "cold_blue" and mean_b <= 75.0:
+        weights["MYSTERY_INVESTIGATION"] += 0.25
+
+    # 4. SCIENCE_INNOVATION_TECH: Cold blue, linhas regulares/alta densidade de bordas, telas
+    if primary_mood == "cold_blue":
+        weights["SCIENCE_INNOVATION_TECH"] += 0.35 * float(prof.get("confidence") or 0.7)
+    if edge_density >= 0.035 or contrast >= 52.0:
+        weights["SCIENCE_INNOVATION_TECH"] += 0.20
+
+    # 5. NATURE_JOURNEY_EXPLORATION: Verde abundante, azul de céu/água, amplos horizontes
+    if primary_mood == "nature_green":
+        weights["NATURE_JOURNEY_EXPLORATION"] += 0.55 * float(prof.get("confidence") or 0.7)
+    elif primary_mood == "cold_blue" and not has_human and mean_b >= 80.0:
+        weights["NATURE_JOURNEY_EXPLORATION"] += 0.30
+    if not has_human and motion in ("steady_motion", "calm_contemplation"):
+        weights["NATURE_JOURNEY_EXPLORATION"] += 0.10
+
+    # 6. HUMAN_DRAMA_PASSION: Presença forte de pele/rosto humano, enquadramento centrado
+    if has_human:
+        weights["HUMAN_DRAMA_PASSION"] += 0.55
+        if motion == "steady_motion":
+            weights["HUMAN_DRAMA_PASSION"] += 0.15
+
+    # 7. ANCIENT_HISTORY_TIME: Foto/vídeo histórico, P&B, sépia, textura analógica
+    if is_historical:
+        weights["ANCIENT_HISTORY_TIME"] += 0.65
+    elif contrast <= 35.0 and mean_b <= 85.0:
+        weights["ANCIENT_HISTORY_TIME"] += 0.15
+
+    # 8. URBAN_METROPOLIS: Alta densidade de bordas arquitetônicas, iluminação noturna/mista
+    if edge_density >= 0.030 and contrast >= 45.0:
+        weights["URBAN_METROPOLIS"] += 0.30
+    if primary_mood in ("cold_blue", "high_contrast") and mean_b >= 60.0:
+        weights["URBAN_METROPOLIS"] += 0.20
+
+    total = sum(weights.values())
+    if total <= 0.0:
+        return {k: 0.125 for k in weights}
+    return {k: round(v / total, 4) for k, v in weights.items()}
+
+
+def solve_kuhn_munkres_broll_assignment(affinity_matrix: list[list[float]]) -> list[tuple[int, int]]:
+    """Resolve a atribuição global ótima (Kuhn-Munkres / Hungarian Algorithm) entre janelas e mídias."""
+    if not affinity_matrix or not affinity_matrix[0]:
+        return []
+
+    # Native Python Hungarian (Kuhn-Munkres) O(N*M^2) with zero dependencies (fast, standalone)
+    try:
+        scipy_opt = sys.modules.get("scipy.optimize")
+        if scipy_opt is not None:
+            lsa = getattr(scipy_opt, "linear_sum_assignment", None)
+            if lsa:
+                import numpy as np  # type: ignore
+                aff_np = np.array(affinity_matrix, dtype=float)
+                max_v = float(aff_np.max()) if aff_np.size > 0 else 1.0
+                cost_matrix = max_v - aff_np
+                row_ind, col_ind = lsa(cost_matrix)
+                return [(int(r), int(c)) for r, c in zip(row_ind, col_ind)]
+    except Exception:
+        pass
+
+    # Native Python Hungarian (Kuhn-Munkres) O(N*M^2) with zero dependencies
+    n = len(affinity_matrix)
+    m = len(affinity_matrix[0])
+    max_val = max(max(row) for row in affinity_matrix) if n > 0 and m > 0 else 1.0
+    cost = [[max_val - val for val in row] for row in affinity_matrix]
+
+    if n > m:
+        # Transpose to guarantee n <= m
+        t_cost = [[cost[r][c] for r in range(n)] for c in range(m)]
+        t_aff = [[affinity_matrix[r][c] for r in range(n)] for c in range(m)]
+        t_res = solve_kuhn_munkres_broll_assignment(t_aff)
+        return [(c, r) for r, c in t_res]
+
+    u = [0.0] * (n + 1)
+    v = [0.0] * (m + 1)
+    p = [0] * (m + 1)
+    way = [0] * (m + 1)
+
+    for i in range(1, n + 1):
+        p[0] = i
+        j0 = 0
+        minv = [float("inf")] * (m + 1)
+        used = [False] * (m + 1)
+        while True:
+            used[j0] = True
+            i0 = p[j0]
+            delta = float("inf")
+            j1 = 0
+            for j in range(1, m + 1):
+                if not used[j]:
+                    cur = cost[i0 - 1][j - 1] - u[i0] - v[j]
+                    if cur < minv[j]:
+                        minv[j] = cur
+                        way[j] = j0
+                    if minv[j] < delta:
+                        delta = minv[j]
+                        j1 = j
+            for j in range(m + 1):
+                if used[j]:
+                    u[p[j]] += delta
+                    v[j] -= delta
+                else:
+                    minv[j] -= delta
+            j0 = j1
+            if p[j0] == 0:
+                break
+        while True:
+            j1 = way[j0]
+            p[j0] = p[j1]
+            j0 = j1
+            if j0 == 0:
+                break
+
+    pairs: list[tuple[int, int]] = []
+    for j in range(1, m + 1):
+        if p[j] != 0 and p[j] <= n:
+            pairs.append((p[j] - 1, j - 1))
+    return sorted(pairs, key=lambda x: x[0])
+
+
 def match_media_to_subtitles(
     job: Job,
     valid_pairs: list[tuple[Path, float]],
     cues: list[SubtitleCue],
     audio_total: float,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    """Alinha semanticamente clipes de midia com as falas correspondentes na legenda SRT via tokens e perfil visual (OpenCV Mood/Motion)."""
+    """Alinha semanticamente clipes de midia com as falas da narracao via embeddings locais e otimizacao global Kuhn-Munkres."""
     if len(valid_pairs) <= 3 or not cues:
         return valid_pairs, {"enabled": False, "matched_count": 0}
 
     cwd = getattr(job, "work", None) or DATA_ROOT
 
-    # 1. Carrega tokens e perfis visuais de cada mídia válida
+    # 1. Carrega tokens, perfis visuais e vetores semânticos de cada mídia
     media_info_list: list[dict[str, Any]] = []
     for idx, (path, dur) in enumerate(valid_pairs):
         tokens = extract_media_tokens(path)
         prof = get_media_visual_profile(path, dur, cwd=cwd)
+        topology = classify_scene_visual_topology(prof)
+        name_text = " ".join(tokens) if tokens else ""
+        name_sem = extract_narrative_semantic_vector(name_text) if name_text else {k: 0.125 for k in SEMANTIC_CONCEPT_CLUSTERS}
+
+        # Fusão equilibrada: 65% topologia visual de cena + 35% tokens léxicos
+        media_sem = {
+            k: round(0.65 * topology.get(k, 0.125) + 0.35 * name_sem.get(k, 0.125), 4)
+            for k in SEMANTIC_CONCEPT_CLUSTERS
+        }
+        tot_m = sum(media_sem.values()) or 1.0
+        media_sem = {k: round(v / tot_m, 4) for k, v in media_sem.items()}
+        dominant_theme = max(media_sem, key=lambda k: media_sem[k])
+
         media_info_list.append({
             "idx": idx,
             "path": path,
             "duration": dur,
             "tokens": tokens,
             "profile": prof,
+            "topology": topology,
+            "media_sem_vec": media_sem,
+            "dominant_theme": dominant_theme,
             "primary_mood": prof.get("primary_mood", "neutral"),
             "confidence": float(prof.get("confidence") or 0.5),
             "motion": prof.get("motion", "steady_motion"),
@@ -6109,6 +6291,7 @@ def match_media_to_subtitles(
                 "match_type": "mandatory_scene",
                 "matched_words": best_common,
                 "score": best_score,
+                "theme": m_item["dominant_theme"],
             })
 
     # 3. Agrupamento de legendas em Janelas Narrativas (~6s a 12s)
@@ -6120,6 +6303,7 @@ def match_media_to_subtitles(
         if cue.end - curr_window_start >= 7.5 or cue == cues[-1]:
             w_text = " ".join(c.text for c in curr_window_cues)
             w_intent = extract_script_visual_intent(w_text)
+            w_sem = extract_narrative_semantic_vector(w_text)
             cued_words = set(re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", w_text.lower()))
             cued_words = {w for w in cued_words if w not in MEDIA_STOPWORDS}
             windows.append({
@@ -6127,90 +6311,85 @@ def match_media_to_subtitles(
                 "end": cue.end,
                 "text": w_text,
                 "intent": w_intent,
+                "sem_vec": w_sem,
+                "dominant_theme": max(w_sem, key=lambda k: w_sem[k]),
                 "words": cued_words,
             })
             curr_window_start = cue.end
             curr_window_cues = []
 
-    # 4. Casamento Híbrido Contínuo (Tokens + Visual Scene Mood + Motion)
+    # 4. Construção da Matriz de Afinidade Global e Resolução via Kuhn-Munkres
+    candidates = [item for item in media_info_list if item["idx"] not in used_media_indices]
     token_matches = 0
     mood_matches = 0
-    for w in windows:
-        w_start = w["start"]
-        w_words = w["words"]
-        w_intent = w["intent"]
-        pref_mood = w_intent.get("preferred_mood", "neutral")
-        pref_motion = w_intent.get("preferred_motion", "steady_motion")
+    topology_matches = 0
 
-        best_score = 0.0
-        best_idx = -1
-        best_reason = ""
-        best_common: list[str] = []
+    if windows and candidates:
+        affinity_matrix: list[list[float]] = []
+        for w in windows:
+            row: list[float] = []
+            w_sem = w["sem_vec"]
+            w_words = w["words"]
+            w_intent = w["intent"]
+            pref_mood = w_intent.get("preferred_mood", "neutral")
+            pref_motion = w_intent.get("preferred_motion", "steady_motion")
 
-        for item in media_info_list:
-            idx = item["idx"]
-            if idx in used_media_indices:
-                continue
+            for c_item in candidates:
+                # A. Similaridade de cosseno do vetor semântico conceitual
+                sem_sim = compute_semantic_cosine_similarity(w_sem, c_item["media_sem_vec"])
+                score = sem_sim * 42.0
 
-            score = 0.0
-            reasons = []
+                # B. Bônus de casamento de tokens (se houver nome descritivo)
+                tokens = c_item["tokens"]
+                if tokens and w_words:
+                    common = [t for t in tokens if any(_token_stem_match(t, wd) for wd in w_words)]
+                    if common:
+                        score += min(32.0, len(common) * 14.0 + 10.0)
 
-            # A. Token match do nome do arquivo (se houver palavras descritivas)
-            tokens = item["tokens"]
-            if tokens and w_words:
-                common = [t for t in tokens if any(_token_stem_match(t, w) for w in w_words)]
-                if common:
-                    score += len(common) * 20.0 + 30.0
-                    reasons.append(f"tokens:{','.join(common[:3])}")
-                    best_common = common
+                # C. Visual Mood match (OpenCV mood cromático)
+                if pref_mood != "neutral":
+                    if c_item["primary_mood"] == pref_mood:
+                        score += 16.0 * c_item["confidence"]
+                    elif pref_mood in c_item["profile"].get("mood_scores", {}):
+                        score += 8.0 * float(c_item["profile"]["mood_scores"][pref_mood])
 
-            # B. Visual Mood match (OpenCV color mood)
-            if pref_mood != "neutral":
-                if item["primary_mood"] == pref_mood:
-                    mood_bonus = 38.0 * item["confidence"]
-                    score += mood_bonus
-                    reasons.append(f"mood:{pref_mood}")
-                elif pref_mood in item["profile"].get("mood_scores", {}):
-                    partial_mood = 22.0 * float(item["profile"]["mood_scores"][pref_mood])
-                    score += partial_mood
-                    reasons.append(f"alt_mood:{pref_mood}")
+                # D. Dinâmica de movimento
+                if pref_motion == c_item["motion"]:
+                    score += 8.0
 
-            # C. Motion dynamics match (alta ação vs calma contemplativa)
-            if pref_motion == "high_action":
-                if item["motion"] == "high_action":
-                    score += 24.0
-                    reasons.append("motion:action")
-                elif item["motion"] == "steady_motion":
-                    score += 10.0
-            elif pref_motion == "calm_contemplation":
-                if item["motion"] == "calm_contemplation":
-                    score += 18.0
-                    reasons.append("motion:calm")
+                # E. Suave penalidade temporal para incentivar continuidade
+                rel_w = w["start"] / max(1.0, audio_total)
+                rel_m = c_item["idx"] / max(1, len(valid_pairs))
+                pos_penalty = abs(rel_w - rel_m) * 5.0
+                score = max(0.0, score - pos_penalty + c_item["quality_score"] * 4.0)
 
-            # D. Bônus sutil de qualidade técnica
-            score += item["quality_score"] * 5.0
+                row.append(round(score, 2))
+            affinity_matrix.append(row)
 
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-                best_reason = " + ".join(reasons)
+        # Resolução global ótima
+        assigned_pairs = solve_kuhn_munkres_broll_assignment(affinity_matrix)
+        for w_idx, cand_idx in assigned_pairs:
+            score_val = affinity_matrix[w_idx][cand_idx]
+            if score_val >= 14.0:
+                c_item = candidates[cand_idx]
+                used_media_indices.add(c_item["idx"])
+                w_info = windows[w_idx]
+                theme = c_item["dominant_theme"]
+                if c_item["primary_mood"] != "neutral":
+                    mood_matches += 1
+                if c_item["tokens"]:
+                    token_matches += 1
+                topology_matches += 1
 
-        if best_idx >= 0 and best_score >= 18.0:
-            used_media_indices.add(best_idx)
-            m_item = media_info_list[best_idx]
-            if "mood:" in best_reason or "alt_mood:" in best_reason:
-                mood_matches += 1
-            if "tokens:" in best_reason:
-                token_matches += 1
-            matches.append({
-                "media_idx": best_idx,
-                "path": m_item["path"],
-                "duration": m_item["duration"],
-                "target_time": w_start,
-                "match_type": best_reason or "semantic_match",
-                "matched_words": best_common,
-                "score": round(best_score, 1),
-            })
+                matches.append({
+                    "media_idx": c_item["idx"],
+                    "path": c_item["path"],
+                    "duration": c_item["duration"],
+                    "target_time": w_info["start"],
+                    "match_type": f"sem_optimal:{theme}",
+                    "score": round(score_val, 1),
+                    "theme": theme,
+                })
 
     if not matches:
         return valid_pairs, {
@@ -6253,11 +6432,17 @@ def match_media_to_subtitles(
     if unmatched_pool:
         final_pairs.extend(unmatched_pool)
 
+    avg_score = round(sum(m["score"] for m in matches) / max(1, len(matches)), 2)
+    top_themes = list({m.get("theme") for m in matches if m.get("theme")})
     summary = {
         "enabled": True,
+        "mode": "kuhn_munkres_optimal_assignment",
         "matched_count": len(matches),
         "mood_matches": mood_matches,
         "token_matches": token_matches,
+        "topology_matches": topology_matches,
+        "average_affinity_score": avg_score,
+        "top_themes": top_themes,
         "matches": [
             {
                 "file": m["path"].name,
@@ -6270,7 +6455,7 @@ def match_media_to_subtitles(
     }
     _append_log(
         job,
-        f"Semantic B-Roll Matcher: {len(matches)} clipes alinhados por semantica e mood visual com a narracao ({mood_matches} visuais, {token_matches} textuais).",
+        f"Semantic B-Roll Matcher (Kuhn-Munkres): {len(matches)} clipes alinhados globalmente por coerência semântica e topologia visual (afinidade média={avg_score}, temas={', '.join(top_themes[:3])}).",
     )
     return final_pairs, summary
 
