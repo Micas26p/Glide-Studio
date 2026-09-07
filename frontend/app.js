@@ -641,6 +641,47 @@ function escapeHtml(value){
   }[char]));
 }
 
+function showToast(title, message = '', type = 'info', duration = 3800){
+  const container = document.getElementById('toastContainer');
+  if(!container) return;
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.setAttribute('role', 'alert');
+  
+  const iconSvg = {
+    success: '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>',
+    error: '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>',
+    warning: '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    info: '<svg class="toast-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>'
+  }[type] || '';
+
+  toast.innerHTML = `
+    ${iconSvg}
+    <div class="toast-body">
+      <div class="toast-title">${escapeHtml(title)}</div>
+      ${message ? `<div class="toast-message">${escapeHtml(message)}</div>` : ''}
+    </div>
+    <button type="button" class="toast-close" aria-label="Fechar notificação">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+  `;
+
+  const closeBtn = toast.querySelector('.toast-close');
+  const dismiss = () => {
+    toast.classList.remove('show');
+    toast.classList.add('hide');
+    setTimeout(() => toast.remove(), 260);
+  };
+  if(closeBtn) closeBtn.addEventListener('click', dismiss);
+
+  container.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('show'));
+  if(duration > 0){
+    setTimeout(dismiss, duration);
+  }
+}
+window.showToast = showToast;
+
 function rel(file){ return file?._serverRel || file?._autoRelativePath || file?.webkitRelativePath || file?.name || ''; }
 function ext(file){ return (file.name.split('.').pop() || '').toLowerCase(); }
 function fileKey(file, forcedKind = ''){ return `${forcedKind || kindOfFile(file) || 'file'}::${rel(file)}::${file.size}::${file.lastModified || 0}`; }
@@ -4992,11 +5033,12 @@ async function prepareRenderNotification(){
 function notifyRenderComplete(job){
   document.title = 'Glide Studio - Render concluído';
   playCompletionSound('project');
-  if(!('Notification' in window) || Notification.permission !== 'granted') return;
-  const delivery = job.delivery_summary || {};
+  const delivery = job?.delivery_summary || {};
   const body = delivery.mode === 'browser_download'
-    ? `${job.output_name || 'MP4 final'} esta pronto e o download foi iniciado.`
-    : `${job.output_name || 'MP4 final'} foi salvo em ${delivery.folder || job.output_dir || 'Downloads'}.`;
+    ? `${job?.output_name || 'MP4 final'} está pronto e o download foi iniciado.`
+    : `${job?.output_name || 'MP4 final'} salvo com sucesso.`;
+  showToast('Render Concluído', body, 'success', 6500);
+  if(!('Notification' in window) || Notification.permission !== 'granted') return;
   try{
     new Notification('Glide Studio', {
       body,
@@ -6661,6 +6703,7 @@ async function addQueueProject(name = ''){
   syncProjectSnapshot(project);
   renderProjectQueue();
   if(dockSummary) dockSummary.textContent = `${project.name} criado na fila.`;
+  showToast('Novo Projeto', `"${project.name}" adicionado à fila de produção.`, 'success');
   return project;
 }
 
@@ -6691,6 +6734,7 @@ async function duplicateActiveProject(){
   state.projects.push(clone);
   loadProject(clone.id);
   syncProjectSnapshot(clone);
+  showToast('Projeto Duplicado', `Cópia "${clone.name}" criada com sucesso.`, 'success');
 }
 
 async function removeActiveProject(){
@@ -6701,6 +6745,7 @@ async function removeActiveProject(){
     resetProjectState();
     captureActiveProject();
     renderProjectQueue();
+    showToast('Projeto Reiniciado', 'Mídias e configurações do projeto foram limpas.', 'info');
     return;
   }
   if(!window.confirm(`Remover ${current.name} da fila? Os arquivos originais no disco não serão apagados.`)) return;
@@ -6709,6 +6754,7 @@ async function removeActiveProject(){
   state.activeProjectId = null;
   loadProject(state.projects[0].id);
   renderProjectQueue();
+  showToast('Projeto Removido', `"${current.name}" foi removido da fila.`, 'info');
 }
 
 function inferBatchKind(file){
@@ -7217,8 +7263,10 @@ async function saveSettingsNow(){
     dockSummary.textContent = payload.message || 'Configurações salvas.';
     playUiSound('confirm');
     renderProjectQueue();
+    showToast('Configurações Salvas', 'Preferências locais e do projeto atualizadas.', 'success');
   }catch(error){
     dockSummary.textContent = `Falha ao salvar configurações: ${error.message || error}`;
+    showToast('Erro ao Salvar', error.message || String(error), 'error');
   }finally{
     state.settingsSaving = false;
     if(saveSettingsBtn){

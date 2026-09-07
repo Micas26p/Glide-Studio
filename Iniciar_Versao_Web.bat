@@ -1,14 +1,14 @@
 @echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
-title Glide Studio Web Local v1.28.2
+title Glide Studio Web Local v1.40.0
 cd /d "%~dp0"
 
 set PORT=8787
 
 echo.
 echo ============================================================
-echo  GLIDE STUDIO - VERSAO WEB LOCAL v1.28.2
+echo  GLIDE STUDIO - VERSAO WEB LOCAL v1.40.0
 echo ============================================================
 echo  Use este BAT somente para abrir a versao web/fallback.
 echo  Para a versao desktop, abra Glide Studio.exe nesta pasta inicial.
@@ -78,8 +78,8 @@ if errorlevel 1 (
 )
 
 echo.
-echo [5/6] Abrindo o Glide Ultra Web no navegador...
-start "" "http://127.0.0.1:%PORT%/?v=1.28.2"
+echo [5/6] Abrindo o Glide Studio Web no navegador...
+start "" "http://127.0.0.1:%PORT%/?v=1.40.0"
 echo.
 echo Servidor local: http://127.0.0.1:%PORT%
 echo Pasta de exports: %~dp0exports
