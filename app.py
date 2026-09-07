@@ -44,6 +44,10 @@ from glide_director import (
     fold_text,
     keyword_terms,
     media_signature,
+    extract_visual_scene_mood,
+    extract_script_visual_intent,
+    VISUAL_MOODS,
+    MOTION_DYNAMICS,
 )
 from glide_intelligence_db import IntelligenceDB, stable_hash
 from glide_music_history import avoid_recent_music, channel_music_scores, load_music_history, record_music_usage
@@ -1129,6 +1133,7 @@ class SegmentPlan:
     hflip: bool = False
     scale_boost: float = 1.0
     clean_roi: tuple[float, float, float, float] | None = None
+    timeline_zone: str = "body"
 
 
 @dataclass
@@ -5983,29 +5988,34 @@ def match_media_to_subtitles(
     cues: list[SubtitleCue],
     audio_total: float,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    """Alinha semanticamente clipes de midia com as falas correspondentes na legenda SRT."""
+    """Alinha semanticamente clipes de midia com as falas correspondentes na legenda SRT via tokens e perfil visual (OpenCV Mood/Motion)."""
     if len(valid_pairs) <= 3 or not cues:
         return valid_pairs, {"enabled": False, "matched_count": 0}
 
-    cued_tokens: list[tuple[float, float, set[str]]] = []
-    for cue in cues:
-        words = set(re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", cue.text.lower()))
-        words = {w for w in words if w not in MEDIA_STOPWORDS}
-        if words:
-            cued_tokens.append((cue.start, cue.end, words))
+    cwd = getattr(job, "work", None) or DATA_ROOT
 
-    if not cued_tokens:
-        return valid_pairs, {"enabled": True, "matched_count": 0, "reason": "sem tokens em cues"}
-
-    media_tokens_list: list[tuple[Path, float, set[str]]] = []
-    for path, dur in valid_pairs:
+    # 1. Carrega tokens e perfis visuais de cada mídia válida
+    media_info_list: list[dict[str, Any]] = []
+    for idx, (path, dur) in enumerate(valid_pairs):
         tokens = extract_media_tokens(path)
-        media_tokens_list.append((path, dur, tokens))
+        prof = get_media_visual_profile(path, dur, cwd=cwd)
+        media_info_list.append({
+            "idx": idx,
+            "path": path,
+            "duration": dur,
+            "tokens": tokens,
+            "profile": prof,
+            "primary_mood": prof.get("primary_mood", "neutral"),
+            "confidence": float(prof.get("confidence") or 0.5),
+            "motion": prof.get("motion", "steady_motion"),
+            "has_human": bool(prof.get("has_human")),
+            "quality_score": float(prof.get("quality_score") or 0.7),
+        })
 
     matches: list[dict[str, Any]] = []
     used_media_indices: set[int] = set()
 
-    # 1. Cenas Obrigatórias do Roteiro (Prioridade Editorial Absoluta)
+    # 2. Cenas Obrigatórias do Roteiro (Prioridade Editorial Absoluta)
     script_plan = job.options.get("scriptGuidePlan") if isinstance(job.options.get("scriptGuidePlan"), dict) else {}
     mandatory_scenes = script_plan.get("mandatory_scenes") or []
     for scene in mandatory_scenes:
@@ -6013,63 +6023,142 @@ def match_media_to_subtitles(
         s_target = scene.get("target_time")
         if not s_keywords or s_target is None:
             continue
-        best_score = 0
-        best_idx = -1
-        best_common = []
-        for idx, (path, dur, tokens) in enumerate(media_tokens_list):
-            if idx in used_media_indices or not tokens:
-                continue
-            common = [t for t in tokens if any(_token_stem_match(t, w) for w in s_keywords)]
-            if common:
-                score = len(common) * 25 + 50
-                if score > best_score:
-                    best_score = score
-                    best_idx = idx
-                    best_common = common
-        if best_idx >= 0 and best_score >= 50:
-            used_media_indices.add(best_idx)
-            path, dur, tokens = media_tokens_list[best_idx]
-            matches.append({
-                "media_idx": best_idx,
-                "path": path,
-                "duration": dur,
-                "target_time": s_target,
-                "matched_words": best_common,
-                "score": best_score,
-                "is_mandatory_scene": True,
-            })
-
-    # 2. Casamento Semântico Contínuo com Subtitles
-    for cue_start, cue_end, cue_words in cued_tokens:
-        best_score = 0
+        best_score = 0.0
         best_idx = -1
         best_common: list[str] = []
-        for idx, (path, dur, tokens) in enumerate(media_tokens_list):
-            if idx in used_media_indices or not tokens:
+        for item in media_info_list:
+            idx = item["idx"]
+            if idx in used_media_indices:
                 continue
-            common = [t for t in tokens if any(_token_stem_match(t, w) for w in cue_words)]
-            if common:
-                score = len(common) * 10
-                if score > best_score:
-                    best_score = score
-                    best_idx = idx
-                    best_common = common
-
-        if best_idx >= 0 and best_score >= 10:
+            tokens = item["tokens"]
+            common = [t for t in tokens if any(_token_stem_match(t, w) for w in s_keywords)] if tokens else []
+            score = len(common) * 25.0 + 50.0 if common else 0.0
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+                best_common = common
+        if best_idx >= 0 and best_score >= 50.0:
             used_media_indices.add(best_idx)
-            path, dur, tokens = media_tokens_list[best_idx]
+            m_item = media_info_list[best_idx]
             matches.append({
                 "media_idx": best_idx,
-                "path": path,
-                "duration": dur,
-                "target_time": cue_start,
+                "path": m_item["path"],
+                "duration": m_item["duration"],
+                "target_time": float(s_target),
+                "match_type": "mandatory_scene",
                 "matched_words": best_common,
                 "score": best_score,
+            })
+
+    # 3. Agrupamento de legendas em Janelas Narrativas (~6s a 12s)
+    windows: list[dict[str, Any]] = []
+    curr_window_start = cues[0].start
+    curr_window_cues: list[SubtitleCue] = []
+    for cue in cues:
+        curr_window_cues.append(cue)
+        if cue.end - curr_window_start >= 7.5 or cue == cues[-1]:
+            w_text = " ".join(c.text for c in curr_window_cues)
+            w_intent = extract_script_visual_intent(w_text)
+            cued_words = set(re.findall(r"[a-z0-9áéíóúãõâêîôûçñ]{3,}", w_text.lower()))
+            cued_words = {w for w in cued_words if w not in MEDIA_STOPWORDS}
+            windows.append({
+                "start": curr_window_start,
+                "end": cue.end,
+                "text": w_text,
+                "intent": w_intent,
+                "words": cued_words,
+            })
+            curr_window_start = cue.end
+            curr_window_cues = []
+
+    # 4. Casamento Híbrido Contínuo (Tokens + Visual Scene Mood + Motion)
+    token_matches = 0
+    mood_matches = 0
+    for w in windows:
+        w_start = w["start"]
+        w_words = w["words"]
+        w_intent = w["intent"]
+        pref_mood = w_intent.get("preferred_mood", "neutral")
+        pref_motion = w_intent.get("preferred_motion", "steady_motion")
+
+        best_score = 0.0
+        best_idx = -1
+        best_reason = ""
+        best_common: list[str] = []
+
+        for item in media_info_list:
+            idx = item["idx"]
+            if idx in used_media_indices:
+                continue
+
+            score = 0.0
+            reasons = []
+
+            # A. Token match do nome do arquivo (se houver palavras descritivas)
+            tokens = item["tokens"]
+            if tokens and w_words:
+                common = [t for t in tokens if any(_token_stem_match(t, w) for w in w_words)]
+                if common:
+                    score += len(common) * 20.0 + 30.0
+                    reasons.append(f"tokens:{','.join(common[:3])}")
+                    best_common = common
+
+            # B. Visual Mood match (OpenCV color mood)
+            if pref_mood != "neutral":
+                if item["primary_mood"] == pref_mood:
+                    mood_bonus = 38.0 * item["confidence"]
+                    score += mood_bonus
+                    reasons.append(f"mood:{pref_mood}")
+                elif pref_mood in item["profile"].get("mood_scores", {}):
+                    partial_mood = 22.0 * float(item["profile"]["mood_scores"][pref_mood])
+                    score += partial_mood
+                    reasons.append(f"alt_mood:{pref_mood}")
+
+            # C. Motion dynamics match (alta ação vs calma contemplativa)
+            if pref_motion == "high_action":
+                if item["motion"] == "high_action":
+                    score += 24.0
+                    reasons.append("motion:action")
+                elif item["motion"] == "steady_motion":
+                    score += 10.0
+            elif pref_motion == "calm_contemplation":
+                if item["motion"] == "calm_contemplation":
+                    score += 18.0
+                    reasons.append("motion:calm")
+
+            # D. Bônus sutil de qualidade técnica
+            score += item["quality_score"] * 5.0
+
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+                best_reason = " + ".join(reasons)
+
+        if best_idx >= 0 and best_score >= 18.0:
+            used_media_indices.add(best_idx)
+            m_item = media_info_list[best_idx]
+            if "mood:" in best_reason or "alt_mood:" in best_reason:
+                mood_matches += 1
+            if "tokens:" in best_reason:
+                token_matches += 1
+            matches.append({
+                "media_idx": best_idx,
+                "path": m_item["path"],
+                "duration": m_item["duration"],
+                "target_time": w_start,
+                "match_type": best_reason or "semantic_match",
+                "matched_words": best_common,
+                "score": round(best_score, 1),
             })
 
     if not matches:
-        return valid_pairs, {"enabled": True, "matched_count": 0, "reason": "nenhum casamento tematico encontrado"}
+        return valid_pairs, {
+            "enabled": True,
+            "matched_count": 0,
+            "reason": "nenhum casamento semantico ou visual encontrado",
+        }
 
+    # 5. Posicionamento na Timeline com Alocação Suave
     total_clips = len(valid_pairs)
     avg_clip_dur = max(2.5, audio_total / max(1, total_clips))
     reordered: list[tuple[Path, float] | None] = [None] * total_clips
@@ -6090,9 +6179,9 @@ def match_media_to_subtitles(
                 break
 
     unmatched_pool = [
-        (path, dur)
-        for idx, (path, dur, _) in enumerate(media_tokens_list)
-        if idx not in used_media_indices
+        (item["path"], item["duration"])
+        for item in media_info_list
+        if item["idx"] not in used_media_indices
     ]
 
     for i in range(total_clips):
@@ -6106,16 +6195,22 @@ def match_media_to_subtitles(
     summary = {
         "enabled": True,
         "matched_count": len(matches),
+        "mood_matches": mood_matches,
+        "token_matches": token_matches,
         "matches": [
             {
                 "file": m["path"].name,
                 "target_second": round(m["target_time"], 2),
-                "matched_words": m["matched_words"],
+                "match_type": m.get("match_type", "match"),
+                "score": m["score"],
             }
             for m in matches[:15]
         ],
     }
-    _append_log(job, f"Semantic B-Roll Matcher: {len(matches)} clipes casados com temas da narracao.")
+    _append_log(
+        job,
+        f"Semantic B-Roll Matcher: {len(matches)} clipes alinhados por semantica e mood visual com a narracao ({mood_matches} visuais, {token_matches} textuais).",
+    )
     return final_pairs, summary
 
 
@@ -7787,6 +7882,10 @@ def probe_visual_clean_health(
             result["clean_trim"] = cached["clean_trim"]
         if cached.get("corner_watermark"):
             result["corner_watermark"] = cached["corner_watermark"]
+        if cached.get("visual_profile"):
+            result["visual_profile"] = cached["visual_profile"]
+        elif cached.get("metrics", {}).get("visual_profile"):
+            result["visual_profile"] = cached["metrics"]["visual_profile"]
         result["cache_hit"] = True
         return result
     result: dict[str, Any] = {
@@ -8083,6 +8182,18 @@ def probe_visual_clean_health(
         "temporal": temporal_metrics,
         "fingerprint": fingerprint_from_bytes(gray_frames[len(gray_frames) // 2], VISUAL_CLEAN_FRAME_W, VISUAL_CLEAN_FRAME_H),
     }
+    visual_profile = extract_visual_scene_mood(
+        red=med_red,
+        green=med_green,
+        blue=med_blue,
+        saturation=med_saturation,
+        mean=med_mean,
+        stdev=med_stdev,
+        frame_diff=med_diff,
+        head_skin=med_head_skin,
+        torso_skin=med_torso_skin,
+    )
+    summary_metrics["visual_profile"] = visual_profile
     if media_kind == "image" or is_image_path(path):
         media_info = _probe_reference_video_info(_resolved_media_path(path, cwd))
         width = int(media_info.get("width") or 0)
@@ -8111,13 +8222,14 @@ def probe_visual_clean_health(
             "analyzed": False,
             "reason": "YuNet dispensado: heuristica conclusiva sem ambiguidade facial",
         }
-    result.update({"samples": len(frames), "metrics": summary_metrics})
+    result.update({"samples": len(frames), "metrics": summary_metrics, "visual_profile": visual_profile})
     classified = _classify_visual_analysis(result, level, context=context, media_kind=media_kind)
     result.update({
         "category": classified.get("category", "clean"),
         "action": classified.get("action", "keep"),
         "reason": classified.get("reason", "clipe limpo"),
         "confidence": classified.get("confidence", 0.0),
+        "visual_profile": visual_profile,
     })
     if classified.get("clean_roi"):
         result["clean_roi"] = classified["clean_roi"]
@@ -8128,9 +8240,43 @@ def probe_visual_clean_health(
     if classified.get("corner_watermark"):
         result["corner_watermark"] = classified["corner_watermark"]
         summary_metrics["corner_watermark"] = classified["corner_watermark"]
+    classified["visual_profile"] = visual_profile
     with VISUAL_CLEAN_CACHE_LOCK:
         VISUAL_CLEAN_CACHE[key] = dict(result)
     return classified
+
+
+def get_media_visual_profile(path: Path | str, duration: float = 5.0, cwd: Path | None = None) -> dict[str, Any]:
+    """Recupera o perfil visual semântico (mood cromático e dinâmica de movimento) de uma mídia."""
+    p = Path(str(path))
+    try:
+        resolved = _resolved_media_path(p, cwd)
+        key_stem = resolved.name.lower()
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for k, val in VISUAL_CLEAN_CACHE.items():
+                if key_stem in str(k).lower():
+                    prof = val.get("visual_profile") or val.get("metrics", {}).get("visual_profile")
+                    if prof:
+                        return prof
+    except Exception:
+        pass
+    try:
+        res = probe_visual_clean_health(p, duration, "fast", cwd=cwd)
+        return res.get("visual_profile") or res.get("metrics", {}).get("visual_profile") or {
+            "primary_mood": "neutral",
+            "confidence": 0.50,
+            "motion": "steady_motion",
+            "motion_score": 5.0,
+            "has_human": False,
+        }
+    except Exception:
+        return {
+            "primary_mood": "neutral",
+            "confidence": 0.50,
+            "motion": "steady_motion",
+            "motion_score": 5.0,
+            "has_human": False,
+        }
 
 
 def get_media_clean_roi(path: Path | str, cwd: Path | None = None) -> tuple[float, float, float, float] | None:
@@ -16088,6 +16234,34 @@ def magnetic_speech_snap(
     return planned_duration, False, ""
 
 
+def get_retention_pacing_parameters(
+    current_pos: float,
+    audio_total: float,
+) -> tuple[float, float, float, str]:
+    """
+    Retorna (min_dur, target_dur, max_dur, zone_name) com base na posição da timeline:
+    - Zona 1: Hook (0 a 40s) -> Cortes dinâmicos de 1.8s a 2.8s para retenção máxima no YouTube
+    - Zona 2: Desenvolvimento Narrativo (40s a 80% do vídeo) -> Cadência documental de 3.4s a 5.4s
+    - Zona 3: Clímax (80% a 95% do vídeo) -> Aceleração para 2.2s a 3.4s
+    - Zona 4: Outro / CTA (95% a 100%) -> Cadência suave de 3.5s a 5.0s
+    """
+    if audio_total <= 45.0:
+        return (1.8, 2.4, 3.2, "short_hook")
+
+    hook_end = min(40.0, audio_total * 0.25)
+    body_end = audio_total * 0.80
+    climax_end = audio_total * 0.95
+
+    if current_pos < hook_end:
+        return (1.8, 2.4, 2.9, "hook")
+    elif current_pos < body_end:
+        return (3.2, 4.4, 5.4, "body")
+    elif current_pos < climax_end:
+        return (2.0, 2.8, 3.5, "climax")
+    else:
+        return (3.2, 4.0, 5.0, "outro")
+
+
 def build_segment_plan(
     video_files: list[Path],
     video_durs: list[float],
@@ -16259,20 +16433,26 @@ def build_segment_plan(
         item_cycle = ((source_index - 1) // initial_count) if initial_count > 0 else 0
         curr_timeline_pos = audio_total - remaining
         is_img = is_image_path(src)
+        min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_timeline_pos, audio_total)
         if is_img:
-            # Organic Micro-Pace: cadência harmônica áurea para evitar ritmo métrico robótico
+            # Curva de Retenção Adaptativa no Pacing de Imagens
             pace_factor = PACE_HARMONICS[image_counter % len(PACE_HARMONICS)]
-            target_candidate = round(img_dur * pace_factor, 3)
-            target = max(2.5, min(6.0, target_candidate))
+            if zone in {"hook", "short_hook"}:
+                target_candidate = round(min(img_dur, 2.6) * pace_factor, 3)
+            elif zone == "climax":
+                target_candidate = round(min(img_dur, 3.0) * pace_factor, 3)
+            else:
+                target_candidate = round(img_dur * pace_factor, 3)
+            target = max(min_dur, min(max_dur, target_candidate))
 
             # Sincronia Editorial Magnética na Imagem:
-            if speech_boundaries and remaining > target + 1.2:
+            if speech_boundaries and remaining > target + 1.0:
                 snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
                     current_time=curr_timeline_pos,
                     planned_duration=target,
                     boundaries=speech_boundaries,
-                    min_dur=2.4,
-                    max_dur=min(6.0, remaining),
+                    min_dur=min_dur,
+                    max_dur=min(max_dur, remaining),
                 )
                 if was_snapped:
                     target = snapped_target
@@ -16302,6 +16482,7 @@ def build_segment_plan(
                         hflip=apply_hflip,
                         scale_boost=1.0,
                         clean_roi=get_media_clean_roi(src),
+                        timeline_zone=zone,
                     )
                 )
                 remaining -= target
@@ -16315,20 +16496,20 @@ def build_segment_plan(
             if target_total >= 0.08:
                 apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "video")
                 scale_boost = 1.08 if (item_cycle % 2 == 1) else 1.0
-                # AUTO B-ROLL PACING SLICER:
-                # Clipes utilizáveis curtos (<= 5.5s) são preservados como plano único intacto.
-                # Clipes longos (> 5.5s) são particionados proporcionalmente em sub-cortes de 3.5s a 5.2s
-                # com Punch-In alternado (1.12x), gerando ritmo editorial de alta retenção no YouTube.
-                if target_total <= 5.5:
+                # AUTO B-ROLL PACING SLICER COM CURVA DE RETENÇÃO DO YOUTUBE:
+                # No Hook (0 a 40s) ou no Clímax, clipes acima de 3.2s são particionados para dinamismo extremo.
+                # No corpo narrativo normal, preserva plano único de até 5.5s.
+                slice_threshold = 3.2 if zone in {"hook", "climax", "short_hook"} else 5.5
+                if target_total <= slice_threshold:
                     target = target_total
                     # Sincronia Editorial Magnética em Clipes Curtos:
-                    if speech_boundaries and remaining > target + 1.2:
+                    if speech_boundaries and remaining > target + 1.0:
                         snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
                             current_time=curr_timeline_pos,
                             planned_duration=target,
                             boundaries=speech_boundaries,
-                            min_dur=2.2,
-                            max_dur=min(5.8, eff_dur, remaining),
+                            min_dur=min_dur,
+                            max_dur=min(max_dur, eff_dur, remaining),
                         )
                         if was_snapped:
                             target = snapped_target
@@ -16355,12 +16536,22 @@ def build_segment_plan(
                             punch_in=False,
                             hflip=apply_hflip,
                             scale_boost=scale_boost,
+                            timeline_zone=zone,
                         )
                     )
                     remaining -= target
                 else:
-                    VIDEO_PACE_HARMONICS = [4.4, 3.8, 5.0, 4.2, 4.6]
-                    n_slices = max(2, int(round(target_total / 4.4)))
+                    if zone in {"hook", "short_hook"}:
+                        VIDEO_PACE_HARMONICS = [2.4, 2.2, 2.8, 2.0, 2.6]
+                        base_target = 2.4
+                    elif zone == "climax":
+                        VIDEO_PACE_HARMONICS = [2.6, 3.0, 2.4, 2.8, 2.6]
+                        base_target = 2.8
+                    else:
+                        VIDEO_PACE_HARMONICS = [4.4, 3.8, 5.0, 4.2, 4.6]
+                        base_target = 4.4
+
+                    n_slices = max(2, int(round(target_total / base_target)))
                     avg_slice = target_total / n_slices
 
                     curr_offset = offset
@@ -16369,24 +16560,26 @@ def build_segment_plan(
                         if remaining <= 0.08 or remaining_clip <= 0.08:
                             break
                         slice_timeline_pos = audio_total - remaining
+                        s_min_dur, s_target_dur, s_max_dur, s_zone = get_retention_pacing_parameters(slice_timeline_pos, audio_total)
                         if s_idx == n_slices - 1:
                             sub_dur = round(remaining_clip, 3)
                         else:
                             harmonic = VIDEO_PACE_HARMONICS[s_idx % len(VIDEO_PACE_HARMONICS)]
                             sub_dur = round(0.5 * avg_slice + 0.5 * harmonic, 3)
-                            if remaining_clip - sub_dur < 2.0:
+                            min_tail = 1.6 if s_zone in {"hook", "climax", "short_hook"} else 2.0
+                            if remaining_clip - sub_dur < min_tail:
                                 sub_dur = round(remaining_clip / 2.0, 3)
                             sub_dur = min(sub_dur, remaining_clip)
 
                             # Sincronia Editorial Magnética nos Sub-Cortes:
-                            if speech_boundaries and remaining > sub_dur + 1.2 and remaining_clip > sub_dur + 1.5:
-                                max_slice_dur = min(5.6, remaining_clip - 1.5, remaining)
+                            if speech_boundaries and remaining > sub_dur + 1.0 and remaining_clip > sub_dur + min_tail:
+                                max_slice_dur = min(s_max_dur, remaining_clip - min_tail, remaining)
                                 snapped_sub, was_snapped, snap_reason = magnetic_speech_snap(
                                     current_time=slice_timeline_pos,
                                     planned_duration=sub_dur,
                                     boundaries=speech_boundaries,
-                                    min_dur=2.2,
-                                    max_dur=max(2.4, max_slice_dur),
+                                    min_dur=s_min_dur,
+                                    max_dur=max(s_min_dur + 0.2, max_slice_dur),
                                 )
                                 if was_snapped:
                                     sub_dur = snapped_sub
@@ -16414,6 +16607,7 @@ def build_segment_plan(
                                     punch_in=(s_idx % 2 == 1),
                                     hflip=apply_hflip,
                                     scale_boost=scale_boost,
+                                    timeline_zone=s_zone,
                                 )
                             )
                             curr_offset = round(curr_offset + sub_dur, 3)
@@ -16570,6 +16764,14 @@ def build_segment_plan(
             "sentence_ends": magnetic_snap_stats["sentence_ends"],
             "clause_pauses": magnetic_snap_stats["clause_pauses"],
             "cue_breaths": magnetic_snap_stats["cue_breaths"],
+        },
+        "retention_curve": {
+            "enabled": True,
+            "hook_zone_cuts": sum(1 for p in plans if getattr(p, "timeline_zone", "") in {"hook", "short_hook"}),
+            "body_zone_cuts": sum(1 for p in plans if getattr(p, "timeline_zone", "") == "body"),
+            "climax_zone_cuts": sum(1 for p in plans if getattr(p, "timeline_zone", "") == "climax"),
+            "outro_zone_cuts": sum(1 for p in plans if getattr(p, "timeline_zone", "") == "outro"),
+            "total_shots": len(plans),
         },
         "mutant_reuse": {
             "enabled": True,

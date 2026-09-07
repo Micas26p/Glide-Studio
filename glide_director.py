@@ -568,3 +568,178 @@ def confidence_summary(
         "risks": risks,
         "actions": actions,
     }
+
+
+# ---------------------------------------------------------------------------
+# MOTOR DE PERFILAMENTO VISUAL E INTENÇÃO SEMÂNTICA (INCLUINDO ROTEIRO E MOOD)
+# ---------------------------------------------------------------------------
+
+VISUAL_MOODS = (
+    "cold_blue",
+    "warm_gold",
+    "nature_green",
+    "danger_red",
+    "dark_mystery",
+    "high_contrast",
+    "neutral",
+)
+
+MOTION_DYNAMICS = (
+    "high_action",
+    "steady_motion",
+    "calm_contemplation",
+)
+
+SCRIPT_MOOD_KEYWORDS: dict[str, set[str]] = {
+    "cold_blue": {
+        "neve", "inverno", "frio", "gelo", "congelou", "glaciar", "ice", "snow", "cold", "winter", "frozen",
+        "nieve", "invierno", "hielo", "noite", "madrugada", "lua", "night", "moon", "agua", "mar", "oceano",
+        "ocean", "deep", "melancolia", "tristeza", "solidao", "sad", "alone", "azul", "blue", "tempestade",
+    },
+    "warm_gold": {
+        "sol", "verao", "praia", "deserto", "areia", "ouro", "riqueza", "dinheiro", "imperio", "luxo", "calor",
+        "quente", "sun", "summer", "desert", "sand", "gold", "wealth", "rich", "empire", "luxury", "hot", "warm",
+        "verano", "playa", "desierto", "oro", "riqueza", "dourado", "amarelo", "yellow", "luz", "brilho",
+    },
+    "nature_green": {
+        "floresta", "mata", "selva", "arvore", "arvores", "verde", "planta", "campo", "natureza", "selvagem",
+        "animal", "animais", "bicho", "fauna", "flora", "forest", "jungle", "tree", "trees", "green", "nature",
+        "wild", "wildlife", "bosque", "arbol", "naturaleza", "rio", "montanha", "mountain", "paisagem",
+    },
+    "danger_red": {
+        "sangue", "morte", "guerra", "batalha", "perigo", "crise", "ameaca", "falha", "destruicao", "fogo",
+        "chamas", "incendio", "inimigo", "ataque", "arma", "blood", "death", "war", "battle", "danger", "crisis",
+        "threat", "fire", "flames", "enemy", "attack", "weapon", "sangre", "muerte", "batalla", "peligro", "fuego",
+        "vermelho", "red", "urgencia", "alarme", "alerta",
+    },
+    "dark_mystery": {
+        "misterio", "segredo", "oculto", "sombra", "escondido", "crime", "conspiracao", "duvida", "medo",
+        "terror", "caverna", "subsolo", "mystery", "secret", "hidden", "shadow", "fear", "dark", "underground",
+        "secreto", "oscuro", "miedo", "escuro", "escuridao", "fantasma", "sinistro", "misterioso",
+    },
+    "high_contrast": {
+        "explosao", "clarao", "choque", "surpresa", "revelacao", "impacto", "explosion", "shock", "surprise",
+        "revelation", "impact", "raio", "trovao", "repentino", "subito",
+    },
+}
+
+SCRIPT_MOTION_KEYWORDS: dict[str, set[str]] = {
+    "high_action": {
+        "corre", "fugiu", "velocidade", "ataque", "luta", "explosao", "rapido", "tempestade", "vento", "run",
+        "speed", "fast", "fight", "storm", "chase", "corrida", "fuga", "golpe", "tiro", "avanco", "acao", "action",
+    },
+    "calm_contemplation": {
+        "olhou", "pensou", "silencio", "documento", "carta", "livro", "estudo", "pensamento", "thought", "silence",
+        "book", "letter", "study", "quiet", "calma", "pausa", "espera", "memoria", "lembranca", "antigo",
+    },
+}
+
+
+def extract_visual_scene_mood(
+    *,
+    red: float = 0.0,
+    green: float = 0.0,
+    blue: float = 0.0,
+    saturation: float = 0.0,
+    mean: float = 0.0,
+    stdev: float = 0.0,
+    frame_diff: float = 0.0,
+    head_skin: float = 0.0,
+    torso_skin: float = 0.0,
+) -> dict[str, Any]:
+    """Extrai perfil visual de mood cromático e dinâmica de movimento a partir de métricas de frames."""
+    if frame_diff >= 11.0:
+        motion = "high_action"
+    elif frame_diff <= 3.2:
+        motion = "calm_contemplation"
+    else:
+        motion = "steady_motion"
+
+    has_human = bool(head_skin >= 0.022 or torso_skin >= 0.035)
+
+    mood_scores: dict[str, float] = {}
+
+    # Danger Red: vermelho dominante saturado muito acima de verde e azul
+    if red >= 105.0 and red > green * 1.35 and red > blue * 1.45 and saturation >= 0.18:
+        score = min(1.0, (red / 255.0) * 0.70 + (saturation / 0.50) * 0.30)
+        mood_scores["danger_red"] = round(score, 3)
+
+    # Nature Green: verde dominante
+    if green >= red + 4.0 and green >= blue + 5.0 and saturation >= 0.08:
+        score = min(1.0, ((green - max(red, blue)) / 40.0) * 0.70 + (saturation / 0.40) * 0.30)
+        mood_scores["nature_green"] = round(score, 3)
+
+    # Warm Gold: vermelho e verde ambos altos (amarelo/ouro/laranja), muito acima do azul
+    if red >= blue + 14.0 and green >= blue + 4.0 and green >= red * 0.50 and saturation >= 0.10:
+        score = min(1.0, ((red - blue) / 60.0) * 0.70 + (saturation / 0.40) * 0.30)
+        mood_scores["warm_gold"] = round(score, 3)
+
+    # Cold Blue: azul significativamente acima de vermelho e verde
+    if (blue >= red + 8.0 or blue >= green + 5.0) and saturation >= 0.06 and blue >= 35.0:
+        score = min(1.0, ((blue - max(red, green)) / 40.0) * 0.70 + (saturation / 0.35) * 0.30)
+        mood_scores["cold_blue"] = round(score, 3)
+
+    # Dark Mystery: média baixa de iluminação e baixo movimento
+    if mean <= 45.0 and frame_diff <= 8.0 and stdev <= 38.0:
+        score = min(1.0, (1.0 - mean / 45.0) * 0.80 + (1.0 - stdev / 38.0) * 0.20)
+        mood_scores["dark_mystery"] = round(score, 3)
+
+    # High Contrast: clarão, explosão, alto desvio padrão
+    if stdev >= 55.0 and mean >= 40.0:
+        score = min(1.0, (stdev - 55.0) / 30.0)
+        mood_scores["high_contrast"] = round(score, 3)
+
+    if not mood_scores:
+        primary_mood = "neutral"
+        confidence = 0.50
+    else:
+        primary_mood = max(mood_scores, key=lambda k: mood_scores[k])
+        confidence = mood_scores[primary_mood]
+
+    return {
+        "primary_mood": primary_mood,
+        "confidence": confidence,
+        "mood_scores": mood_scores,
+        "motion": motion,
+        "motion_score": round(frame_diff, 2),
+        "has_human": has_human,
+        "mean_brightness": round(mean, 2),
+        "contrast": round(stdev, 2),
+    }
+
+
+def extract_script_visual_intent(text: str) -> dict[str, Any]:
+    """Mapeia o texto da narração/legenda para os moods visuais e dinâmicas desejadas."""
+    t = fold_text(text)
+    words = set(re.findall(r"[a-z0-9]{3,}", t))
+    mood_scores: dict[str, int] = {}
+    matched_keywords: dict[str, list[str]] = {}
+
+    for mood, kws in SCRIPT_MOOD_KEYWORDS.items():
+        common = words.intersection(kws)
+        if common:
+            mood_scores[mood] = len(common)
+            matched_keywords[mood] = sorted(list(common))
+
+    preferred_mood = max(mood_scores, key=lambda k: mood_scores[k]) if mood_scores else "neutral"
+
+    motion_scores: dict[str, int] = {}
+    for motion, kws in SCRIPT_MOTION_KEYWORDS.items():
+        common = words.intersection(kws)
+        if common:
+            motion_scores[motion] = len(common)
+
+    exclamations = text.count("!")
+    if exclamations >= 1:
+        motion_scores["high_action"] = motion_scores.get("high_action", 0) + exclamations
+
+    preferred_motion = max(motion_scores, key=lambda k: motion_scores[k]) if motion_scores else "steady_motion"
+
+    return {
+        "preferred_mood": preferred_mood,
+        "mood_scores": mood_scores,
+        "preferred_motion": preferred_motion,
+        "motion_scores": motion_scores,
+        "matched_keywords": matched_keywords,
+    }
+
