@@ -12378,22 +12378,152 @@ def overlay_cta_on_video(
     return out
 
 
+def _ass_time_to_seconds(ts: str) -> float:
+    parts = ts.strip().split(":")
+    if len(parts) == 3:
+        h = float(parts[0])
+        m = float(parts[1])
+        s = float(parts[2])
+        return h * 3600.0 + m * 60.0 + s
+    elif len(parts) == 2:
+        m = float(parts[0])
+        s = float(parts[1])
+        return m * 60.0 + s
+    return float(ts.strip())
+
+
+def _seconds_to_ass_time(sec: float) -> str:
+    sec = max(0.0, float(sec))
+    hours = int(sec // 3600)
+    remainder = sec % 3600
+    minutes = int(remainder // 60)
+    seconds = remainder % 60
+    return f"{hours}:{minutes:02d}:{seconds:05.2f}"
+
+
+def slice_ass_for_chunk(
+    base_ass_path: Path,
+    chunk_start: float,
+    chunk_duration: float,
+    out_chunk_ass_path: Path,
+) -> Path:
+    """Extracts and time-shifts ASS dialogue lines that fall within [chunk_start, chunk_start + chunk_duration]."""
+    if not base_ass_path.exists():
+        out_chunk_ass_path.write_text("", encoding="utf-8")
+        return out_chunk_ass_path
+
+    raw_text = base_ass_path.read_text(encoding="utf-8", errors="replace")
+    chunk_end = chunk_start + chunk_duration
+    out_lines: list[str] = []
+
+    for line in raw_text.splitlines():
+        trimmed = line.strip()
+        if trimmed.startswith("Dialogue:"):
+            parts = line.split(",", 9)
+            if len(parts) >= 10:
+                try:
+                    t_start = _ass_time_to_seconds(parts[1])
+                    t_end = _ass_time_to_seconds(parts[2])
+                    if t_end > chunk_start and t_start < chunk_end:
+                        shifted_start = max(0.0, t_start - chunk_start)
+                        shifted_end = max(shifted_start + 0.05, min(chunk_duration, t_end - chunk_start))
+                        parts[1] = _seconds_to_ass_time(shifted_start)
+                        parts[2] = _seconds_to_ass_time(shifted_end)
+                        out_lines.append(",".join(parts))
+                except Exception:
+                    out_lines.append(line)
+        else:
+            out_lines.append(line)
+
+    out_chunk_ass_path.write_text("\n".join(out_lines) + "\n", encoding="utf-8")
+    return out_chunk_ass_path
+
+
+def partition_segments_into_chunks(
+    segments: list[Path],
+    segment_durations: list[float] | None = None,
+    total_duration: float = 0.0,
+    target_chunk_seconds: float = 150.0,
+) -> list[dict[str, Any]]:
+    """Divides timeline segments into contiguous chunks of ~target_chunk_seconds for parallel rendering."""
+    if not segments:
+        return []
+
+    if segment_durations and len(segment_durations) == len(segments):
+        durs = [max(0.1, float(d)) for d in segment_durations]
+    else:
+        durs = [safe_probe_duration(s) for s in segments]
+
+    calc_total = sum(durs)
+    effective_total = total_duration if total_duration > 0 else calc_total
+
+    if effective_total < 90.0 or len(segments) <= 4:
+        return [{
+            "index": 0,
+            "segments": list(segments),
+            "start_time": 0.0,
+            "duration": round(calc_total, 4),
+        }]
+
+    chunks: list[dict[str, Any]] = []
+    current_chunk_segs: list[Path] = []
+    current_chunk_dur = 0.0
+    chunk_start = 0.0
+    accumulated_time = 0.0
+
+    target = max(10.0, float(target_chunk_seconds))
+    min_tail = min(45.0, target * 0.35)
+
+    for i, (seg, dur) in enumerate(zip(segments, durs)):
+        current_chunk_segs.append(seg)
+        current_chunk_dur += dur
+        accumulated_time += dur
+
+        remaining_time = calc_total - accumulated_time
+        if current_chunk_dur >= target and remaining_time >= min_tail:
+            chunks.append({
+                "index": len(chunks),
+                "segments": list(current_chunk_segs),
+                "start_time": round(chunk_start, 4),
+                "duration": round(current_chunk_dur, 4),
+            })
+            chunk_start = accumulated_time
+            current_chunk_segs = []
+            current_chunk_dur = 0.0
+
+    if current_chunk_segs:
+        chunks.append({
+            "index": len(chunks),
+            "segments": list(current_chunk_segs),
+            "start_time": round(chunk_start, 4),
+            "duration": round(current_chunk_dur, 4),
+        })
+
+    return chunks
+
+
 def compose_final_visuals(
     job: Job,
     video_source: Path,
-    cta: dict[str, Any],
+    cta: dict[str, Any] | None,
     times: list[float],
     subtitle_ass: Path | None,
     work: Path,
     target_duration: float,
+    out_name: str | None = None,
+    base: float | None = None,
+    span: float | None = None,
+    log_summary: bool = True,
 ) -> Path:
-    label = "Composicao Turbo" if turbo_enabled(job) else "Composicao final otimizada"
-    set_stage(job, "cta", label, "Aplicando CTA, Textos e Legendas em uma unica passagem")
+    if log_summary:
+        label = "Composicao Turbo" if turbo_enabled(job) else "Composicao final otimizada"
+        set_stage(job, "cta", label, "Aplicando CTA, Textos e Legendas em uma unica passagem")
     target_duration = max(0.1, float(target_duration or 0.1))
     w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
     target_w = cta_scale_width(job, w)
     preset, x_expr, y_expr = cta_position_expr(job)
-    out = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
+    default_out_name = "video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4"
+    out = work / (out_name or default_out_name)
     logical_cpus = max(2, int(os.cpu_count() or 4))
     comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
     comp_filter_threads = max(2, min(8, logical_cpus // 2))
@@ -12410,46 +12540,49 @@ def compose_final_visuals(
         "-t", f"{target_duration:.4f}",
         "-i", str(video_source),
     ]
-    is_still = Path(str(cta["video"])).suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"}
-    for _ in times:
-        if is_still:
-            cmd += ["-loop", "1", "-i", str(cta["video"])]
-        else:
-            cmd += ["-i", str(cta["video"])]
+    has_cta = bool(cta and isinstance(cta, dict) and cta.get("video") and times)
+    is_still = Path(str(cta["video"])).suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"} if has_cta else False
+    if has_cta:
+        for _ in times:
+            if is_still:
+                cmd += ["-loop", "1", "-i", str(cta["video"])]
+            else:
+                cmd += ["-i", str(cta["video"])]
 
     # Composition pass: do NOT clone static frames at the end of the video!
     base_filters = "fps=30,settb=AVTB,setpts=PTS-STARTPTS"
-    if not turbo_enabled(job) and bool(job.options.get("qualityBoost", True)):
+    if not turbo_enabled(job) and bool(job.options.get("qualityBoost", True)) and log_summary:
         job.timeline_summary["quality_boost_stage"] = "parallel_segment_pass"
     chains: list[str] = [
         f"[0:v]{base_filters},"
         f"trim=duration={target_duration:.4f},setpts=PTS-STARTPTS[vbase]"
     ]
     current = "[vbase]"
-    for idx, start in enumerate(times):
-        input_idx = idx + 1
-        cta_duration = max(
-            0.5,
-            float(cta.get("duration") or cta_default_duration(str(cta.get("key") or "pt"))),
-        )
-        end = min(target_duration, start + cta_duration)
-        if is_still:
-            chains.append(
-                f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-1,"
-                f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
+    if has_cta:
+        for idx, start in enumerate(times):
+            input_idx = idx + 1
+            cta_duration = max(
+                0.5,
+                float(cta.get("duration") or cta_default_duration(str(cta.get("key") or "pt"))),
             )
-        else:
+            end = min(target_duration, start + cta_duration)
+            if is_still:
+                chains.append(
+                    f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-1,"
+                    f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
+                )
+            else:
+                chains.append(
+                    f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-1,"
+                    f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
+                )
+            out_label = f"[vcta{idx}]"
             chains.append(
-                f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-1,"
-                f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
+                f"{current}[cta{idx}]overlay=x='{x_expr}':y='{y_expr}':"
+                f"enable='between(t,{start:.4f},{end:.4f})':"
+                f"eof_action=pass:repeatlast=0:shortest=0{out_label}"
             )
-        out_label = f"[vcta{idx}]"
-        chains.append(
-            f"{current}[cta{idx}]overlay=x='{x_expr}':y='{y_expr}':"
-            f"enable='between(t,{start:.4f},{end:.4f})':"
-            f"eof_action=pass:repeatlast=0:shortest=0{out_label}"
-        )
-        current = out_label
+            current = out_label
 
     if subtitle_ass and subtitle_ass.exists():
         subtitle_label = "[vfinal]"
@@ -12474,29 +12607,216 @@ def compose_final_visuals(
         str(out),
     ]
     has_comp = getattr(job, "has_visual_composition", True)
-    comp_base = 65.0 if has_comp else 95.0
-    comp_span = 30.0 if has_comp else 1.0
+    comp_base = base if base is not None else (65.0 if has_comp else 95.0)
+    comp_span = span if span is not None else (30.0 if has_comp else 1.0)
     run_cmd(
         job,
         cmd,
-        total_duration=target_duration,
+        total_duration=target_duration if log_summary else None,
         base=comp_base,
         span=comp_span,
         cwd=work,
         quiet_success=True,
     )
     composed_duration = safe_probe_duration(out)
-    job.timeline_summary["composed_visual_duration"] = round(composed_duration, 3)
-    if composed_duration < target_duration - 0.35:
-        _append_log(
-            job,
-            f"Composicao visual terminou em {composed_duration:.2f}s para "
-            f"{target_duration:.2f}s de audio; a protecao de duracao completara "
-            "somente a diferenca necessaria.",
-        )
+    if log_summary:
+        job.timeline_summary["composed_visual_duration"] = round(composed_duration, 3)
+        if composed_duration < target_duration - 0.35:
+            _append_log(
+                job,
+                f"Composicao visual terminou em {composed_duration:.2f}s para "
+                f"{target_duration:.2f}s de audio; a protecao de duracao completara "
+                "somente a diferenca necessaria.",
+            )
+        else:
+            job.timeline_summary["duration_repair_avoided"] = True
+            _append_log(job, "Composicao final cobriu toda a narracao; passagem extra de reparo evitada.")
+        job.cta_summary.update({
+            "position_preset": preset,
+            "offset_x": clamp_float(job.options.get("ctaOffsetX"), 0.0, -35.0, 35.0),
+            "offset_y": clamp_float(job.options.get("ctaOffsetY"), 0.0, -35.0, 35.0),
+            "scale_width_px": target_w,
+        })
+        job.timeline_summary.update({
+            "unified_final_composition": True,
+            "visual_passes_effective": 2,
+            "visual_passes_avoided": 1,
+        })
+        if turbo_enabled(job):
+            turbo = ensure_turbo_summary(job)
+            turbo.update({
+                "unified_composition": True,
+                "fallback_used": False,
+                "visual_passes_effective": 2,
+                "visual_passes_avoided": 1,
+            })
+            _append_log(job, "Turbo Produção: CTA + Textos + Legendas compostos em uma única passagem visual.")
+        else:
+            _append_log(job, "Modo Eficiente otimizado: CTA + Textos + Legendas compostos em uma unica passagem final, preservando todos os efeitos.")
+    return out
+
+
+def compose_visual_chunks_parallel(
+    job: Job,
+    segments: list[Path],
+    cta: dict[str, Any] | None,
+    cta_times: list[float],
+    subtitle_ass: Path | None,
+    work: Path,
+    target_duration: float,
+    target_chunk_seconds: float = 150.0,
+) -> Path:
+    label = "Composicao Turbo em Chunks" if turbo_enabled(job) else "Composicao Paralela por Chunks"
+    set_stage(job, "cta", label, "Renderizando blocos visuais em paralelo com fusao instantanea")
+    _append_log(job, "Iniciando particionamento de timeline para renderizacao paralela por chunks.")
+
+    durations = []
+    if getattr(job, "accepted_plans", None) and len(job.accepted_plans) == len(segments):
+        durations = [float(p.target_duration) for p in job.accepted_plans]
     else:
-        job.timeline_summary["duration_repair_avoided"] = True
-        _append_log(job, "Composicao final cobriu toda a narracao; passagem extra de reparo evitada.")
+        durations = [safe_probe_duration(s) for s in segments]
+
+    chunks = partition_segments_into_chunks(
+        segments=segments,
+        segment_durations=durations,
+        total_duration=target_duration,
+        target_chunk_seconds=target_chunk_seconds,
+    )
+
+    if len(chunks) <= 1:
+        _append_log(job, "Timeline concisa: mantendo passagem unificada direta.")
+        video_concat = work / "video_concat.mp4"
+        if not video_concat.exists():
+            concat_txt = work / "concat_segments_single.txt"
+            lines = []
+            for s in segments:
+                rel = s.relative_to(work).as_posix().replace("'", "'\\''")
+                lines.append(f"file '{rel}'")
+            concat_txt.write_text("\n".join(lines), encoding="utf-8")
+            cmd_c = [
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+                "-fflags", "+genpts",
+                "-f", "concat", "-safe", "0", "-i", concat_txt.name,
+                "-c", "copy", "-avoid_negative_ts", "make_zero", str(video_concat.name),
+            ]
+            run_cmd(job, cmd_c, cwd=work, quiet_success=True)
+        return compose_final_visuals(job, video_concat, cta, cta_times, subtitle_ass, work, target_duration)
+
+    logical_cpus = max(2, int(os.cpu_count() or 4))
+    max_workers = max(1, min(4, logical_cpus // 2, len(chunks)))
+    _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
+
+    comp_base = 65.0
+    comp_span = 30.0
+    step_span = comp_span / max(1, len(chunks))
+
+    def render_single_chunk(chunk_info: dict[str, Any]) -> Path:
+        idx = chunk_info["index"]
+        c_segs = chunk_info["segments"]
+        c_start = chunk_info["start_time"]
+        c_dur = chunk_info["duration"]
+        c_base = comp_base + idx * step_span
+
+        chunk_raw = work / f"chunk_raw_{idx}.mp4"
+        chunk_concat_txt = work / f"chunk_concat_{idx}.txt"
+
+        lines = []
+        for s in c_segs:
+            rel = s.relative_to(work).as_posix().replace("'", "'\\''")
+            lines.append(f"file '{rel}'")
+        chunk_concat_txt.write_text("\n".join(lines), encoding="utf-8")
+
+        cmd_raw = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", chunk_concat_txt.name,
+            "-c", "copy", "-avoid_negative_ts", "make_zero", str(chunk_raw.name),
+        ]
+        run_cmd(job, cmd_raw, cwd=work, quiet_success=True)
+
+        c_ass: Path | None = None
+        if subtitle_ass and subtitle_ass.exists():
+            c_ass = work / f"chunk_sub_{idx}.ass"
+            slice_ass_for_chunk(subtitle_ass, c_start, c_dur, c_ass)
+
+        c_times = [
+            round(t - c_start, 4)
+            for t in (cta_times or [])
+            if c_start <= t < (c_start + c_dur)
+        ]
+
+        out_name = f"chunk_visual_{idx}.mp4"
+        try:
+            return compose_final_visuals(
+                job=job,
+                video_source=chunk_raw,
+                cta=cta if c_times else None,
+                times=c_times,
+                subtitle_ass=c_ass,
+                work=work,
+                target_duration=c_dur,
+                out_name=out_name,
+                base=c_base,
+                span=step_span,
+                log_summary=False,
+            )
+        except Exception as exc:
+            _append_log(job, f"Aviso no chunk {idx} ({exc}), tentando repassagem isolada...")
+            return compose_final_visuals(
+                job=job,
+                video_source=chunk_raw,
+                cta=cta if c_times else None,
+                times=c_times,
+                subtitle_ass=c_ass,
+                work=work,
+                target_duration=c_dur,
+                out_name=out_name,
+                base=c_base,
+                span=step_span,
+                log_summary=False,
+            )
+
+    completed_count = 0
+    chunk_lock = threading.Lock()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_chunk = {executor.submit(render_single_chunk, ch): ch for ch in chunks}
+        rendered_chunk_paths: dict[int, Path] = {}
+        for future in as_completed(future_to_chunk):
+            ch = future_to_chunk[future]
+            chunk_path = future.result()
+            rendered_chunk_paths[ch["index"]] = chunk_path
+            with chunk_lock:
+                completed_count += 1
+                pct = comp_base + (completed_count / len(chunks)) * comp_span
+                job.percent = max(job.percent, min(95.0, round(pct, 1)))
+
+    _append_log(job, "Todos os chunks renderizados; executando fusao instantanea via stream copy.")
+    final_concat_txt = work / "chunks_visual_concat.txt"
+    concat_lines = []
+    for idx in range(len(chunks)):
+        c_path = rendered_chunk_paths[idx]
+        rel = c_path.relative_to(work).as_posix().replace("'", "'\\''")
+        concat_lines.append(f"file '{rel}'")
+    final_concat_txt.write_text("\n".join(concat_lines), encoding="utf-8")
+
+    final_visual = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
+    cmd_merge = [
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+        "-fflags", "+genpts",
+        "-f", "concat", "-safe", "0", "-i", final_concat_txt.name,
+        "-c", "copy", "-avoid_negative_ts", "make_zero", str(final_visual.name),
+    ]
+    t0 = time.time()
+    run_cmd(job, cmd_merge, cwd=work, quiet_success=True)
+    merge_elapsed = time.time() - t0
+
+    composed_duration = safe_probe_duration(final_visual)
+    w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
+    target_w = cta_scale_width(job, w)
+    preset, _, _ = cta_position_expr(job)
+
+    job.timeline_summary["composed_visual_duration"] = round(composed_duration, 3)
+    job.timeline_summary["duration_repair_avoided"] = True
     job.cta_summary.update({
         "position_preset": preset,
         "offset_x": clamp_float(job.options.get("ctaOffsetX"), 0.0, -35.0, 35.0),
@@ -12505,6 +12825,15 @@ def compose_final_visuals(
     })
     job.timeline_summary.update({
         "unified_final_composition": True,
+        "chunk_parallel_render": {
+            "enabled": True,
+            "chunk_count": len(chunks),
+            "target_chunk_seconds": float(target_chunk_seconds),
+            "concurrency_workers": max_workers,
+            "merge_mode": "stream_copy_demuxer",
+            "merge_seconds": round(merge_elapsed, 3),
+            "fallback_used": False,
+        },
         "visual_passes_effective": 2,
         "visual_passes_avoided": 1,
     })
@@ -12512,14 +12841,16 @@ def compose_final_visuals(
         turbo = ensure_turbo_summary(job)
         turbo.update({
             "unified_composition": True,
+            "chunk_parallel_render": True,
             "fallback_used": False,
             "visual_passes_effective": 2,
             "visual_passes_avoided": 1,
         })
-        _append_log(job, "Turbo Produção: CTA + Textos + Legendas compostos em uma única passagem visual.")
-    else:
-        _append_log(job, "Modo Eficiente otimizado: CTA + Textos + Legendas compostos em uma unica passagem final, preservando todos os efeitos.")
-    return out
+    _append_log(
+        job,
+        f"Renderizacao Paralela por Chunks concluida: {len(chunks)} blocos processados simultaneamente ({max_workers} workers) | fusao stream-copy em {merge_elapsed:.2f}s."
+    )
+    return final_visual
 
 
 def ensure_video_duration(job: Job, video_source: Path, target_duration: float, work: Path) -> Path:
@@ -18080,58 +18411,80 @@ def concat_segments_and_mux(
             visual_cached = None
     if not visual_cached:
         performance_start(job, "composition")
-        if cta:
+        has_visual_elements = bool((subtitle_ass and subtitle_ass.exists()) or (cta and cta.get("video") and cta_times))
+        use_chunk_render = has_visual_elements and audio_total >= 90.0 and len(valid_segments) >= 6
+        chunk_success = False
+        if use_chunk_render:
             try:
-                video_source = compose_final_visuals(
-                    job,
-                    video_source,
-                    cta,
-                    cta_times,
-                    subtitle_ass,
-                    work,
-                    audio_total,
+                video_source = compose_visual_chunks_parallel(
+                    job=job,
+                    segments=valid_segments,
+                    cta=cta,
+                    cta_times=cta_times,
+                    subtitle_ass=subtitle_ass,
+                    work=work,
+                    target_duration=audio_total,
                 )
+                chunk_success = True
             except RenderCancelled:
                 raise
-            except RuntimeError as exc:
-                if turbo_enabled(job):
-                    turbo = ensure_turbo_summary(job)
-                    turbo.update({
-                        "unified_composition": False,
-                        "fallback_used": True,
-                        "visual_passes_effective": 3 if subtitle_ass and subtitle_ass.exists() else 2,
-                        "visual_passes_avoided": 0,
-                        "fallback_reason": human_render_error(exc),
-                    })
-                job.timeline_summary.update({
-                    "unified_final_composition": False,
-                    "visual_passes_effective": 3 if subtitle_ass and subtitle_ass.exists() else 2,
-                    "visual_passes_avoided": 0,
-                    "composition_fallback_reason": human_render_error(exc),
-                })
-                _append_log(job, f"Composição unificada falhou; usando fluxo compatível. Motivo: {human_render_error(exc)}")
-                video_source = overlay_cta_on_video(
-                    job, video_source, cta, cta_times, work, target_duration=audio_total, base=65.0, span=15.0
-                )
-                if subtitle_ass and subtitle_ass.exists():
-                    video_source = burn_subtitles_on_video(
+            except Exception as exc:
+                _append_log(job, f"Aviso: Renderizacao paralela por chunks encontrou inconsistencia ({human_render_error(exc)}); aplicando fallback para composicao unificada.")
+                chunk_success = False
+
+        if not chunk_success:
+            if cta:
+                try:
+                    video_source = compose_final_visuals(
                         job,
                         video_source,
+                        cta,
+                        cta_times,
                         subtitle_ass,
                         work,
-                        "video_subtitled_fallback.mp4",
-                        target_duration=audio_total,
-                        base=80.0,
-                        span=15.0,
+                        audio_total,
                     )
-        elif subtitle_ass and subtitle_ass.exists():
-            video_source = burn_subtitles_on_video(
-                job,
-                video_source,
-                subtitle_ass,
-                work,
-                target_duration=audio_total,
-            )
+                except RenderCancelled:
+                    raise
+                except RuntimeError as exc:
+                    if turbo_enabled(job):
+                        turbo = ensure_turbo_summary(job)
+                        turbo.update({
+                            "unified_composition": False,
+                            "fallback_used": True,
+                            "visual_passes_effective": 3 if subtitle_ass and subtitle_ass.exists() else 2,
+                            "visual_passes_avoided": 0,
+                            "fallback_reason": human_render_error(exc),
+                        })
+                    job.timeline_summary.update({
+                        "unified_final_composition": False,
+                        "visual_passes_effective": 3 if subtitle_ass and subtitle_ass.exists() else 2,
+                        "visual_passes_avoided": 0,
+                        "composition_fallback_reason": human_render_error(exc),
+                    })
+                    _append_log(job, f"Composição unificada falhou; usando fluxo compatível. Motivo: {human_render_error(exc)}")
+                    video_source = overlay_cta_on_video(
+                        job, video_source, cta, cta_times, work, target_duration=audio_total, base=65.0, span=15.0
+                    )
+                    if subtitle_ass and subtitle_ass.exists():
+                        video_source = burn_subtitles_on_video(
+                            job,
+                            video_source,
+                            subtitle_ass,
+                            work,
+                            "video_subtitled_fallback.mp4",
+                            target_duration=audio_total,
+                            base=80.0,
+                            span=15.0,
+                        )
+            elif subtitle_ass and subtitle_ass.exists():
+                video_source = burn_subtitles_on_video(
+                    job,
+                    video_source,
+                    subtitle_ass,
+                    work,
+                    target_duration=audio_total,
+                )
         performance_stop(job, "composition")
         if graph:
             graph.commit(
