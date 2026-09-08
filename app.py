@@ -14598,17 +14598,18 @@ def upload_automator_session_file(
             "size": destination.stat().st_size,
             "alreadyUploaded": True,
         }
-    temporary = destination.with_suffix(destination.suffix + ".part")
     size = 0
     try:
-        with temporary.open("wb") as handle:
-            shutil.copyfileobj(file.file, handle, length=1024 * 1024 * 4)
-        size = temporary.stat().st_size
+        with destination.open("wb") as handle:
+            shutil.copyfileobj(file.file, handle, length=1024 * 1024 * 8)
+        size = destination.stat().st_size
         if size <= 0:
+            destination.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail=f"Arquivo vazio: {file.filename}")
-        os.replace(temporary, destination)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     finally:
-        temporary.unlink(missing_ok=True)
         try:
             file.file.close()
         except Exception:
@@ -14650,55 +14651,67 @@ def upload_automator_session_batch(
     if len(files) != len(slot_list):
         raise HTTPException(status_code=400, detail="Quantidade de arquivos e slots incompatível.")
 
-    results = []
-    try:
-        for file, slot in zip(files, slot_list):
-            expected = (session.get("expected") or {}).get(slot)
-            if not expected:
-                continue
-            suffix = Path(file.filename or expected.get("name") or "").suffix.lower()
-            if not _automator_kind_allowed(str(expected.get("kind") or ""), suffix):
-                continue
-            destination = Path(session["folder"]) / f"{slot}{suffix}"
+    session_folder = Path(session["folder"])
+    expected_map = session.get("expected") or {}
+
+    def _process_one_file(pair):
+        f_obj, s_id = pair
+        try:
+            expected_info = expected_map.get(s_id)
+            if not expected_info:
+                return None
+            sfx = Path(f_obj.filename or expected_info.get("name") or "").suffix.lower()
+            if not _automator_kind_allowed(str(expected_info.get("kind") or ""), sfx):
+                return None
+            dest = session_folder / f"{s_id}{sfx}"
             with AUTOMATOR_SESSION_LOCK:
-                existing = session["uploads"].get(slot)
-            if existing and destination.exists() and destination.stat().st_size > 0:
-                results.append({"slot": slot, "size": destination.stat().st_size})
-                continue
-            temporary = destination.with_suffix(destination.suffix + ".part")
+                existing_item = session["uploads"].get(s_id)
+            if existing_item and dest.exists() and dest.stat().st_size > 0:
+                return (s_id, dest.stat().st_size, dest, f_obj.filename or expected_info.get("name"))
             try:
-                with temporary.open("wb") as handle:
-                    shutil.copyfileobj(file.file, handle, length=1024 * 1024 * 4)
-                size = temporary.stat().st_size
-                if size > 0:
-                    os.replace(temporary, destination)
-                    with AUTOMATOR_SESSION_LOCK:
-                        session["uploads"][slot] = {
-                            "path": destination,
-                            "size": size,
-                            "filename": file.filename or expected.get("name"),
-                        }
-                    results.append({"slot": slot, "size": size})
-            finally:
-                temporary.unlink(missing_ok=True)
-                try:
-                    file.file.close()
-                except Exception:
-                    pass
-    finally:
-        for f in files:
+                with dest.open("wb") as h:
+                    shutil.copyfileobj(f_obj.file, h, length=1024 * 1024 * 8)
+                sz = dest.stat().st_size
+                if sz > 0:
+                    return (s_id, sz, dest, f_obj.filename or expected_info.get("name"))
+                else:
+                    dest.unlink(missing_ok=True)
+                    return None
+            except Exception:
+                dest.unlink(missing_ok=True)
+                return None
+        finally:
             try:
-                f.file.close()
+                f_obj.file.close()
             except Exception:
                 pass
 
+    pairs = list(zip(files, slot_list))
+    results = []
+    max_workers = min(4, max(1, len(pairs)))
+    if max_workers > 1:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            written_items = list(executor.map(_process_one_file, pairs))
+    else:
+        written_items = [_process_one_file(p) for p in pairs]
+
     with AUTOMATOR_SESSION_LOCK:
+        for item in written_items:
+            if item:
+                s_id, sz, dest, fname = item
+                session["uploads"][s_id] = {
+                    "path": dest,
+                    "size": sz,
+                    "filename": fname,
+                }
+                results.append({"slot": s_id, "size": sz})
         uploaded_count = len(session["uploads"])
         expected_count = len(session["expected"])
 
     return {
         "ok": True,
         "processed": len(results),
+        "uploadedSlots": [item[0] for item in written_items if item],
         "uploadedFiles": uploaded_count,
         "expectedFiles": expected_count,
     }

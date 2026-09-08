@@ -6546,12 +6546,27 @@ async function applyAutomatorDistribution(options = {}){
     state.automatorSessionId = created.sessionId;
 
     const uploadedSlots = new Set();
-    const batchSize = fileSpecs.length > 200 ? 4 : 5;
+    const MAX_FILES = fileSpecs.length > 500 ? 12 : 8;
+    const MAX_BYTES = 35 * 1024 * 1024;
     const batches = [];
-    for(let i = 0; i < fileSpecs.length; i += batchSize){
-      batches.push(fileSpecs.slice(i, i + batchSize));
+    let currentBatch = [];
+    let currentBatchBytes = 0;
+
+    for (const spec of fileSpecs) {
+      const sz = Number(spec.size || 0);
+      if (currentBatch.length > 0 && (currentBatch.length >= MAX_FILES || currentBatchBytes + sz > MAX_BYTES)) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentBatchBytes = 0;
+      }
+      currentBatch.push(spec);
+      currentBatchBytes += sz;
     }
-    const poolSize = Math.min(3, Math.max(1, batches.length > 50 ? 3 : (batches.length > 10 ? 2 : 1)));
+    if (currentBatch.length > 0) {
+      batches.push(currentBatch);
+    }
+
+    const poolSize = Math.min(3, Math.max(1, batches.length > 30 ? 3 : (batches.length > 8 ? 2 : 1)));
 
     const uploadSingleFileWithRetry = async (spec, maxRetries = 3) => {
       if(uploadedSlots.has(spec.slot)) return;
@@ -6580,7 +6595,7 @@ async function applyAutomatorDistribution(options = {}){
           if(state.automatorAbortController?.signal?.aborted) throw err;
           lastErr = err;
           if(attempt < maxRetries){
-            await new Promise(res => setTimeout(res, 500 * attempt));
+            await new Promise(res => setTimeout(res, 300 * attempt));
           }
         }
       }
@@ -6606,13 +6621,21 @@ async function applyAutomatorDistribution(options = {}){
           body: form,
           cache: 'no-store',
           signal: state.automatorAbortController.signal,
-        }, 60000);
+        }, 90000);
         if(response && response.ok){
           const resJson = await response.json().catch(() => null);
           if(resJson && resJson.ok){
-            batchSuccess = true;
+            const serverUploaded = Array.isArray(resJson.uploadedSlots) ? new Set(resJson.uploadedSlots) : null;
+            let allBatchOk = true;
             for(const spec of unuploaded){
-              uploadedSlots.add(spec.slot);
+              if(!serverUploaded || serverUploaded.has(spec.slot)){
+                uploadedSlots.add(spec.slot);
+              } else {
+                allBatchOk = false;
+              }
+            }
+            if(allBatchOk){
+              batchSuccess = true;
             }
             const done = uploadedSlots.size;
             const lastName = unuploaded[unuploaded.length - 1]?.name || '';
