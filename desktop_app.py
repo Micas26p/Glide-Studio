@@ -12,6 +12,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+if os.name == "nt":
+    try:
+        import ctypes
+        ctypes.cdll.msvcrt._setmaxstdio(2048)
+    except Exception:
+        pass
+
 
 def _boot_smoke_trace(stage: str):
     if os.environ.get("GLIDE_ULTRA_SMOKE_TEST") != "1" and "--smoke-test" not in sys.argv:

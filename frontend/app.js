@@ -6464,23 +6464,40 @@ async function applyAutomatorDistribution(options = {}){
   }
   const previousActive = state.activeProjectId;
   let lastProgressUpdate = 0;
-  const progress = (value, text) => {
+  const progress = (value, text, forceText = false) => {
     const now = performance.now();
     const percent = Math.max(0, Math.min(100, Math.round(value)));
     if(automatorProgress) automatorProgress.hidden = false;
     if(automatorProgressBar) automatorProgressBar.value = percent;
     if(automatorProgressValue) automatorProgressValue.textContent = `${percent}%`;
-    if(now - lastProgressUpdate > 60 || percent === 100 || percent <= 5){
+    if(forceText || now - lastProgressUpdate > 60 || percent === 100 || percent <= 5){
       lastProgressUpdate = now;
       if(automatorProgressText) automatorProgressText.textContent = text;
     }
   };
+
+  const fetchWithTimeout = async (url, options = {}, timeoutMs = 45000) => {
+    const controller = new AbortController();
+    const parentSignal = options.signal;
+    const onAbort = () => controller.abort(parentSignal?.reason);
+    if(parentSignal) parentSignal.addEventListener('abort', onAbort);
+    const timer = setTimeout(() => {
+      controller.abort(new Error(`Timeout de rede (${Math.round(timeoutMs / 1000)}s)`));
+    }, timeoutMs);
+    try {
+      return await fetch(url, {...options, signal: controller.signal});
+    } finally {
+      clearTimeout(timer);
+      if(parentSignal) parentSignal.removeEventListener('abort', onAbort);
+    }
+  };
+
   try{
     if(state.automatorSessionId){
-      await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}`, {
+      await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}`, {
         method: 'DELETE',
         cache: 'no-store',
-      }).catch(() => {});
+      }, 10000).catch(() => {});
       state.automatorSessionId = '';
     }
     const fileSpecs = [];
@@ -6513,8 +6530,8 @@ async function applyAutomatorDistribution(options = {}){
         projectName: row.project.name,
       };
     });
-    progress(2, 'Validando projetos e associações...');
-    const createResponse = await fetch('/api/queue/automator/sessions', {
+    progress(2, 'Validando projetos e associações...', true);
+    const createResponse = await fetchWithTimeout('/api/queue/automator/sessions', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
@@ -6523,62 +6540,106 @@ async function applyAutomatorDistribution(options = {}){
       }),
       cache: 'no-store',
       signal: state.automatorAbortController.signal,
-    });
+    }, 30000);
     if(!createResponse.ok) throw new Error(await createResponse.text());
     const created = await createResponse.json();
     state.automatorSessionId = created.sessionId;
-    let uploaded = 0;
-    const batchSize = 6;
+
+    const uploadedSlots = new Set();
+    const batchSize = fileSpecs.length > 200 ? 4 : 5;
     const batches = [];
     for(let i = 0; i < fileSpecs.length; i += batchSize){
       batches.push(fileSpecs.slice(i, i + batchSize));
     }
-    const poolSize = batches.length > 50 ? 5 : (batches.length > 15 ? 4 : 2);
-    await runPool(batches, poolSize, async batch => {
-      const form = new FormData();
-      const slots = [];
-      for(const spec of batch){
-        form.append('files', spec.file, spec.file.name);
-        slots.push(spec.slot);
-      }
-      form.append('slots', JSON.stringify(slots));
-      let response = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/batch`, {
-        method: 'POST',
-        body: form,
-        cache: 'no-store',
-        signal: state.automatorAbortController.signal,
-      }).catch(() => null);
+    const poolSize = Math.min(3, Math.max(1, batches.length > 50 ? 3 : (batches.length > 10 ? 2 : 1)));
 
-      if(!response || !response.ok){
-        for(const spec of batch){
+    const uploadSingleFileWithRetry = async (spec, maxRetries = 3) => {
+      if(uploadedSlots.has(spec.slot)) return;
+      let lastErr = null;
+      for(let attempt = 1; attempt <= maxRetries; attempt++){
+        if(state.automatorAbortController?.signal?.aborted) return;
+        try {
           const singleForm = new FormData();
           singleForm.append('file', spec.file, spec.file.name);
           singleForm.append('slot', spec.slot);
-          const singleResp = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/file`, {
+          const singleResp = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/file`, {
             method: 'POST',
             body: singleForm,
             cache: 'no-store',
             signal: state.automatorAbortController.signal,
-          });
-          if(!singleResp.ok) throw new Error(`${spec.name}: ${await singleResp.text()}`);
-          uploaded += 1;
-          progress(5 + uploaded / Math.max(1, fileSpecs.length) * 85, `Enviando ${uploaded}/${fileSpecs.length}: ${spec.name}`);
+          }, 45000);
+          if(!singleResp.ok){
+            const txt = await singleResp.text().catch(() => '');
+            throw new Error(txt || `HTTP ${singleResp.status}`);
+          }
+          uploadedSlots.add(spec.slot);
+          const done = uploadedSlots.size;
+          progress(5 + (done / Math.max(1, fileSpecs.length)) * 85, `Enviando ${done}/${fileSpecs.length}: ${spec.name}`);
+          return;
+        } catch(err){
+          if(state.automatorAbortController?.signal?.aborted) throw err;
+          lastErr = err;
+          if(attempt < maxRetries){
+            await new Promise(res => setTimeout(res, 500 * attempt));
+          }
         }
-      } else {
-        uploaded += batch.length;
-        const lastName = batch[batch.length - 1]?.name || '';
-        progress(5 + uploaded / Math.max(1, fileSpecs.length) * 85, `Enviando ${uploaded}/${fileSpecs.length}: ${lastName}`);
+      }
+      throw new Error(`Falha ao enviar "${spec.name}": ${lastErr?.message || lastErr}`);
+    };
+
+    await runPool(batches, poolSize, async batch => {
+      if(state.automatorAbortController?.signal?.aborted) return;
+      const unuploaded = batch.filter(spec => !uploadedSlots.has(spec.slot));
+      if(!unuploaded.length) return;
+
+      let batchSuccess = false;
+      try {
+        const form = new FormData();
+        const slots = [];
+        for(const spec of unuploaded){
+          form.append('files', spec.file, spec.file.name);
+          slots.push(spec.slot);
+        }
+        form.append('slots', JSON.stringify(slots));
+        const response = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/batch`, {
+          method: 'POST',
+          body: form,
+          cache: 'no-store',
+          signal: state.automatorAbortController.signal,
+        }, 60000);
+        if(response && response.ok){
+          const resJson = await response.json().catch(() => null);
+          if(resJson && resJson.ok){
+            batchSuccess = true;
+            for(const spec of unuploaded){
+              uploadedSlots.add(spec.slot);
+            }
+            const done = uploadedSlots.size;
+            const lastName = unuploaded[unuploaded.length - 1]?.name || '';
+            progress(5 + (done / Math.max(1, fileSpecs.length)) * 85, `Enviando ${done}/${fileSpecs.length}: ${lastName}`);
+          }
+        }
+      } catch(e){
+        batchSuccess = false;
+      }
+
+      if(!batchSuccess){
+        for(const spec of unuploaded){
+          if(state.automatorAbortController?.signal?.aborted) return;
+          await uploadSingleFileWithRetry(spec, 3);
+        }
       }
     });
-    progress(92, 'Confirmando a distribuição de forma atômica...');
-    const commitResponse = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/commit`, {
+
+    progress(92, 'Confirmando a distribuição de forma atômica...', true);
+    const commitResponse = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/commit`, {
       method: 'POST',
       cache: 'no-store',
       signal: state.automatorAbortController.signal,
-    });
+    }, 60000);
     if(!commitResponse.ok) throw new Error(await commitResponse.text());
     const committed = await commitResponse.json();
-    progress(97, 'Verificando projetos persistidos...');
+    progress(97, 'Verificando projetos persistidos...', true);
     const expectedByProject = new Map(committed.projects.map(item => [item.projectId, item.counts]));
     for(const row of rowsToApply){
       const counts = expectedByProject.get(row.project.id);
@@ -6597,17 +6658,18 @@ async function applyAutomatorDistribution(options = {}){
     loadProject(state.activeProjectId || state.projects[0]?.id, {capture: false, force: true});
     renderProjectQueue();
     updateStats();
-    progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`);
+    progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`, true);
     state.automatorApplying = false;
     closeAutomator();
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
   }catch(error){
     const cancelled = error?.name === 'AbortError';
     const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
-    progress(Number(automatorProgressBar?.value || 0), `AUTO não alterou os projetos: ${message}`);
+    progress(Number(automatorProgressBar?.value || 0), `AUTO não alterou os projetos: ${message}`, true);
     if(dockSummary) dockSummary.textContent = `AUTO falhou sem alterar projetos: ${message}`;
     updateAutomatorPreview();
-  }finally{
+  }
+finally{
     state.automatorApplying = false;
     state.automatorAbortController = null;
     if(automatorConfirmBtn){
