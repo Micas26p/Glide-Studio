@@ -14758,6 +14758,7 @@ def commit_automator_session(session_id: str):
                 index_backups[project_id] = _load_project_media_index(project_id)
 
             project_media_indices: dict[str, dict[str, Any]] = {}
+            needs_probe: list[tuple[str, str, Path, dict[str, Any]]] = []  # (project_id, rel_key, target, record_ref)
             for slot, spec in expected.items():
                 upload = uploads[slot]
                 source = Path(upload["path"])
@@ -14779,16 +14780,44 @@ def commit_automator_session(session_id: str):
                 created_paths.append(target)
                 if project_id not in project_media_indices:
                     project_media_indices[project_id] = _load_project_media_index(project_id)
-                project_media_indices[project_id][rel_key] = {
+                raw_duration = max(0.0, float(spec.get("duration") or 0.0))
+                # Correção de raiz: se o frontend enviou duration=0 para um vídeo (bug do
+                # automatorDuration('folder') que retornava 0 para arquivos individuais),
+                # agendamos probe paralelo para não travar o commit serial.
+                if raw_duration <= 0 and kind in ("video", "image"):
+                    if kind == "image":
+                        raw_duration = 4.0  # padrão saudável para imagens
+                    else:
+                        raw_duration = _duration_from_clip_name(rel_key)
+                record_entry: dict[str, Any] = {
                     "file": target.name,
                     "name": Path(rel_key).name,
                     "kind": kind,
                     "size": target.stat().st_size,
-                    "duration": max(0.0, float(spec.get("duration") or 0.0)),
+                    "duration": round(raw_duration, 4),
                     "updatedAt": _now_iso(),
                 }
+                project_media_indices[project_id][rel_key] = record_entry
+                if raw_duration <= 0 and kind == "video":
+                    needs_probe.append((project_id, rel_key, target, record_entry))
                 group = "videos" if kind in ("video", "image") else "audios" if kind == "audio" else "script_guides" if kind in ("script_guide", "script") else "texts"
                 project_results[project_id][group].append(rel_key)
+
+            # Probe de duração paralelo para vídeos com duration=0 (retroativo)
+            if needs_probe:
+                def _probe_one(args: tuple[str, str, Path, dict[str, Any]]) -> None:
+                    _pid, _rel, tgt, rec = args
+                    try:
+                        d = safe_probe_duration(tgt)
+                        if d > 0:
+                            rec["duration"] = round(d, 4)
+                    except Exception:
+                        pass
+
+                max_probe_workers = min(8, len(needs_probe))
+                with ThreadPoolExecutor(max_workers=max_probe_workers) as _probe_ex:
+                    list(_probe_ex.map(_probe_one, needs_probe))
+
 
             for project_id, items in project_media_indices.items():
                 _save_project_media_index(project_id, items)
@@ -15048,6 +15077,14 @@ def queue_project_media(project_id: str):
                 duration = image_duration_default(project_copy.get("options") if isinstance(project_copy.get("options"), dict) else {})
             if duration <= 0 and item_kind in {"audio", "background_music"}:
                 duration = safe_probe_duration(path)
+            # Fix retroativo: vídeos com duration=0 no índice (bug do automator que salvava
+            # duration=0 para arquivos individuais de pasta) → probar a duração real via ffprobe.
+            if duration <= 0 and item_kind == "video":
+                duration = safe_probe_duration(path)
+                # Atualiza o índice persistido para evitar re-probe nas próximas chamadas
+                if duration > 0 and record and rel_key in stable_index:
+                    stable_index[rel_key]["duration"] = round(duration, 4)
+                    stable_changed = True
             result[group].append({
                 "name": Path(rel_key).name,
                 "rel": rel_key,

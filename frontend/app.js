@@ -6506,6 +6506,10 @@ async function applyAutomatorDistribution(options = {}){
       const add = (file, kind, lane, relValue, suffix) => {
         if(!file) return;
         const slot = `p${rowIndex}_${lane}_${suffix}`;
+        // Para arquivos individuais dentro de grupos (lane='folder'), usar o kind real
+        // do arquivo (video/image) em vez de 'folder', pois automatorDuration('folder')
+        // espera um objeto com .files (grupo) e retorna 0 para arquivos individuais.
+        const durationType = lane === 'folder' ? kind : lane;
         fileSpecs.push({
           slot,
           projectId,
@@ -6514,7 +6518,7 @@ async function applyAutomatorDistribution(options = {}){
           rel: relValue || file.name,
           name: file.name,
           size: Number(file.size || 0),
-          duration: automatorDuration(file, lane),
+          duration: automatorDuration(file, durationType),
           file,
         });
       };
