@@ -5870,6 +5870,10 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
         samples.append(sample)
         if visible and first_visible_offset == 0.0:
             first_visible_offset = at
+            # Se a primeira amostra já tem frame visível claro, o vídeo é comprovadamente saudável:
+            # não há necessidade de rodar mais 2 processos FFmpeg extras para este clipe.
+            if at == sample_points[0]:
+                break
 
     has_any_visible = any(s.get("visible") for s in samples)
     if has_any_visible:
@@ -8563,23 +8567,15 @@ def get_media_visual_profile(path: Path | str, duration: float = 5.0, cwd: Path 
                         return prof
     except Exception:
         pass
-    try:
-        res = probe_visual_clean_health(p, duration, "fast", cwd=cwd)
-        return res.get("visual_profile") or res.get("metrics", {}).get("visual_profile") or {
-            "primary_mood": "neutral",
-            "confidence": 0.50,
-            "motion": "steady_motion",
-            "motion_score": 5.0,
-            "has_human": False,
-        }
-    except Exception:
-        return {
-            "primary_mood": "neutral",
-            "confidence": 0.50,
-            "motion": "steady_motion",
-            "motion_score": 5.0,
-            "has_human": False,
-        }
+    # Fast-path: se a mídia não foi analisada no filtro visual, retorna perfil padrão
+    # sem disparar subprocessos lentos de FFmpeg/OpenCV durante o alinhamento semântico.
+    return {
+        "primary_mood": "neutral",
+        "confidence": 0.50,
+        "motion": "steady_motion",
+        "motion_score": 5.0,
+        "has_human": False,
+    }
 
 
 def get_media_clean_roi(path: Path | str, cwd: Path | None = None) -> tuple[float, float, float, float] | None:
@@ -14997,6 +14993,7 @@ def queue_project_media(project_id: str):
     if "subtitles" in groups and not groups.get("texts"):
         st = groups["subtitles"]
         groups["texts"] = [st] if isinstance(st, str) and st else (st if isinstance(st, list) else [])
+    pending_duration_probes: list[tuple[Path, dict[str, Any], str]] = []
     for group, kind in kind_map.items():
         for raw_rel in groups.get(group) or []:
             rel_key = str(raw_rel).replace("\\", "/")
@@ -15075,17 +15072,7 @@ def queue_project_media(project_id: str):
                 duration = _duration_from_clip_name(rel_key)
             if duration <= 0 and item_kind == "image":
                 duration = image_duration_default(project_copy.get("options") if isinstance(project_copy.get("options"), dict) else {})
-            if duration <= 0 and item_kind in {"audio", "background_music"}:
-                duration = safe_probe_duration(path)
-            # Fix retroativo: vídeos com duration=0 no índice (bug do automator que salvava
-            # duration=0 para arquivos individuais de pasta) → probar a duração real via ffprobe.
-            if duration <= 0 and item_kind == "video":
-                duration = safe_probe_duration(path)
-                # Atualiza o índice persistido para evitar re-probe nas próximas chamadas
-                if duration > 0 and record and rel_key in stable_index:
-                    stable_index[rel_key]["duration"] = round(duration, 4)
-                    stable_changed = True
-            result[group].append({
+            entry_data: dict[str, Any] = {
                 "name": Path(rel_key).name,
                 "rel": rel_key,
                 "kind": item_kind,
@@ -15094,7 +15081,28 @@ def queue_project_media(project_id: str):
                 "type": mime_map.get(path.suffix.lower(), "application/octet-stream"),
                 "duration": round(duration, 4),
                 **persisted,
-            })
+            }
+            if duration <= 0 and item_kind in {"video", "audio", "background_music"}:
+                pending_duration_probes.append((path, entry_data, rel_key))
+            result[group].append(entry_data)
+
+    if pending_duration_probes:
+        def _probe_entry(item_tuple: tuple[Path, dict[str, Any], str]) -> None:
+            p_path, e_data, r_key = item_tuple
+            try:
+                d = safe_probe_duration(p_path)
+                if d > 0:
+                    e_data["duration"] = round(d, 4)
+                    if r_key in stable_index:
+                        stable_index[r_key]["duration"] = round(d, 4)
+            except Exception:
+                pass
+
+        max_probe_workers = min(8, max(2, int(os.cpu_count() or 4)))
+        with ThreadPoolExecutor(max_workers=max_probe_workers) as probe_ex:
+            list(probe_ex.map(_probe_entry, pending_duration_probes))
+        stable_changed = True
+
     if stable_changed:
         _save_project_media_index(project_id, stable_index)
     return {
@@ -17839,9 +17847,8 @@ def visual_clean_candidate_sources(
 ) -> set[str] | None:
     if not valid_pairs:
         return set()
-    # Se o usuário enviar 2x mais vídeos (ou até 600 clipes), analisa o lote inteiro
-    # para que clipes limpos de qualquer ponto do lote possam substituir mídias poluídas.
-    if len(valid_pairs) <= 600:
+    # Se o lote tiver pouquíssimos clipes (<= 20), analisa todos diretamente
+    if len(valid_pairs) <= 20:
         return None
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
@@ -17852,30 +17859,31 @@ def visual_clean_candidate_sources(
             for plan in plans
         }
     except Exception:
-        selected = {str(item[0]).replace("\\", "/") for item in valid_pairs}
-    reserve_target = max(audio_total * min_speed * 3.5, 300.0)
+        selected = {str(item[0]).replace("\\", "/") for item in valid_pairs[:40]}
+    # Reserva inteligente: cobre a timeline com 80% de margem para substituir clipes descartados,
+    # limitando a no máximo 70 clipes para manter o render ultrarrápido.
+    reserve_target = max(audio_total * min_speed * 1.8, 60.0)
+    max_candidates = min(70, len(valid_pairs))
     covered = 0.0
     for source, duration in valid_pairs:
         key = str(source).replace("\\", "/")
         if key in selected:
             covered += duration
             continue
-        if covered < reserve_target:
+        if covered < reserve_target and len(selected) < max_candidates:
             selected.add(key)
             covered += duration
     return selected
 
 
 def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> tuple[list[tuple[Path, float]], list[dict[str, Any]]]:
-    valid_pairs: list[tuple[Path, float]] = []
-    invalid_infos: list[dict[str, Any]] = []
-    for p in video_files:
+    def _inspect_one(p: Path) -> tuple[bool, Path, float, dict[str, Any] | None]:
         if is_image_path(p):
             try:
                 if p.exists() and p.is_file() and p.stat().st_size > 0:
-                    valid_pairs.append((p, image_duration_default(job.options)))
+                    return True, p, image_duration_default(job.options), None
                 else:
-                    invalid_infos.append({
+                    return False, p, 0.0, {
                         "name": media_display_name(job, p),
                         "file": p.name,
                         "reason": "imagem ausente ou vazia",
@@ -17883,9 +17891,9 @@ def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> t
                         "size_mb": 0,
                         "visual_checked": False,
                         "visible_frame": False,
-                    })
+                    }
             except Exception:
-                invalid_infos.append({
+                return False, p, 0.0, {
                     "name": media_display_name(job, p),
                     "file": p.name,
                     "reason": "imagem invalida",
@@ -17893,14 +17901,13 @@ def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> t
                     "size_mb": 0,
                     "visual_checked": False,
                     "visible_frame": False,
-                })
-            continue
+                }
         dur = safe_probe_duration(p, cwd=work)
         health = probe_video_render_health(p, dur, cwd=work)
         if health.get("valid"):
-            valid_pairs.append((p, dur))
+            return True, p, dur, None
         else:
-            invalid_infos.append({
+            return False, p, 0.0, {
                 "name": media_display_name(job, p),
                 "file": p.name,
                 "reason": health.get("reason") or "video invalido",
@@ -17908,7 +17915,28 @@ def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> t
                 "size_mb": health.get("size_mb"),
                 "visual_checked": health.get("visual_checked"),
                 "visible_frame": health.get("visible_frame"),
-            })
+            }
+
+    valid_pairs: list[tuple[Path, float]] = []
+    invalid_infos: list[dict[str, Any]] = []
+
+    if len(video_files) > 4:
+        workers = min(8, max(2, int(os.cpu_count() or 4)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            results = list(ex.map(_inspect_one, video_files))
+        for is_ok, path_out, dur_out, err_out in results:
+            if is_ok:
+                valid_pairs.append((path_out, dur_out))
+            elif err_out:
+                invalid_infos.append(err_out)
+    else:
+        for p in video_files:
+            is_ok, path_out, dur_out, err_out = _inspect_one(p)
+            if is_ok:
+                valid_pairs.append((path_out, dur_out))
+            elif err_out:
+                invalid_infos.append(err_out)
+
     return valid_pairs, invalid_infos
 
 

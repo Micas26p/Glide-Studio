@@ -5397,22 +5397,45 @@ async function startRender(context = {}){
     outputPath.textContent = '';
     openOutputBtn.classList.remove('hidden');
 
+    let completedUploads = 0;
+    const pendingUploads = [];
     for(let i = 0; i < files.length; i++){
-      if(state.renderCancelRequested){
-        await cancelCurrentRender({silent: true});
-        throw new Error('Render cancelado pelo usuário.');
-      }
       if(files[i]._persisted){
-        const ready = i + 1;
-        setRenderStage('uploading');
-        setRenderProgress(
-          files.length ? (ready / files.length) * 10 : 5,
-          'Reutilizando mídia preservada',
-          `Arquivo ${ready}/${files.length}: ${files[i].name}`,
-        );
-        continue;
+        completedUploads++;
+      }else{
+        pendingUploads.push({file: files[i], index: i, kind: manifest[i].kind});
       }
-      await uploadOne(state.activeJobId, files[i], i, manifest[i].kind, files.length);
+    }
+
+    if(completedUploads > 0){
+      setRenderStage('uploading');
+      setRenderProgress(
+        files.length ? (completedUploads / files.length) * 10 : 5,
+        'Reutilizando mídia preservada',
+        `${completedUploads}/${files.length} arquivo(s) preservados localmente`,
+      );
+    }
+
+    if(pendingUploads.length > 0){
+      const uploadPoolSize = pendingUploads.length > 20 ? 4 : 2;
+      await runPool(pendingUploads, uploadPoolSize, async ({file, index, kind}) => {
+        if(state.renderCancelRequested){
+          await cancelCurrentRender({silent: true});
+          throw new Error('Render cancelado pelo usuário.');
+        }
+        const fd = new FormData();
+        fd.append('file', file, rel(file));
+        fd.append('rel', rel(file));
+        fd.append('kind', kind);
+        fd.append('index', String(index));
+        const r = await fetch(`/api/upload-file/${state.activeJobId}`, {method: 'POST', body: fd, cache: 'no-store'});
+        if(!r.ok) throw new Error(await r.text());
+        completedUploads++;
+        const pct = files.length ? (completedUploads / files.length) * 10 : 5;
+        setRenderStage('uploading');
+        setRenderProgress(pct, 'Copiando para o motor local', `Arquivo ${completedUploads}/${files.length}: ${file.name}`);
+        renderLog.textContent = `Cópia local concorrente (${uploadPoolSize} fluxos).\n${completedUploads}/${files.length} arquivo(s) prontos.\nVocê pode minimizar o app; mantenha a janela aberta até concluir.`;
+      });
     }
 
     setRenderStage('rendering');
