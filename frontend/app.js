@@ -1775,8 +1775,9 @@ function renderProjectQueue(){
     queueSummary.textContent = `${state.projects.length} projeto(s) na fila. ${ready} renderizável(is), ${done} concluído(s), ${errors} com erro, ${cancelled} cancelado(s), ${Math.max(0, skipped)} ignorado(s) sem requisitos.${paused ? ` ${paused} pendente(s).` : ''}${active ? ` Ativo: ${active.name}.` : ''}`;
   }
   if(renderQueueBtn){
-    renderQueueBtn.disabled = state.queueRendering || ready === 0;
-    renderQueueBtn.textContent = state.queuePaused ? 'Retomar fila' : 'Renderizar fila';
+    renderQueueBtn.disabled = state.queueRendering || state.renderActive || ready === 0;
+    const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
+    queueBtnLabel.textContent = state.queuePaused ? 'Retomar fila' : 'Renderizar fila';
   }
   if(retryFailedBtn){
     retryFailedBtn.disabled = state.queueRendering || state.renderActive || rerenderable === 0;
@@ -4778,7 +4779,7 @@ function resetProgress({preserveMinimized = false} = {}){
   downloadBtn.removeAttribute('href');
   openOutputBtn.classList.add('hidden');
   const closeBtn = $('#closeModal');
-  if(closeBtn) closeBtn.textContent = 'Minimizar';
+  if(closeBtn) closeBtn.textContent = modal.classList.contains('minimized') ? 'Expandir' : 'Minimizar';
   if(stopRenderBtn){
     stopRenderBtn.classList.add('hidden');
     stopRenderBtn.disabled = false;
@@ -5495,6 +5496,9 @@ async function startRender(context = {}){
     setRenderStage(cancelled ? 'cancelled' : 'error');
     renderMsg.textContent = cleanDisplayText(e.message);
     renderLog.textContent = cleanDisplayText(e.stack || String(e));
+    // Ensure close button shows 'Fechar' not 'Minimizar' since render is no longer active
+    const startErrCloseBtn = $('#closeModal');
+    if(startErrCloseBtn) startErrCloseBtn.textContent = 'Fechar';
     if(cancelled){
       const project = state.projects.find(item => item.id === (context.projectId || state.activeProjectId));
       if(project){
@@ -5525,10 +5529,24 @@ async function startRender(context = {}){
 
 async function pollStatus(jobId, context = {}){
   let done = false;
+  let consecutiveErrors = 0;
+  const MAX_CONSECUTIVE_ERRORS = 12; // ~20-34s of failed polls before giving up
   while(!done){
+    // Allow abort if cancel was requested and backend is unreachable
+    if(state.renderCancelRequested && consecutiveErrors > 0){
+      done = true;
+      setRenderActive(false);
+      renderTitle.textContent = 'Render cancelado';
+      renderMsg.textContent = 'Render cancelado e motor local não respondeu.';
+      const closeBtn = $('#closeModal');
+      if(closeBtn) closeBtn.textContent = 'Fechar';
+      localStorage.removeItem('glide_active_job');
+      return {status: 'cancelled'};
+    }
     try{
       const r = await fetch(`/api/status/${jobId}?ts=${Date.now()}`, {cache: 'no-store'});
       if(!r.ok) throw new Error(await r.text());
+      consecutiveErrors = 0; // reset on success
       const j = cleanDisplayData(await r.json());
       const activeProjectFromStatus = j.project_id || j.queueProjectId || j.queue_project_id || context.projectId || '';
       if(activeProjectFromStatus) activateRenderingProject(activeProjectFromStatus);
@@ -5725,7 +5743,20 @@ async function pollStatus(jobId, context = {}){
         return j;
       }
     }catch(e){
-      renderMsg.textContent = 'Aguardando motor local...';
+      consecutiveErrors++;
+      if(consecutiveErrors >= MAX_CONSECUTIVE_ERRORS){
+        done = true;
+        setRenderActive(false);
+        setRenderStage('error');
+        renderTitle.textContent = 'Motor local inacessível';
+        renderMsg.textContent = 'O motor local parou de responder. Verifique a aplicação e reinicie se necessário. O render pode ter concluído mesmo assim.';
+        const closeBtn = $('#closeModal');
+        if(closeBtn) closeBtn.textContent = 'Fechar';
+        localStorage.removeItem('glide_active_job');
+        return {status: 'error', error: 'Motor local inacessível após múltiplas tentativas.'};
+      }
+      const waitMsg = consecutiveErrors > 2 ? `Motor local não responde (${consecutiveErrors}/${MAX_CONSECUTIVE_ERRORS})...` : 'Aguardando motor local...';
+      renderMsg.textContent = waitMsg;
     }
     if(!done){
       const pollDelay = modal.classList.contains('minimized') ? 2800 : 1700;
@@ -5796,7 +5827,12 @@ async function cancelCurrentRender({silent = false} = {}){
     dockSummary.textContent = 'Render cancelado pelo usuário.';
   }
   const jobId = state.activeJobId || localStorage.getItem('glide_active_job');
-  if(!jobId) return null;
+  if(!jobId){
+    // No job to cancel — reset the button so it doesn't stay stuck as 'Parando...'
+    if(stopRenderBtn){ stopRenderBtn.disabled = false; stopRenderBtn.textContent = 'Parar render'; }
+    setRenderActive(false);
+    return null;
+  }
   try{
     const response = await fetch(`/api/cancel-render/${jobId}`, {method: 'POST', cache: 'no-store'});
     if(!response.ok) throw new Error(await response.text());
@@ -7091,7 +7127,8 @@ async function renderQueue(config = {}){
   if(state.queueRendering || state.renderActive) return;
   if(renderQueueBtn){
     renderQueueBtn.disabled = true;
-    renderQueueBtn.textContent = 'Preparando fila...';
+    const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
+    queueBtnLabel.textContent = 'Preparando fila...';
   }
   dockSummary.textContent = 'Preparando plano da fila antes de iniciar o render...';
   try{
@@ -7215,7 +7252,7 @@ async function renderQueue(config = {}){
           pending++;
         }
       }
-      state.queuePaused = true;
+      state.queuePaused = pending > 0;
       renderTitle.textContent = 'Fila pausada';
       renderMsg.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
       dockSummary.textContent = `Fila pausada. ${pending} projeto(s) pendente(s).`;
@@ -7228,7 +7265,7 @@ async function renderQueue(config = {}){
           pending++;
         }
       }
-      state.queuePaused = true;
+      state.queuePaused = pending > 0;
       renderTitle.textContent = 'Render cancelado';
       renderMsg.textContent = `${done} concluído(s), ${cancelled} cancelado(s), ${failed} erro(s). ${pending} projeto(s) pendente(s) para retomar.`;
       dockSummary.textContent = `Render cancelado. ${pending} projeto(s) pendente(s).`;
@@ -8729,6 +8766,7 @@ $('#closeModal').addEventListener('click', () => {
   modal.classList.remove('minimized');
   modal.classList.remove('show');
   modal.setAttribute('aria-hidden', 'true');
+  document.title = 'Glide Studio';
 });
 
 window.addEventListener('keydown', (e) => {
@@ -8752,6 +8790,7 @@ window.addEventListener('keydown', (e) => {
       renderModal.classList.remove('minimized');
       renderModal.classList.remove('show');
       renderModal.setAttribute('aria-hidden', 'true');
+      document.title = 'Glide Studio';
     }
   }
 });
