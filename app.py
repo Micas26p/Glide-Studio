@@ -15133,21 +15133,59 @@ def queue_project_media(project_id: str):
             result[group].append(entry_data)
 
     if pending_duration_probes:
-        def _probe_entry(item_tuple: tuple[Path, dict[str, Any], str]) -> None:
-            p_path, e_data, r_key = item_tuple
-            try:
-                d = safe_probe_duration(p_path)
-                if d > 0:
-                    e_data["duration"] = round(d, 4)
-                    if r_key in stable_index:
-                        stable_index[r_key]["duration"] = round(d, 4)
-            except Exception:
-                pass
+        critical_probes = [item for item in pending_duration_probes if item[1].get("kind") in {"audio", "background_music"}]
+        visual_probes = [item for item in pending_duration_probes if item[1].get("kind") not in {"audio", "background_music"}]
 
-        max_probe_workers = min(8, max(2, int(os.cpu_count() or 4)))
-        with ThreadPoolExecutor(max_workers=max_probe_workers) as probe_ex:
-            list(probe_ex.map(_probe_entry, pending_duration_probes))
-        stable_changed = True
+        if critical_probes:
+            def _probe_critical_entry(item_tuple: tuple[Path, dict[str, Any], str]) -> None:
+                p_path, e_data, r_key = item_tuple
+                try:
+                    d = safe_probe_duration(p_path)
+                    if d > 0:
+                        e_data["duration"] = round(d, 4)
+                        if r_key in stable_index:
+                            stable_index[r_key]["duration"] = round(d, 4)
+                except Exception:
+                    pass
+
+            with ThreadPoolExecutor(max_workers=min(4, len(critical_probes))) as probe_ex:
+                list(probe_ex.map(_probe_critical_entry, critical_probes))
+            stable_changed = True
+
+        if visual_probes:
+            if len(visual_probes) <= 8:
+                def _probe_visual_entry(item_tuple: tuple[Path, dict[str, Any], str]) -> None:
+                    p_path, e_data, r_key = item_tuple
+                    try:
+                        d = safe_probe_duration(p_path)
+                        if d > 0:
+                            e_data["duration"] = round(d, 4)
+                            if r_key in stable_index:
+                                stable_index[r_key]["duration"] = round(d, 4)
+                    except Exception:
+                        pass
+
+                with ThreadPoolExecutor(max_workers=min(4, len(visual_probes))) as probe_ex:
+                    list(probe_ex.map(_probe_visual_entry, visual_probes))
+                stable_changed = True
+            else:
+                def _bg_probe_visuals(p_id: str, probes: list[tuple[Path, dict[str, Any], str]]) -> None:
+                    changed = False
+                    cur_index = _load_project_media_index(p_id)
+                    for p_path, _, r_key in probes:
+                        try:
+                            if float((cur_index.get(r_key) or {}).get("duration") or 0.0) > 0:
+                                continue
+                            d = safe_probe_duration(p_path)
+                            if d > 0 and r_key in cur_index:
+                                cur_index[r_key]["duration"] = round(d, 4)
+                                changed = True
+                        except Exception:
+                            pass
+                    if changed:
+                        _save_project_media_index(p_id, cur_index)
+
+                threading.Thread(target=_bg_probe_visuals, args=(project_id, visual_probes), daemon=True).start()
 
     if stable_changed:
         _save_project_media_index(project_id, stable_index)

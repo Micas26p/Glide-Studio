@@ -774,11 +774,42 @@ function createProjectModel(name = ''){
     updatedAt: Date.now(),
   };
 }
+function persistedMediaObject(projectId, meta = {}){
+  const serverRel = String(meta.rel || meta.name || '');
+  const contentUrl = `/api/queue/projects/${encodeURIComponent(projectId)}/media-content?rel=${encodeURIComponent(serverRel)}`;
+  return {
+    name: meta.name || serverRel.split('/').pop() || 'media',
+    size: Number(meta.size || 0),
+    type: meta.type || 'application/octet-stream',
+    lastModified: Number(meta.lastModified || 0),
+    webkitRelativePath: serverRel,
+    _serverRel: serverRel,
+    _contentUrl: contentUrl,
+    _forcedKind: meta.kind || '',
+    _persisted: true,
+    _persistedProjectId: meta.persistedProjectId || '',
+    _persistedStoredFile: meta.persistedStoredFile || '',
+    _persistedJobId: meta.persistedJobId || '',
+    _persistedIndex: Number.isFinite(Number(meta.persistedIndex)) ? Number(meta.persistedIndex) : -1,
+    _duration: Number(meta.duration || 0),
+    text: async () => {
+      const response = await fetch(contentUrl, {cache: 'no-store'});
+      if(!response.ok) throw new Error(await response.text());
+      return response.text();
+    },
+    arrayBuffer: async () => {
+      const response = await fetch(contentUrl, {cache: 'no-store'});
+      if(!response.ok) throw new Error(await response.text());
+      return response.arrayBuffer();
+    },
+  };
+}
+
 function storedProjectToModel(raw = {}, index = 0){
   const project = createProjectModel(raw.name || `Projeto ${index + 1}`);
   project.id = raw.id || project.id;
   project.name = raw.name || project.name;
-  project.status = ['done', 'recovered', 'error', 'paused', 'cancelled'].includes(raw.status) ? raw.status : 'draft';
+  project.status = ['ready', 'done', 'recovered', 'error', 'paused', 'cancelled'].includes(raw.status) ? raw.status : 'draft';
   project.files = emptyProjectFiles();
   project.maps = emptyProjectMaps();
   project.options = raw.options && typeof raw.options === 'object' ? raw.options : {};
@@ -812,38 +843,44 @@ function storedProjectToModel(raw = {}, index = 0){
   project.createdAt = raw.createdAt ? Date.parse(raw.createdAt) || Date.now() : Date.now();
   project.updatedAt = raw.updatedAt ? Date.parse(raw.updatedAt) || Date.now() : Date.now();
   project.rememberedMedia = raw.media || {};
-  return project;
-}
 
-function persistedMediaObject(projectId, meta = {}){
-  const serverRel = String(meta.rel || meta.name || '');
-  const contentUrl = `/api/queue/projects/${encodeURIComponent(projectId)}/media-content?rel=${encodeURIComponent(serverRel)}`;
-  return {
-    name: meta.name || serverRel.split('/').pop() || 'media',
-    size: Number(meta.size || 0),
-    type: meta.type || 'application/octet-stream',
-    lastModified: Number(meta.lastModified || 0),
-    webkitRelativePath: serverRel,
-    _serverRel: serverRel,
-    _contentUrl: contentUrl,
-    _forcedKind: meta.kind || '',
-    _persisted: true,
-    _persistedProjectId: meta.persistedProjectId || '',
-    _persistedStoredFile: meta.persistedStoredFile || '',
-    _persistedJobId: meta.persistedJobId || '',
-    _persistedIndex: Number.isFinite(Number(meta.persistedIndex)) ? Number(meta.persistedIndex) : -1,
-    _duration: Number(meta.duration || 0),
-    text: async () => {
-      const response = await fetch(contentUrl, {cache: 'no-store'});
-      if(!response.ok) throw new Error(await response.text());
-      return response.text();
-    },
-    arrayBuffer: async () => {
-      const response = await fetch(contentUrl, {cache: 'no-store'});
-      if(!response.ok) throw new Error(await response.text());
-      return response.arrayBuffer();
-    },
+  const rawMedia = raw.media && typeof raw.media === 'object' ? raw.media : {};
+  const inferKind = (relPath, fallback) => {
+    const e = (String(relPath).split('.').pop() || '').toLowerCase();
+    if(imageExt.includes(e)) return 'image';
+    if(videoOnlyExt.includes(e) || e === 'webm') return 'video';
+    if(audioOnlyExt.includes(e)) return 'audio';
+    if(subtitleExt.includes(e)) return 'subtitle';
+    if(scriptGuideExt.includes(e)) return 'script_guide';
+    return fallback;
   };
+  const toMeta = (item, defaultKind) => {
+    if(item && typeof item === 'object') return item;
+    const s = String(item || '');
+    return {rel: s, name: s.split('/').pop() || s, kind: inferKind(s, defaultKind)};
+  };
+
+  const vList = (rawMedia.videos || []).map(v => persistedMediaObject(project.id, toMeta(v, 'video')));
+  const aList = (rawMedia.audios || []).map(a => persistedMediaObject(project.id, toMeta(a, 'audio')));
+  const bgList = (rawMedia.background_music || []).map(b => persistedMediaObject(project.id, toMeta(b, 'background_music')));
+  const tList = (rawMedia.texts || rawMedia.subtitles || []).map(t => persistedMediaObject(project.id, toMeta(t, 'subtitle')));
+  const cList = (rawMedia.captions || []).map(c => persistedMediaObject(project.id, toMeta(c, 'caption_srt')));
+  const gList = (rawMedia.script_guides || []).map(g => persistedMediaObject(project.id, toMeta(g, 'script_guide')));
+
+  if(vList.length || aList.length || tList.length || bgList.length || cList.length || gList.length){
+    project.files = {
+      videos: vList,
+      audios: aList,
+      backgroundTracks: bgList,
+      subtitles: tList,
+      captions: cList,
+      scriptGuides: gList,
+    };
+    if(raw.status === 'ready' || (vList.length > 0 && aList.length > 0 && tList.length > 0 && (!raw.status || raw.status === 'draft'))){
+      project.status = 'ready';
+    }
+  }
+  return project;
 }
 
 async function rehydrateProjectMedia(project){
@@ -859,7 +896,9 @@ async function rehydrateProjectMedia(project){
     const subtitles = (media.texts || media.subtitles || []).map(meta => persistedMediaObject(project.id, meta));
     const captions = (media.captions || []).map(meta => persistedMediaObject(project.id, meta));
     const scriptGuides = (media.script_guides || []).map(meta => persistedMediaObject(project.id, meta));
-    project.files = {videos, audios, backgroundTracks, subtitles, captions, scriptGuides};
+    if(videos.length || audios.length || subtitles.length){
+      project.files = {videos, audios, backgroundTracks, subtitles, captions, scriptGuides};
+    }
     project.maps = emptyProjectMaps();
     [...videos, ...audios, ...backgroundTracks].forEach(file => {
       const imageDuration = isImage(file) && file._duration <= 0 ? 4 : 0;
@@ -886,6 +925,11 @@ async function rehydrateProjectMedia(project){
       });
     });
     project.rememberedMediaMissing = Array.isArray(payload.missing) ? payload.missing : [];
+    renderProjectQueue();
+    if(project.id === state.activeProjectId){
+      renderLists({updatePreview: false});
+      updateStats();
+    }
   }catch(_){}
   return project;
 }
@@ -1924,11 +1968,12 @@ async function loadStoredQueueProjects(){
     const stored = Array.isArray(payload.projects) ? payload.projects : [];
     if(!stored.length) return false;
     state.projects = stored.map(storedProjectToModel);
-    await Promise.all(state.projects.map(project => rehydrateProjectMedia(project)));
     const savedActive = localStorage.getItem('glide_active_project_id');
     state.activeProjectId = state.projects.some(project => project.id === savedActive)
       ? savedActive
       : state.projects[0]?.id || null;
+    renderProjectQueue();
+    Promise.all(state.projects.map(project => rehydrateProjectMedia(project))).catch(() => {});
     return true;
   }catch(e){
     return false;
