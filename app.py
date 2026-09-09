@@ -1364,7 +1364,31 @@ def _load_queue_projects() -> list[dict[str, Any]]:
             data = json.loads(candidate.read_text(encoding="utf-8"))
             projects = data.get("projects", data if isinstance(data, list) else [])
             if isinstance(projects, list):
-                return [item for item in projects if isinstance(item, dict) and item.get("id")]
+                res = [item for item in projects if isinstance(item, dict) and item.get("id")]
+                for p in res:
+                    pid = str(p.get("id") or "").strip()
+                    m = p.get("media") if isinstance(p.get("media"), dict) else {}
+                    if pid and not (m.get("videos") or []):
+                        idx = _load_project_media_index(pid)
+                        if idx:
+                            vids = [r for r, meta in idx.items() if str(meta.get("kind") or "video").lower() in ("video", "image")]
+                            auds = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "audio"]
+                            txts = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("subtitle", "text_srt", "texts")]
+                            caps = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "caption_srt"]
+                            scrs = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("script_guide", "script")]
+                            if vids or auds:
+                                p["media"] = {
+                                    "videos": vids,
+                                    "audios": auds,
+                                    "background_music": list(m.get("background_music") or []),
+                                    "texts": txts or list(m.get("texts") or []),
+                                    "captions": caps or list(m.get("captions") or []),
+                                    "script_guides": scrs or list(m.get("script_guides") or []),
+                                }
+                                if vids and auds and p.get("status") == "error":
+                                    p["status"] = "ready"
+                                    p["error"] = None
+                return res
         except Exception:
             continue
     return []
@@ -14993,6 +15017,19 @@ def queue_project_media(project_id: str):
     if "subtitles" in groups and not groups.get("texts"):
         st = groups["subtitles"]
         groups["texts"] = [st] if isinstance(st, str) and st else (st if isinstance(st, list) else [])
+    if not (groups.get("videos") or []):
+        for rel_key, meta in stable_index.items():
+            k = str(meta.get("kind") or "video").lower()
+            if k in ("video", "image"):
+                groups.setdefault("videos", []).append(rel_key)
+            elif k == "audio":
+                groups.setdefault("audios", []).append(rel_key)
+            elif k in ("subtitle", "text_srt", "texts"):
+                groups.setdefault("texts", []).append(rel_key)
+            elif k == "caption_srt":
+                groups.setdefault("captions", []).append(rel_key)
+            elif k in ("script_guide", "script"):
+                groups.setdefault("script_guides", []).append(rel_key)
     pending_duration_probes: list[tuple[Path, dict[str, Any], str]] = []
     for group, kind in kind_map.items():
         for raw_rel in groups.get(group) or []:
