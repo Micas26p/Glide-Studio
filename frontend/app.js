@@ -4912,9 +4912,16 @@ function getShowcaseTone(){
 
 function setRenderStage(stage){
   const normalized = normalizeRenderStage(stage);
+  const STAGE_ORDER = ['preparing','uploading','audio','rendering','cta','muxing','done'];
+  const currentIdx = STAGE_ORDER.indexOf(normalized);
   renderSteps.querySelectorAll('span').forEach(item => {
-    item.classList.toggle('active', item.dataset.stage === normalized);
-    item.classList.toggle('done', item.dataset.stage !== normalized && progressBar.style.width === '100%');
+    const itemStage = item.dataset.stage || '';
+    const itemIdx = STAGE_ORDER.indexOf(itemStage);
+    const isActive = itemStage === normalized;
+    // Mark as done if this stage comes BEFORE the current stage in the pipeline
+    const isDone = currentIdx > 0 && itemIdx >= 0 && itemIdx < currentIdx;
+    item.classList.toggle('active', isActive);
+    item.classList.toggle('done', isDone && !isActive);
   });
   updateRenderShowcase(normalized);
 }
