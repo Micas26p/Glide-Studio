@@ -122,7 +122,6 @@ const openOutputBtn = $('#openOutputBtn');
 const openExportsBtn = $('#openExportsBtn');
 const themeSelect = $('#themeSelect');
 const uiModeSelect = $('#uiModeSelect');
-const renderPrioritySelect = $('#renderPrioritySelect');
 const renderBudgetToggle = $('#renderBudgetToggle');
 const settingsBtn = $('#settingsBtn');
 const settingsModal = $('#settingsModal');
@@ -945,6 +944,8 @@ function captureControlSnapshot(includeSubtitle = true){
   const referenceEnabled = referenceStyleEnabledToggle ? referenceStyleEnabledToggle.checked : false;
   return {
     mode: state.mode || 'fast',
+    renderPriority: 'max',
+    renderExecutionProfile: 'studio_render',
     selectedCta: state.selectedCta || '',
     musicGenre: state.musicGenre || 'cinematic',
     outputName: outputNameInput?.value || '',
@@ -984,15 +985,14 @@ function captureControlSnapshot(includeSubtitle = true){
     adaptiveDucking: true,
     dynamicPauses: false,
     dynamicPauseIntensity: 'disabled',
-    strongMomentEnhance: false,
+    strongMomentEnhance: strongMomentToggle ? strongMomentToggle.checked : true,
     renderRecovery: renderRecoveryToggle ? renderRecoveryToggle.checked : true,
     directorDecisionMode: 'balanced',
     healthyRenderThreshold: Number(healthyThresholdInput?.value || 70),
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
     renderBudgetTurboMultiplier: 1.35,
-    renderBudgetEfficientMultiplier: 2.7,
     platformMasterProfile: platformMasterProfileSelect?.value || 'youtube_long',
-    scoreVisualWindows: false,
+    scoreVisualWindows: scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : true,
     adaptiveQualityBoost: adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : true,
     queueAutoTest: queueAutoTestToggle ? queueAutoTestToggle.checked : true,
     autoDirector: smartDirectorEnabled,
@@ -1000,10 +1000,11 @@ function captureControlSnapshot(includeSubtitle = true){
     channelLearning: channelLearningToggle ? channelLearningToggle.checked : true,
     energyEditing: energyEditingToggle ? energyEditingToggle.checked : true,
     antiRepeat: antiRepeatToggle ? antiRepeatToggle.checked : true,
-    continuityMatch: false,
+    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : true,
     continuityOutliersOnly: true,
     subtitleEditorialGrammar: true,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
+    motionGraphicsPremium: true,
     introMode: introModeSelect?.value || state.introMode || 'standard',
     introSubtitleStyle: includeSubtitle ? currentIntroSubtitleStyle() : null,
     textStyle: includeSubtitle ? currentSubtitleStyle() : null,
@@ -1060,6 +1061,9 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(strongMomentToggle) strongMomentToggle.checked = options.strongMomentEnhance !== false;
   if(renderRecoveryToggle) renderRecoveryToggle.checked = options.renderRecovery !== false;
   if(healthyThresholdInput) healthyThresholdInput.value = String(Number(options.healthyRenderThreshold || 70));
+  if(options.renderPriority || options.renderExecutionProfile){
+    state.renderPriority = normalizedRenderPriority(options.renderPriority || options.renderExecutionProfile);
+  }
   state.renderBudgetEnabled = options.renderBudgetEnabled !== false;
   if(renderBudgetToggle) renderBudgetToggle.checked = state.renderBudgetEnabled;
   if(platformMasterProfileSelect) platformMasterProfileSelect.value = options.platformMasterProfile || 'youtube_long';
@@ -1171,7 +1175,7 @@ function snapshotProjectForRender(project){
   const files = project?.files || emptyProjectFiles();
   const options = cloneOptions(project?.options || {});
   options.renderPriority = normalizedRenderPriority(state.renderPriority);
-  options.turboPolicy = options.renderPriority === 'max' ? 'production_max' : 'disabled';
+  options.turboPolicy = 'studio_render';
   options.selectedCta = options.selectedCta || options.ctaLanguage || state.selectedCta || '';
   options.ctaLanguage = options.ctaLanguage || options.selectedCta || state.selectedCta || '';
   options.musicGenre = options.musicGenre || options.backgroundMusicGenre || state.musicGenre || 'cinematic';
@@ -1292,7 +1296,6 @@ function updateReferenceStyleUi(){
   const analyzed = Boolean(ref?.styleDna);
   const enabled = Boolean(project?.options?.referenceStyleEnabled && ref);
   const requestedMode = referenceStyleModeSelect?.value === 'reference' ? 'reference' : 'inspiration';
-  const eagleActive = Boolean(smartVisualDirectorToggle?.checked && String(state.renderPriority || '').toLowerCase() !== 'max');
   if(referenceStyleEnabledToggle){
     referenceStyleEnabledToggle.disabled = !ref;
     referenceStyleEnabledToggle.checked = Boolean(project?.options?.referenceStyleEnabled && ref);
@@ -1302,15 +1305,12 @@ function updateReferenceStyleUi(){
   if(referenceStyleRemoveBtn) referenceStyleRemoveBtn.disabled = !ref;
   if(referenceStyleStatus){
     if(ref){
-      const renderMode = String(state.renderPriority || '').toLowerCase();
-      const turbo = renderMode === 'max';
       const modeLabel = requestedMode === 'reference' ? 'Referência' : 'Inspiração';
       const source = enabled && analyzed ? `Estilo ativo: ${modeLabel}` : 'Estilo ativo: Pacote Glide';
       const extra = analyzed
         ? `DNA reutilizado (${Number(ref.styleDna?.scene?.cuts_per_minute || 0).toFixed(1)} cortes/min, ${ref.styleDna?.event_style?.intensity || 'ritmo balanceado'}).`
         : 'Análise pendente; o pacote Glide fica como fallback.';
-      const turboNote = turbo && enabled ? ' Suspenso para análise pesada no Turbo; DNA cacheado pode orientar apenas decisões leves.' : '';
-      referenceStyleStatus.textContent = `${source}. ${ref.name || 'Vídeo referência'} - ${extra}${turboNote}`;
+      referenceStyleStatus.textContent = `${source}. ${ref.name || 'Vídeo referência'} - ${extra}`;
     }else{
       referenceStyleStatus.textContent = 'Sem vídeo referência. O pacote visual do Glide será usado.';
     }
@@ -1531,7 +1531,7 @@ function editorialIntelligenceSection(plan = {}){
     <div class="queue-report-grid">
       <span>Fase <b>${escapeHtml(plan.phase || 'final')}</b></span>
       <span>Modo <b>${escapeHtml(renderPriorityLabel(plan.renderPriority || 'balanced'))}</b></span>
-      <span>Águia <b>${escapeHtml(director.state || (director.effective ? 'ativo' : 'inativo'))}</b></span>
+      <span>Diretor <b>${escapeHtml(director.state || (director.effective ? 'ativo' : 'inativo'))}</b></span>
       <span>Decisão <b>${escapeHtml(director.decisionMode || 'balanced')}</b></span>
       <span>Blocos <b>${blocks.length}</b></span>
       <span>Trocas <b>${Number(director.changedPositions || 0)}</b></span>
@@ -2426,7 +2426,7 @@ function renderErrorSummary(message, context = {}){
   if(lower.includes('audio') || lower.includes('áudio') || lower.includes('narra')){
     actions.push({label: 'Reimportar narração', action: 'reimport_audio', reason: 'A narração pode não ter sido lida corretamente.', detail: 'A narração pode não ter sido lida corretamente.'});
   }
-  actions.push({label: 'Tentar novamente em Turbo', action: 'retry_turbo', reason: 'Usa caminho de produção mais simples e rápido.', detail: 'Usa caminho de produção mais simples e rápido.'});
+  actions.push({label: 'Tentar novamente', action: 'retry_render', reason: 'Repete o render com as configurações atuais.', detail: 'Repete o render com as configurações atuais.'});
   actions.push({label: 'Render seguro', action: 'safe_render', reason: 'Mantém o essencial e desativa automações arriscadas neste render.', detail: 'Mantém o essencial e desativa automações arriscadas neste render.'});
   return {
     status: 'error',
@@ -2797,7 +2797,6 @@ function setRenderActive(active){
     stopRenderBtn.textContent = 'Parar render';
   }
   if(stopQueueBtn) stopQueueBtn.classList.toggle('hidden', !(state.renderActive || state.queueRendering));
-  if(renderPrioritySelect) renderPrioritySelect.disabled = state.renderActive || state.queueRendering;
   state.lastStatusPaint = null;
 }
 
@@ -2907,10 +2906,9 @@ function runEditorIntro(){
 }
 
 function normalizedRenderPriority(value){
-  const normalized = String(value || 'balanced').toLowerCase();
-  if(['max', 'turbo', 'turbo_production', 'production_max', 'speed'].includes(normalized)) return 'max';
-  if(['quality', 'quality_max', 'max_quality', 'premium', 'maximum_quality'].includes(normalized)) return 'quality';
-  return 'balanced';
+  // O Glide Studio usa um único motor de render. O argumento permanece por
+  // compatibilidade com projetos antigos, mas não cria perfis legados.
+  return 'max';
 }
 
 function normalizedVisualFilterLevel(value){
@@ -2923,16 +2921,13 @@ function visualFilterLevelLabel(value){
 }
 
 function applyVisualFilterUi(){
-  const directorRequested = smartVisualDirectorToggle ? smartVisualDirectorToggle.checked : true;
-  const adaptiveAvailable = directorRequested && state.renderPriority !== 'max';
+  const adaptiveAvailable = false;
   if(adaptiveVisualFilterToggle){
     adaptiveVisualFilterToggle.disabled = !adaptiveAvailable;
     adaptiveVisualFilterToggle.closest('label')?.classList.toggle('is-disabled', !adaptiveAvailable);
     adaptiveVisualFilterToggle.closest('label')?.setAttribute(
       'title',
-      adaptiveAvailable
-        ? 'Rigoroso no primeiro terço, Normal no segundo e Leve no final.'
-        : 'Disponível apenas com o Modo Águia ativo no modo Eficiente.'
+      'Filtro adaptativo indisponível na configuração atual do motor.'
     );
   }
   const adaptiveEffective = adaptiveAvailable && Boolean(adaptiveVisualFilterToggle?.checked);
@@ -2948,14 +2943,12 @@ function applyVisualFilterUi(){
 }
 
 function renderPriorityLabel(value = state.renderPriority){
-  return '1080p Ultra Performance';
+  return 'Render Studio';
 }
 
 function applyRenderPriorityUi(){
   state.renderPriority = 'max';
-  if(renderPrioritySelect) renderPrioritySelect.value = 'max';
   document.body.classList.add('render-priority-unified');
-  document.body.classList.remove('render-priority-turbo', 'render-priority-quality', 'render-priority-balanced');
   applyVisualFilterUi();
 }
 
@@ -2993,7 +2986,7 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     gpu: $('#gpuToggle')?.checked || false,
     qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : true,
     smartVisualDirector: smartVisualDirectorToggle ? smartVisualDirectorToggle.checked : true,
-    continuityMatch: false,
+    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : true,
     continuityOutliersOnly: true,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
@@ -3006,7 +2999,6 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     transitions: $('#transitionSelect')?.value || 'off',
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
     renderBudgetTurboMultiplier: 1.35,
-    renderBudgetEfficientMultiplier: 2.7,
   };
   try{
     const response = await fetch('/api/render-estimate', {
@@ -3019,14 +3011,12 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     const payload = await response.json();
     if(token !== state.renderEstimateToken) return;
     state.renderEstimate = payload;
-    const selected = state.renderPriority === 'max'
-      ? payload.max
-      : (state.renderPriority === 'quality' ? (payload.quality || payload.balanced) : payload.balanced);
+    const selected = payload.max || payload.balanced;
     const hardwareLabel = selected.hardware_acceleration && selected.hardware_acceleration !== 'CPU'
       ? ` - ${selected.hardware_acceleration}`
       : '';
     const calibration = selected.history_samples ? ' - calibrado neste PC' : '';
-    renderTimeEstimate.classList.toggle('turbo', state.renderPriority === 'max');
+    renderTimeEstimate.classList.remove('turbo');
     const budgetEnabled = selected.budget_enabled !== false;
     if(budgetEnabled && selected.budget_feasible === false){
       renderTimeEstimate.innerHTML = `
@@ -3429,11 +3419,9 @@ function projectChecks(){
         : 'Falhas param no primeiro erro do FFmpeg.',
     },
     {
-      state: state.renderPriority === 'max' ? 'warn' : 'ok',
-      title: 'Modo render',
-      text: state.renderPriority === 'max'
-        ? 'Turbo Produção global: toda a fila preserva resolução, bitrate, Textos, Legendas, CTA e áudio; filtros caros ficam suspensos.'
-        : 'Eficiente global: toda a fila preserva os recursos completos com intermediários rápidos e composição final otimizada.',
+      state: 'ok',
+      title: 'Motor de render',
+      text: 'Render Studio: composição única com resolução, bitrate, Textos, Legendas, CTA e áudio preservados.',
     },
     {
       state: checkingVideos ? 'warn' : 'ok',
@@ -3445,17 +3433,13 @@ function projectChecks(){
     {
       state: 'ok',
       title: 'Filtro visual',
-      text: adaptiveVisualFilterToggle?.checked && state.renderPriority !== 'max' && smartVisualDirectorToggle?.checked
-        ? 'Adaptativo: Rigoroso no início, Normal no meio e Leve no final; imagens sempre rigorosas.'
-        : `${visualFilterLevelLabel(visualFilterLevelSelect?.value)} em todo o vídeo; imagens sempre rigorosas.`,
+      text: `${visualFilterLevelLabel(visualFilterLevelSelect?.value)} em todo o vídeo; imagens sempre rigorosas.`,
     },
     {
-      state: smartVisualDirectorToggle?.checked ? (state.renderPriority === 'max' ? 'warn' : 'ok') : 'neutral',
+      state: smartVisualDirectorToggle?.checked ? 'ok' : 'neutral',
       title: 'Diretor visual',
       text: smartVisualDirectorToggle?.checked
-        ? (state.renderPriority === 'max'
-          ? 'Marcado, mas suspenso no Turbo para preservar velocidade máxima.'
-          : 'Ativo: usa Textos, nomes, categorias e numeração como pistas para ordenar sem reconstruir tudo.')
+        ? 'Ativo: usa Textos, nomes, categorias e numeração como pistas para ordenar sem reconstruir tudo.'
         : 'Desligado: a timeline segue a ordem atual do projeto.',
     },
     {
@@ -3980,7 +3964,7 @@ function estimateSubtitleCleanup(cues){
 async function refreshSubtitleInfo(){
   if(!state.subtitles.length){
     state.subtitleInfo = null;
-    subtitleStatus.textContent = 'Adicione um SRT de Textos para orientar o Águia e criar chamadas animadas.';
+    subtitleStatus.textContent = 'Adicione um SRT de Textos para orientar a montagem e criar chamadas animadas.';
     previewCaption.textContent = 'Seu texto animado aparece assim';
     updateIntroPreview();
     return;
@@ -4067,7 +4051,7 @@ async function refreshScriptGuideInfo(){
     }
     if(scriptGuideDetails){
       const warnings = (state.scriptGuideInfo.warnings || []).length ? ` · ${state.scriptGuideInfo.warnings[0]}` : '';
-      scriptGuideDetails.innerHTML = `<span>Guia editorial ativo para Águia, pesquisa visual e CTA.${escapeHtml(warnings)}</span>`;
+      scriptGuideDetails.innerHTML = `<span>Guia editorial ativo para a montagem, pesquisa visual e CTA.${escapeHtml(warnings)}</span>`;
     }
   }catch(error){
     state.scriptGuideInfo = {name: file.name, rel: rel(file), format: ext(file), blocks: 0, confidence: 0, warnings: [error.message || String(error)]};
@@ -4738,20 +4722,28 @@ function formatEtaSummary(eta, status = 'running'){
   if(status !== 'running') return `Tempo de render: ${elapsed}`;
   const limitText = Number(eta.budget_seconds || 0) > 0 ? ` · limite ${formatTime(eta.budget_seconds || 0)}` : '';
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
+  const reason = String(eta.reason || '').toLowerCase();
+  const isPreliminary = reason.includes('preliminar');
   if(stateName === 'warming_up' || stateName === 'unknown'){
     return `Decorrido no render ${elapsed} - calculando tempo restante...${limitText}`;
   }
-  if(stateName === 'variable' || Number(eta.remaining_min_seconds) || Number(eta.remaining_max_seconds)){
-    const min = Number(eta.remaining_min_seconds || 0);
-    const max = Number(eta.remaining_max_seconds || 0);
-    if(stateName === 'variable' && min && max && max > min){
-      return `Decorrido no render ${elapsed} - restante estimado variável: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+  const min = Number(eta.remaining_min_seconds || 0);
+  const max = Number(eta.remaining_max_seconds || 0);
+  const rem = Number(eta.estimated_remaining_seconds || 0);
+  if(stateName === 'variable' || min || max){
+    if(min && max && max > min){
+      const prefix = isPreliminary ? 'estimativa preliminar' : 'restante estimado variável';
+      return `Decorrido no render ${elapsed} - ${prefix}: ${formatTime(min)}-${formatTime(max)}${limitText}`;
     }
-    if(min && max && max > min * 1.12){
-      return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(min)}-${formatTime(max)}${limitText}`;
+    if(rem > 0){
+      const prefix = isPreliminary ? 'estimativa preliminar' : 'restante aprox.';
+      return `Decorrido no render ${elapsed} - ${prefix}: ${formatTime(rem)}${limitText}`;
     }
   }
-  return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(eta.estimated_remaining_seconds || 0)}${limitText}`;
+  if(rem > 0){
+    return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(rem)}${limitText}`;
+  }
+  return `Decorrido no render ${elapsed}${limitText}`;
 }
 
 function renderDoneIsValidated(job){
@@ -5134,8 +5126,8 @@ async function runBackendPreflight(manifest, options){
     const turbo = payload.turbo_summary;
     renderLog.textContent = [
       renderLog.textContent,
-      `Turbo Produção: ${turbo.resolution} | ${turbo.bitrate_kbps} kbps | ${String(turbo.codec_requested || '').toUpperCase()} -> ${String(turbo.codec_effective || '').toUpperCase()} | ${turbo.encoder_effective}.`,
-      `Suspensos somente neste render: ${(turbo.suspended_features || []).join(', ')}.`,
+      `Render Studio: ${turbo.resolution} | ${turbo.bitrate_kbps} kbps | ${String(turbo.codec_requested || '').toUpperCase()} -> ${String(turbo.codec_effective || '').toUpperCase()} | ${turbo.encoder_effective}.`,
+      `Otimizações aplicadas neste render: ${(turbo.suspended_features || []).join(', ')}.`,
     ].filter(Boolean).join('\n');
   }
   return payload;
@@ -5251,34 +5243,31 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     backgroundMusicDucking: true,
     projectTone: optionValue('projectTone', projectToneSelect?.value || 'auto'),
     adaptiveDucking: true,
-    dynamicPauses: false,
+    dynamicPauses: optionValue('dynamicPauses', dynamicPausesToggle ? dynamicPausesToggle.checked : false) !== false,
     dynamicPauseIntensity: 'disabled',
-    strongMomentEnhance: false,
+    strongMomentEnhance: optionValue('strongMomentEnhance', strongMomentToggle ? strongMomentToggle.checked : true) !== false,
     renderRecovery: optionValue('renderRecovery', renderRecoveryToggle ? renderRecoveryToggle.checked : true) !== false,
     directorDecisionMode: 'balanced',
     healthyRenderThreshold: Number(optionValue('healthyRenderThreshold', healthyThresholdInput?.value || 70)),
     renderBudgetEnabled: optionValue('renderBudgetEnabled', state.renderBudgetEnabled) !== false,
     renderBudgetTurboMultiplier: Number(optionValue('renderBudgetTurboMultiplier', 1.35)) || 1.35,
-    renderBudgetEfficientMultiplier: Number(optionValue('renderBudgetEfficientMultiplier', 2.7)) || 2.7,
     platformMasterProfile: optionValue('platformMasterProfile', platformMasterProfileSelect?.value || 'youtube_long'),
-    scoreVisualWindows: snapshotRenderPriority === 'quality' && optionValue('scoreVisualWindows', scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : true) !== false,
-    adaptiveQualityBoost: snapshotRenderPriority === 'quality' && optionValue('adaptiveQualityBoost', adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : true) !== false,
+    scoreVisualWindows: optionValue('scoreVisualWindows', scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : true) !== false,
+    adaptiveQualityBoost: optionValue('adaptiveQualityBoost', adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : true) !== false,
     queueAutoTest: optionValue('queueAutoTest', queueAutoTestToggle ? queueAutoTestToggle.checked : true) !== false,
     autoDirector: smartDirectorEnabled,
     semanticVisualIndex: optionValue('semanticVisualIndex', semanticVisualIndexToggle ? semanticVisualIndexToggle.checked : true) !== false,
     channelLearning: optionValue('channelLearning', channelLearningToggle ? channelLearningToggle.checked : true) !== false,
     energyEditing: optionValue('energyEditing', energyEditingToggle ? energyEditingToggle.checked : true) !== false,
     antiRepeat: optionValue('antiRepeat', antiRepeatToggle ? antiRepeatToggle.checked : true) !== false,
-    continuityMatch: false,
+    continuityMatch: optionValue('continuityMatch', continuityMatchToggle ? continuityMatchToggle.checked : true) !== false,
     continuityOutliersOnly: true,
     subtitleEditorialGrammar: true,
     audioMastering: optionValue('audioMastering', audioMasteringToggle ? audioMasteringToggle.checked : true) !== false,
     renderPriority: snapshotRenderPriority,
-    renderExecutionProfile: snapshotRenderPriority === 'max'
-      ? 'turbo_production'
-      : (snapshotRenderPriority === 'quality' ? 'quality_max' : 'efficient_intelligent'),
-    motionGraphicsPremium: snapshotRenderPriority === 'quality',
-    turboPolicy: snapshotRenderPriority === 'max' ? 'production_max' : 'disabled',
+    renderExecutionProfile: 'studio_render',
+    motionGraphicsPremium: optionValue('motionGraphicsPremium', true) !== false,
+    turboPolicy: 'studio_render',
     estimatedDurationSeconds: (() => {
       const durationMap = projectSnapshot?.durationMap instanceof Map ? projectSnapshot.durationMap : state.durations;
       const narration = sourceAudios.reduce((sum, file) => sum + (durationMap.get(rel(file)) || 0), 0);
@@ -5418,9 +5407,7 @@ async function startRender(context = {}){
     });
     if(!budgetResponse.ok) throw new Error(await budgetResponse.text());
     const budgetPayload = cleanDisplayData(await budgetResponse.json());
-    const budgetEstimate = options.renderPriority === 'max'
-      ? budgetPayload.max
-      : (options.renderPriority === 'quality' ? (budgetPayload.quality || budgetPayload.balanced) : budgetPayload.balanced);
+    const budgetEstimate = budgetPayload.max || budgetPayload.balanced;
     if(budgetEstimate?.budget_feasible === false){
       throw new Error(
         `${renderLabel} bloqueado antes do render: mínimo previsto ${formatTime(budgetEstimate.minimum_required_seconds || 0)}, `
@@ -5550,8 +5537,18 @@ async function pollStatus(jobId, context = {}){
       progressBar.style.width = pct + '%';
       eyePercent.textContent = Math.round(pct) + '%';
       renderMsg.textContent = cleanDisplayText(j.message || '');
-      if(renderEta && j.eta_summary){
-        renderEta.textContent = formatEtaSummary(j.eta_summary, j.status);
+      if(renderEta){
+        if(j.eta_summary){
+          renderEta.textContent = formatEtaSummary(j.eta_summary, j.status);
+        } else if(j.status === 'running'){
+          // Fallback: show elapsed time even when eta_summary is missing
+          const elapsedSecs = j.elapsed_seconds != null
+            ? j.elapsed_seconds
+            : (j.started_at ? Math.max(0, Date.now() / 1000 - j.started_at) : 0);
+          renderEta.textContent = elapsedSecs > 0
+            ? `Decorrido no render ${formatTime(Math.round(elapsedSecs))} - calculando tempo restante...`
+            : 'Tempo restante: calculando...';
+        }
       }
       setRenderStage(j.stage || 'rendering');
       if(j.output_dir){
@@ -5564,13 +5561,13 @@ async function pollStatus(jobId, context = {}){
       if(j.render_priority_effective) extra.push(`Render: ${renderPriorityLabel(j.render_priority_effective)}${j.gpu_enabled ? ' + GPU' : ''}.`);
       if(j.turbo_summary?.enabled){
         const turbo = j.turbo_summary;
-        extra.push(`Turbo: ${turbo.resolution}, ${turbo.bitrate_kbps} kbps, ${String(turbo.codec_effective || '').toUpperCase()}, ${turbo.encoder_effective}.`);
-        if(turbo.codec_fallback) extra.push('Turbo: HEVC solicitado convertido temporariamente para H.264 CPU ultrafast.');
-        if(turbo.unified_composition) extra.push('Turbo: CTA + Textos + Legendas em uma passagem visual; 1 reencode completo evitado.');
-        if(turbo.fallback_used) extra.push('Turbo: composição unificada usou fallback compatível neste equipamento.');
+        extra.push(`Render Studio: ${turbo.resolution}, ${turbo.bitrate_kbps} kbps, ${String(turbo.codec_effective || '').toUpperCase()}, ${turbo.encoder_effective}.`);
+        if(turbo.codec_fallback) extra.push('Render Studio: HEVC solicitado convertido temporariamente para H.264 CPU ultrafast.');
+        if(turbo.unified_composition) extra.push('Render Studio: CTA + Textos + Legendas em uma passagem visual; 1 reencode completo evitado.');
+        if(turbo.fallback_used) extra.push('Render Studio: composição unificada usou fallback compatível neste equipamento.');
       }
       if(j.render_priority_effective !== 'max' && j.timeline_summary?.unified_final_composition){
-        extra.push('Eficiente otimizado: CTA + Textos + Legendas em uma passagem final, mantendo todos os efeitos.');
+        extra.push('Render Studio otimizado: CTA + Textos + Legendas em uma passagem final, mantendo todos os efeitos.');
       }
       if(j.timeline_summary?.playback_speed) extra.push(`Velocidade: ${j.timeline_summary.playback_speed}x | clipes reutilizados: ${j.timeline_summary.reused_segments || 0}`);
       if(j.timeline_summary?.quality_boost) extra.push('Quality Boost natural aplicado aos clipes.');
@@ -7124,7 +7121,6 @@ async function renderQueue(config = {}){
       return;
     }
     state.queueRendering = true;
-    if(renderPrioritySelect) renderPrioritySelect.disabled = true;
     state.queuePaused = false;
     state.queuePauseRequested = false;
     state.queueStopRequested = false;
@@ -7201,7 +7197,6 @@ async function renderQueue(config = {}){
       await new Promise(resolve => setTimeout(resolve, 1200));
     }
     state.queueRendering = false;
-    if(renderPrioritySelect) renderPrioritySelect.disabled = false;
     document.body.classList.remove('queue-rendering');
     await refreshRenderGallery();
     if(state.queuePauseRequested && !state.queueStopRequested){
@@ -7256,7 +7251,6 @@ async function renderQueue(config = {}){
     dockSummary.textContent = `Falha inesperada na fila: ${outerError.message || outerError}`;
   }finally{
     state.queueRendering = false;
-    if(renderPrioritySelect) renderPrioritySelect.disabled = false;
     document.body.classList.remove('queue-rendering');
     renderProjectQueue();
   }
@@ -7684,24 +7678,7 @@ if(lvl2Dual && mainDual){
     lvl2Dual.checked = mainDual.checked;
   });
 }
-if(renderPrioritySelect){
-  applyRenderPriorityUi();
-  renderPrioritySelect.addEventListener('change', () => {
-    state.renderPriority = normalizedRenderPriority(renderPrioritySelect.value);
-    localStorage.setItem('glide_render_priority', state.renderPriority);
-    applyRenderPriorityUi();
-    updateStats();
-    renderProjectQueue();
-    if(dockSummary){
-      dockSummary.textContent = state.renderPriority === 'max'
-        ? 'Turbo Produção ativo globalmente: próximos renders usam cache e composição rápida.'
-        : (state.renderPriority === 'quality'
-          ? 'Qualidade Máxima ativa: recursos premium liberados, sem foco rígido em tempo.'
-          : 'Eficiente Inteligente ativo: qualidade forte com automações caras controladas.');
-    }
-    scheduleRenderEstimate();
-  });
-}
+applyRenderPriorityUi();
 if(renderBudgetToggle){
   renderBudgetToggle.checked = Boolean(state.renderBudgetEnabled);
   renderBudgetToggle.addEventListener('change', () => {
@@ -8966,5 +8943,3 @@ loadSemanticModelStatus();
 checkHealth();
 refreshRenderGallery();
 initializeProjectQueue().then(resumeActiveJob);
-
-

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import ctypes
 import hashlib
+import io
 import math
 import os
 import platform
@@ -556,7 +557,7 @@ def probe_image_dimensions(path: Path | str) -> tuple[int, int]:
             "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0",
             str(path)
         ]
-        out = subprocess.check_output(cmd, timeout=3.0, stderr=subprocess.DEVNULL).decode().strip()
+        out = _run_hidden(cmd, timeout=3.0, capture_output=True, check=True).stdout.decode().strip()
         parts = out.split("x")
         if len(parts) == 2:
             return int(parts[0]), int(parts[1])
@@ -602,7 +603,7 @@ def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
             "-of", "json",
             str(p)
         ]
-        out = subprocess.check_output(cmd, timeout=3.0, stderr=subprocess.DEVNULL).decode()
+        out = _run_hidden(cmd, timeout=3.0, capture_output=True, check=True).stdout.decode()
         data = json.loads(out)
         streams = data.get("streams", [])
         if streams:
@@ -1046,24 +1047,38 @@ def deliver_final_video(job: Job, source: Path) -> Path:
         summary["ok"] = True
         job.delivery_summary = summary
         return source
+    temporary: Path | None = None
     try:
         target = unique_output_path(folder, source.name)
-        shutil.copy2(source, target)
+        folder.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(f".{target.stem}.{job.id}.partial{target.suffix}")
+        if temporary.exists():
+            temporary.unlink()
+        # A entrega passa por um arquivo parcial e só vira visível com replace
+        # atômico. Assim, uma interrupção nunca deixa um MP4 incompleto com o
+        # nome final nem permite que a fila o marque como entregue.
+        shutil.copy2(source, temporary)
+        copied_size = temporary.stat().st_size
+        source_size = source.stat().st_size
+        if copied_size <= 0 or copied_size < source_size:
+            raise IOError(f"cópia incompleta ({copied_size}/{source_size} bytes)")
+        os.replace(temporary, target)
+        temporary = None
         summary.update({
             "ok": True,
             "path": str(target),
             "folder": str(target.parent),
+            "size_bytes": copied_size,
             "label": "Downloads" if mode == "downloads" else "Pasta definida pelo usuario",
         })
-        try:
-            if source.exists() and source.resolve() != target.resolve():
-                source.unlink()
-                summary["internal_mp4_removed"] = True
-        except Exception as exc:
-            summary["internal_cleanup_warning"] = str(exc)
         job.delivery_summary = summary
         return target
     except Exception as exc:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except Exception:
+                pass
         summary.update({
             "ok": False,
             "error": str(exc),
@@ -1173,6 +1188,7 @@ class Job:
     render_deadline_at: float = 0.0
     render_budget_state: str = "pending"
     render_budget_fallbacks: list[str] = field(default_factory=list)
+    render_budget_extensions: int = 0
     stage_progress_seconds: float = 0.0
     stage_progress_total: float = 0.0
 
@@ -1295,24 +1311,22 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
             "adaptiveVisualFilter": False,
             "healthyRenderThreshold": 70,
             "renderBudgetEnabled": True,
-            "renderPriority": "balanced",
-            "renderExecutionProfile": "efficient_intelligent",
+            "renderPriority": "max",
+            "renderExecutionProfile": "studio_render",
             "renderBudgetTurboMultiplier": 1.35,
-            "renderBudgetEfficientMultiplier": 2.7,
-            "renderBudgetQualityMultiplier": 4.0,
             "safeRenderMode": False,
             "platformMasterProfile": "youtube_long",
             "semanticVisualIndex": True,
             "channelLearning": True,
             "energyEditing": True,
             "antiRepeat": True,
-            "continuityMatch": False,
+            "continuityMatch": True,
             "continuityOutliersOnly": True,
             "backgroundMusicDucking": True,
             "adaptiveDucking": True,
             "dynamicPauses": False,
             "dynamicPauseIntensity": "disabled",
-            "strongMomentEnhance": False,
+            "strongMomentEnhance": True,
             "subtitleEditorialGrammar": True,
             "cinematicOpeningPolicy": "auto_contextual",
             "captionStyle": {
@@ -1321,7 +1335,8 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
                 "outline": "#111111", "outline_size": 2.0, "box": False,
             },
             "audioMastering": True,
-            "scoreVisualWindows": False,
+            "scoreVisualWindows": True,
+            "motionGraphicsPremium": True,
             "adaptiveQualityBoost": False,
             "queueAutoTest": True,
             "styleSource": "glide_package",
@@ -1442,28 +1457,27 @@ def _migrate_queue_projects_v115() -> None:
         "visualFilterLevel": "normal",
         "adaptiveVisualFilter": False,
         "healthyRenderThreshold": 70,
-        "renderPriority": "balanced",
-        "renderExecutionProfile": "efficient_intelligent",
+        "renderPriority": "max",
+        "renderExecutionProfile": "studio_render",
         "renderBudgetEnabled": True,
         "renderBudgetTurboMultiplier": 1.35,
-        "renderBudgetEfficientMultiplier": 2.7,
-        "renderBudgetQualityMultiplier": 4.0,
         "safeRenderMode": False,
         "platformMasterProfile": "youtube_long",
         "semanticVisualIndex": True,
         "channelLearning": True,
         "energyEditing": True,
         "antiRepeat": True,
-        "continuityMatch": False,
+        "continuityMatch": True,
         "continuityOutliersOnly": True,
         "backgroundMusicDucking": True,
         "adaptiveDucking": True,
         "dynamicPauses": False,
         "dynamicPauseIntensity": "disabled",
-        "strongMomentEnhance": False,
+        "strongMomentEnhance": True,
         "subtitleEditorialGrammar": True,
         "audioMastering": True,
-        "scoreVisualWindows": False,
+        "scoreVisualWindows": True,
+        "motionGraphicsPremium": True,
         "adaptiveQualityBoost": False,
         "queueAutoTest": True,
         "styleSource": "glide_package",
@@ -1496,6 +1510,21 @@ def _migrate_queue_projects_v115() -> None:
         for key, value in option_defaults.items():
             if key not in options:
                 options[key] = value
+                changed = True
+        # Todos os projetos passam a usar o motor integrado atual. Valores
+        # antigos são migrados para não reaparecerem na interface nem na fila.
+        canonical_options = {
+            "renderPriority": "max",
+            "renderExecutionProfile": "studio_render",
+            "turboPolicy": "studio_render",
+        }
+        for key, value in canonical_options.items():
+            if options.get(key) != value:
+                options[key] = value
+                changed = True
+        for key in ("renderBudgetEfficientMultiplier", "renderBudgetQualityMultiplier"):
+            if key in options:
+                options.pop(key, None)
                 changed = True
         for key, value in project_defaults.items():
             if key not in project:
@@ -1536,6 +1565,32 @@ def _migrate_editorial_policy_v122() -> None:
 
 
 _migrate_editorial_policy_v122()
+
+
+def _migrate_restored_visual_features_v123() -> None:
+    """Restores visual features disabled by the temporary unified-render gate."""
+    changed = False
+    for project in QUEUE_PROJECTS:
+        options = project.setdefault("options", {})
+        if not isinstance(options, dict):
+            options = {}
+            project["options"] = options
+        if int(options.get("visualFeatureRestoreVersion") or 0) >= 1:
+            continue
+        # These are editorial features, not render modes. Their old mode
+        # selectors remain removed; only the selected feature behavior returns.
+        options["scoreVisualWindows"] = True
+        options["continuityMatch"] = True
+        options["strongMomentEnhance"] = True
+        options["motionGraphicsPremium"] = True
+        options["visualFeatureRestoreVersion"] = 1
+        project["updatedAt"] = _now_iso()
+        changed = True
+    if changed:
+        _save_queue_projects(QUEUE_PROJECTS)
+
+
+_migrate_restored_visual_features_v123()
 
 
 def _migrate_text_caption_layers_v126() -> None:
@@ -3039,10 +3094,10 @@ def recommended_error_actions(error: str | None, project: dict[str, Any] | None 
     if any(token in text for token in ("cache", "render graph", "artifact", "manifest")):
         add("clear_project_cache", "Limpar cache deste projeto", "Artefato cacheado pode estar incompleto.", not actions)
     if "turbo" not in text:
-        add("retry_turbo", "Tentar em Turbo", "Render rapido suspende automacoes caras e usa caminho mais simples.", not actions)
+        add("retry_render", "Tentar novamente", "Repete o render com as configurações atuais.", not actions)
     if not actions:
         add("safe_render", "Render seguro", "Usa caminho conservador para entregar o video com menos automacoes.", True)
-        add("retry_turbo", "Tentar em Turbo", "Pode contornar filtros ou etapas lentas.", False)
+        add("retry_render", "Tentar novamente", "Repete o render com as configurações atuais.", False)
     return actions[:5]
 
 
@@ -3072,7 +3127,7 @@ def _project_queue_plan_entry(project: dict[str, Any], render_mode: str = "all")
     decisions = [
         _decision_record(
             "render_mode",
-            "use_turbo" if render_priority(options) == "max" else "use_balanced",
+            "use_studio_render",
             "Modo global congelado antes da fila.",
             0.92,
             str(project.get("name") or project.get("id") or ""),
@@ -3080,7 +3135,7 @@ def _project_queue_plan_entry(project: dict[str, Any], render_mode: str = "all")
         _decision_record(
             "director",
             smart_visual_director_effective(options, bool((project.get("media") or {}).get("subtitles")))[1],
-            f"Diretor em modo {_normalized_director_decision_mode(options)}; Turbo suspende automaticamente.",
+            f"Diretor em modo {_normalized_director_decision_mode(options)}; o motor integrado preserva a configuração escolhida.",
             0.86,
             "smartVisualDirector",
         ),
@@ -3516,7 +3571,7 @@ def build_editorial_intelligence_plan(job: Job, phase: str = "pre_render") -> di
         "createdAt": _now_iso(),
         "phase": phase,
         "renderPriority": render_priority(job),
-        "turboSuspendsDirector": render_priority(job) == "max",
+        "turboSuspendsDirector": False,
         "features": {
             "styleLanguage": _compact_feature_summary(style_profile, 8),
             "scriptGuide": {
@@ -3528,7 +3583,7 @@ def build_editorial_intelligence_plan(job: Job, phase: str = "pre_render") -> di
             "smartVisualDirector": {
                 "requested": smart_visual_director_requested(job.options),
                 "effective": bool(director.get("enabled")),
-                "state": director.get("state") or ("suspenso_turbo" if render_priority(job) == "max" else "pendente"),
+                "state": director.get("state") or "pendente",
                 "decisionMode": _normalized_director_decision_mode(job.options),
                 "reordered": bool(director.get("reordered")),
                 "changedPositions": int(director.get("changed_positions") or 0),
@@ -4039,15 +4094,6 @@ def _positive_median(values: list[float]) -> float:
     return (clean[middle - 1] + clean[middle]) / 2.0
 
 
-def render_mode_label(priority: str | None) -> str:
-    normalized = str(priority or "").lower()
-    if normalized == "max":
-        return "Turbo Produção"
-    if normalized == "quality":
-        return "Qualidade Máxima"
-    return "Eficiente Inteligente"
-
-
 def render_budget_enabled(options: dict[str, Any] | None = None) -> bool:
     if isinstance(options, dict) and "renderBudgetEnabled" in options:
         return bool(options.get("renderBudgetEnabled"))
@@ -4057,12 +4103,7 @@ def render_budget_enabled(options: dict[str, Any] | None = None) -> bool:
 def render_budget_multiplier(priority: str | None, options: dict[str, Any] | None = None) -> float:
     if not render_budget_enabled(options):
         return 0.0
-    normalized = str(priority or "").lower()
-    if normalized == "max":
-        return max(2.0, min(8.0, float((options or {}).get("renderBudgetTurboMultiplier") or 4.0)))
-    if normalized == "quality":
-        return max(5.0, min(16.0, float((options or {}).get("renderBudgetQualityMultiplier") or 8.0)))
-    return max(3.5, min(10.0, float((options or {}).get("renderBudgetEfficientMultiplier") or 6.0)))
+    return max(2.0, min(8.0, float((options or {}).get("renderBudgetTurboMultiplier") or 4.0)))
 
 
 def render_budget_for_duration(duration_seconds: Any, priority: str | None, options: dict[str, Any] | None = None) -> float:
@@ -4101,7 +4142,13 @@ def assert_render_budget(job: Job, stage: str) -> None:
     if not render_budget_enabled(job.options):
         return
     if job.render_deadline_at and time.time() >= job.render_deadline_at:
+        if job.render_budget_extensions >= 1:
+            job.render_budget_state = "exceeded"
+            raise RenderBudgetExceeded(
+                f"Orçamento de render excedido no modo {render_mode_label(render_priority(job))} durante {stage}."
+            )
         grace_extension = max(120.0, float(job.render_budget_seconds or 300.0) * 0.5)
+        job.render_budget_extensions += 1
         job.render_budget_seconds += grace_extension
         job.render_deadline_at += grace_extension
         job.render_budget_state = "extended"
@@ -4706,6 +4753,7 @@ def build_preflight_summary(files_manifest: list[dict[str, Any]], options: dict[
     estimates = {
         "balanced": render_time_estimate(estimated_duration, options, "balanced"),
         "max": render_time_estimate(estimated_duration, options, "max"),
+        "quality": render_time_estimate(estimated_duration, options, "quality"),
     } if estimated_duration else {}
     initial_confidence = confidence_summary(
         media_total=max(1, counts["visual_media"] or counts["video"]),
@@ -4769,7 +4817,7 @@ def build_preflight_summary(files_manifest: list[dict[str, Any]], options: dict[
         "style_profile": style_profile,
         "render_priority": priority,
         "render_priority_label": render_mode_label(priority),
-        "render_priority_requested": str(options.get("renderPriority") or "balanced"),
+        "render_priority_requested": "max",
         "render_priority_effective": priority,
         "gpu_requested": bool(options.get("gpu", False)),
         "gpu_enabled": (
@@ -4812,7 +4860,7 @@ def build_preflight_summary(files_manifest: list[dict[str, Any]], options: dict[
             "healthy_threshold": _healthy_threshold(options),
             "decisions": [
                 _decision_record("cta", "use" if cta_language in CTA_LANGUAGES else "missing", "CTA obrigatorio no render.", 0.95 if cta_language in CTA_LANGUAGES else 0.35, cta_language or "cta"),
-                _decision_record("director", smart_visual_director_effective(options, counts["subtitle"] > 0)[1], "Diretor respeita modo de decisao e suspensao no Turbo.", 0.86, "smartVisualDirector"),
+                _decision_record("director", smart_visual_director_effective(options, counts["subtitle"] > 0)[1], "Diretor visual integrado à montagem, sem alternância de perfil.", 0.86, "smartVisualDirector"),
                 _decision_record("visual_filter", normalized_visual_filter_level(options), "Filtro temporal/contextual com proteção de 25% no início e 30% no restante.", 0.88, "visualFilterLevel"),
                 _decision_record(
                     "style",
@@ -4873,45 +4921,55 @@ def _windows_priority_flag(priority: str | None = None) -> int:
     return getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
 
 
+def _normalized_render_priority(value: Any) -> str:
+    """Mantém a compatibilidade de leitura sem reativar perfis removidos."""
+    return "max"
+
+
 def render_priority(job: Job | dict[str, Any] | None = None) -> str:
     return "max"
 
 
 def turbo_enabled(job: Job | dict[str, Any] | None = None) -> bool:
-    return True
+    return render_priority(job) == "max"
 
 
-def render_mode_label(priority: str = "max") -> str:
-    return "1080p Ultra Performance"
+def render_mode_label(priority: str = "balanced") -> str:
+    return "Render Studio"
 
 
 def apply_render_execution_profile(options: dict[str, Any] | None) -> dict[str, Any]:
-    """Motor unificado: 1080p Full HD com aceleracao por hardware GPU, keyframes a cada 2s e ordenacao sequencial pura."""
+    """Aplica a lógica única e estável do Glide Studio."""
     normalized = dict(options or {})
     normalized["renderPriority"] = "max"
-    normalized["renderExecutionProfile"] = "unified_ultra_performance"
-    normalized["turboPolicy"] = "production_max"
-    # Desativa reorganizacao semantica de clipes (garante 100% a ordem sequencial dos videos arrastados)
-    normalized["smartVisualDirector"] = False
-    normalized["autoDirector"] = False
-    normalized["semanticVisualIndex"] = False
-    normalized["scoreVisualWindows"] = False
-    normalized["continuityMatch"] = False
-    normalized["adaptiveVisualFilter"] = False
-    normalized["dynamicPauses"] = False
-    normalized["strongMomentEnhance"] = False
+    normalized["renderExecutionProfile"] = "studio_render"
+    normalized["turboPolicy"] = "studio_render"
+    # O perfil de execução é único; a direção editorial continua sendo um
+    # recurso independente, sem depender de um modo de render antigo.
+    normalized.setdefault("smartVisualDirector", True)
+    normalized.setdefault("autoDirector", True)
+    normalized.setdefault("semanticVisualIndex", True)
+    # O motor é único, mas os recursos editoriais continuam configuráveis.
+    # A remoção dos perfis antigos não remove corte, continuidade e acabamento.
+    normalized.setdefault("scoreVisualWindows", True)
+    normalized.setdefault("continuityMatch", True)
+    # Preserva uma configuração adaptativa antiga quando ela já existir;
+    # não reintroduz o seletor de modos extintos na interface.
+    normalized.setdefault("adaptiveVisualFilter", False)
+    normalized.setdefault("dynamicPauses", False)
+    normalized.setdefault("strongMomentEnhance", True)
+    normalized.setdefault("motionGraphicsPremium", True)
+    normalized.setdefault("queueAutoTest", True)
     normalized["premiumFeelScore"] = False
     normalized["postRenderCorrections"] = False
-    normalized["queueAutoTest"] = False
-    # Recursos essenciais de alta qualidade mantidos
     normalized.setdefault("audioMastering", True)
     normalized.setdefault("qualityBoost", True)
-    normalized.setdefault("visualFilterLevel", "light")
+    normalized.setdefault("visualFilterLevel", "normal")
     return normalized
 
 
 def smart_visual_director_requested(options: dict[str, Any]) -> bool:
-    return False
+    return bool(options.get("smartVisualDirector", options.get("autoDirector", True)))
 
 
 def smart_visual_director_effective(options: dict[str, Any], has_subtitles: bool = True) -> tuple[bool, str]:
@@ -4919,8 +4977,6 @@ def smart_visual_director_effective(options: dict[str, Any], has_subtitles: bool
         return False, "suspenso_render_seguro"
     if not smart_visual_director_requested(options):
         return False, "desativado"
-    if render_priority(options) == "max":
-        return False, "suspenso_turbo"
     if not has_subtitles:
         return False, "sem_srt_valido"
     return True, "ativo"
@@ -4950,9 +5006,7 @@ def set_system_keep_awake(enabled: bool, reason: str = "") -> None:
 
 
 def turbo_policy(options: dict[str, Any]) -> str:
-    if render_priority(options) != "max":
-        return "disabled"
-    return str(options.get("turboPolicy") or "production_max").strip().lower()
+    return "studio_render"
 
 
 def turbo_profile(options: dict[str, Any]) -> dict[str, Any]:
@@ -5002,11 +5056,8 @@ def turbo_profile(options: dict[str, Any]) -> dict[str, Any]:
         "encoder_effective": encoder_effective,
         "encoder_preset": "speed" if hardware_available else "ultrafast",
         "suspended_features": [
-            "zoom_in_out",
-            "quality_boost",
-            "visual_transitions",
-            "dynamic_pauses",
-            "strong_moment_enhance",
+            "premium_feel_score_removed",
+            "post_render_corrections_removed",
         ],
         "preserved_features": [
             "resolution",
@@ -5014,6 +5065,16 @@ def turbo_profile(options: dict[str, Any]) -> dict[str, Any]:
             "voiceover",
             "background_music",
             "adaptive_ducking",
+            "visual_clean_filter",
+            "long_scene_auto_cut",
+            "visual_window_scoring",
+            "image_motion_effects",
+            "visual_transitions",
+            "zoom_in_out",
+            "quality_boost",
+            "continuity_match",
+            "dynamic_pauses_when_enabled",
+            "strong_moment_emphasis_when_enabled",
             "subtitle_animation",
             "subtitle_sound_fx",
             "cta",
@@ -5046,26 +5107,18 @@ def effective_visual_options(job: Job) -> dict[str, Any]:
             "continuity_match": False,
             "safe_render": True,
         }
-    priority = render_priority(job)
-    if priority != "max":
-        return {
-            "zoom": str(job.options.get("zoom") or "off"),
-            "transitions": str(job.options.get("transitions") or "off"),
-            "quality_boost": bool(job.options.get("qualityBoost", True)),
-            "dynamic_pauses": bool(job.options.get("dynamicPauses", False)) if priority == "quality" else False,
-            "strong_moment_enhance": False,
-            "strong_moments": False,
-            "continuity_match": bool(job.options.get("continuityMatch", False)) if priority == "quality" else False,
-            "continuity_outliers_only": True,
-            "quality_max": priority == "quality",
-            "motion_graphics_premium": bool(job.options.get("motionGraphicsPremium", False)) if priority == "quality" else False,
-        }
+    strong_moments = bool(job.options.get("strongMomentEnhance", True))
     return {
-        "zoom": "off",
-        "transitions": "off",
-        "quality_boost": False,
-        "dynamic_pauses": False,
-        "strong_moments": False,
+        "zoom": str(job.options.get("zoom") or "off"),
+        "transitions": str(job.options.get("transitions") or "off"),
+        "quality_boost": bool(job.options.get("qualityBoost", True)),
+        "dynamic_pauses": bool(job.options.get("dynamicPauses", False)),
+        "strong_moment_enhance": strong_moments,
+        "strong_moments": strong_moments,
+        "continuity_match": bool(job.options.get("continuityMatch", True)),
+        "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", True)),
+        "motion_graphics_premium": bool(job.options.get("motionGraphicsPremium", True)),
+        "safe_render": False,
     }
 
 
@@ -5201,7 +5254,7 @@ def _terminate_process(proc: subprocess.Popen[Any] | None) -> None:
             # On Windows, kill the entire process tree (/T) force (/F) to prevent orphan FFmpeg worker threads
             # from staying resident in RAM and locking the GPU hardware encoder sessions (NVENC / AMF).
             try:
-                _run_hidden(["taskkill", "/F", "/T", "/PID", str(proc.pid)], timeout=3)
+                _run_hidden(["taskkill", "/F", "/T", "/PID", str(proc.pid)], timeout=3, capture_output=True, check=True)
             except Exception:
                 proc.kill()
         else:
@@ -5212,6 +5265,12 @@ def _terminate_process(proc: subprocess.Popen[Any] | None) -> None:
             proc.kill()
         except Exception:
             pass
+    finally:
+        try:
+            proc.wait(timeout=3.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=3.0)
 
 
 def _register_process(job: Job, proc: subprocess.Popen[Any]) -> None:
@@ -5640,7 +5699,7 @@ def run_cmd(
     job.stage_progress_seconds = 0.0
     job.stage_progress_total = max(0.0, float(total_duration or 0.0))
     if priority == "max" and cmd != original_cmd:
-        _append_log(job, "Render Turbo: limites de filtros/threads removidos deste comando FFmpeg.")
+        _append_log(job, "Render Studio: limites de filtros/threads ajustados neste comando FFmpeg.")
     _append_log(job, "CMD: " + _compact_cmd_for_log(cmd))
     proc = _popen_hidden(
         cmd,
@@ -5665,7 +5724,10 @@ def run_cmd(
         finally:
             line_queue.put(None)
 
-    threading.Thread(target=reader, daemon=True).start()
+    reader_thread = threading.Thread(target=reader, daemon=True, name=f"ffmpeg-output-{proc.pid}")
+    reader_thread.start()
+    process_started = time.perf_counter()
+    _append_log(job, f"PROCESS_START: pid={proc.pid} stage={job.stage}")
 
     last_lines: list[str] = []
     reader_done = False
@@ -5706,10 +5768,11 @@ def run_cmd(
                 _terminate_process(proc)
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
-                # If FFmpeg is actively encoding and outputting progress lines within the last 60s,
-                # do NOT kill it! Grant an automatic grace extension so the local video finishes safely.
-                if time.time() - last_output_time < 60.0:
+                # Give one bounded grace extension to a process that is still
+                # emitting progress. A repeated extension would hide a stall.
+                if time.time() - last_output_time < 60.0 and job.render_budget_extensions < 1:
                     grace = max(180.0, float(job.render_budget_seconds or 300.0) * 0.5)
+                    job.render_budget_extensions += 1
                     job.render_budget_seconds += grace
                     job.render_deadline_at += grace
                     job.render_budget_state = "extended"
@@ -5749,6 +5812,15 @@ def run_cmd(
         if ret != 0:
             raise RuntimeError("FFmpeg falhou:\n" + "\n".join(last_lines[-18:]))
     finally:
+        if proc.poll() is None:
+            _terminate_process(proc)
+        reader_thread.join(timeout=3.0)
+        if not reader_thread.is_alive():
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+        _append_log(job, f"PROCESS_END: pid={proc.pid} exit={proc.returncode} elapsed={time.perf_counter() - process_started:.2f}s")
         _unregister_process(job, proc)
 
 
@@ -6623,7 +6695,6 @@ def adaptive_visual_filter_effective(options: dict[str, Any] | None = None) -> b
     return bool(
         source.get("adaptiveVisualFilter", False)
         and smart_visual_director_requested(source)
-        and render_priority(source) != "max"
         and not bool(source.get("safeRenderMode"))
     )
 
@@ -10305,7 +10376,7 @@ def optimize_audio_cadence_and_silence(job: Job, audio_in: Path, audio_total: fl
             "-ac", "2", "-ar", "48000",
             str(out_trimmed)
         ]
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=30, cwd=str(work))
+        res = _run_hidden(cmd, capture_output=True, text=True, timeout=30, cwd=work)
         if res.returncode == 0 and out_trimmed.exists() and out_trimmed.stat().st_size > 1000:
             new_dur = safe_probe_duration(out_trimmed, cwd=work)
             if 0.40 * audio_total <= new_dur < 0.99 * audio_total:
@@ -10368,7 +10439,7 @@ def intro_music_db(options: dict[str, Any]) -> float:
 
 
 def dynamic_pauses_enabled(options: dict[str, Any]) -> bool:
-    return False
+    return bool(options.get("dynamicPauses", False)) and not bool(options.get("safeRenderMode"))
 
 
 def pause_duration_for_moment(index: int, moment: dict[str, Any], intensity: str) -> float:
@@ -12855,13 +12926,13 @@ def compose_final_visuals(
     log_summary: bool = True,
 ) -> Path:
     if log_summary:
-        label = "Composicao Turbo" if turbo_enabled(job) else "Composicao final otimizada"
+        label = "Composição Render Studio"
         set_stage(job, "cta", label, "Aplicando CTA, Textos e Legendas em uma unica passagem")
     target_duration = max(0.1, float(target_duration or 0.1))
     w, _ = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
     target_w = cta_scale_width(job, w)
     preset, x_expr, y_expr = cta_position_expr(job)
-    default_out_name = "video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4"
+    default_out_name = "video_studio_composed.mp4"
     out = work / (out_name or default_out_name)
     logical_cpus = max(2, int(os.cpu_count() or 4))
     comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
@@ -12989,7 +13060,7 @@ def compose_final_visuals(
                 "visual_passes_effective": 2,
                 "visual_passes_avoided": 1,
             })
-            _append_log(job, "Turbo Produção: CTA + Textos + Legendas compostos em uma única passagem visual.")
+            _append_log(job, "Render Studio: CTA + Textos + Legendas compostos em uma única passagem visual.")
         else:
             _append_log(job, "Modo Eficiente otimizado: CTA + Textos + Legendas compostos em uma unica passagem final, preservando todos os efeitos.")
     return out
@@ -13005,7 +13076,7 @@ def compose_visual_chunks_parallel(
     target_duration: float,
     target_chunk_seconds: float = 150.0,
 ) -> Path:
-    label = "Composicao Turbo em Chunks" if turbo_enabled(job) else "Composicao Paralela por Chunks"
+    label = "Composição Render Studio em Chunks"
     set_stage(job, "cta", label, "Renderizando blocos visuais em paralelo com fusao instantanea")
     _append_log(job, "Iniciando particionamento de timeline para renderizacao paralela por chunks.")
 
@@ -16321,7 +16392,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
 
 def encoder_choice(job: Job, label: str, args: list[str]) -> list[str]:
     if not job.encoder_logged:
-        profile = "Turbo Produção, priorizando velocidade" if turbo_enabled(job) else "equilibrado para velocidade, memória e qualidade"
+        profile = "Render Studio, priorizando estabilidade e velocidade"
         _append_log(job, f"Encoder selecionado: {label}. Perfil {profile}.")
         job.encoder_logged = True
     return args
@@ -16447,7 +16518,7 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
         if turbo.get("codec_fallback") and not turbo.get("codec_fallback_logged"):
             _append_log(
                 job,
-                "Turbo Produção: aceleração HEVC indisponível. "
+                "Render Studio: aceleração HEVC indisponível. "
                 "Usando H.264 CPU ultrafast com a mesma resolução e bitrate alvo.",
             )
             turbo["codec_fallback_logged"] = True
@@ -16477,7 +16548,7 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
         if balanced_auto_gpu and not gpu:
             _append_log(
                 job,
-                f"Modo Eficiente Térmico: {hardware_encoder.upper()} ativado automaticamente "
+                f"Render Studio térmico: {hardware_encoder.upper()} ativado automaticamente "
                 "para acelerar sem superaquecer o computador.",
             )
         if hardware_encoder.endswith("_nvenc"):
@@ -16643,12 +16714,6 @@ def continuity_adjustments(
     enabled = bool(job.options.get("continuityMatch", False)) and bool(job.options.get("continuityOutliersOnly", True))
     if not enabled or not valid_pairs:
         return {}, {"enabled": False, "reason": "opcao desligada ou sem clipes"}
-    if turbo_enabled(job):
-        return {}, {
-            "enabled": False,
-            "reason": "suspenso no Turbo para preservar velocidade maxima",
-            "mode": "suspended_turbo",
-        }
     items: list[dict[str, Any]] = []
     cache_misses = 0
     for path, duration in valid_pairs:
@@ -17261,8 +17326,8 @@ def detect_voice_emphasis_peaks(
         "-f", "s16le", "-"
     ]
     try:
-        proc = _popen_hidden(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        raw, _ = proc.communicate(timeout=25.0)
+        result = _run_hidden(cmd, capture_output=True, timeout=25.0, check=True)
+        raw = result.stdout
     except Exception:
         return []
 
@@ -18187,11 +18252,6 @@ def make_segments_smart(
             window_cache_key = visual_clean_cache_key(src, dur, cwd=work, scope="windows_v3_batch")
             with VISUAL_CLEAN_CACHE_LOCK:
                 cached_window = VISUAL_CLEAN_CACHE.get(window_cache_key)
-            if (turbo_enabled(job) or len(valid_pairs) > 40) and not isinstance(cached_window, dict):
-                visual_window_summary["budget_skipped"] += 1
-                if "visual_windows_cache_only_turbo" not in job.render_budget_fallbacks:
-                    job.render_budget_fallbacks.append("visual_windows_cache_only_turbo")
-                continue
             if not isinstance(cached_window, dict) and not budget_allows_optional(job, 1.2, reserve_ratio=0.58):
                 visual_window_summary["budget_skipped"] += 1
                 if "visual_windows_quota_exhausted" not in job.render_budget_fallbacks:
@@ -19153,7 +19213,7 @@ def _quick_probe_video_focal_x(path: Path | str) -> float:
             "-ss", "0.5", "-i", str(resolved),
             "-vframes", "1", "-s", "96x54", "-f", "image2pipe", "-vcodec", "ppm", "-"
         ]
-        res = subprocess.run(cmd, capture_output=True, timeout=5)
+        res = _run_hidden(cmd, capture_output=True, timeout=5)
         if res.returncode == 0 and res.stdout:
             with Image.open(io.BytesIO(res.stdout)) as img:
                 small = img.convert("L")
@@ -19331,7 +19391,14 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
             str(shorts_file)
         ]
 
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
+        res = _run_hidden(
+            cmd,
+            cwd=job.work,
+            priority=render_priority(job),
+            capture_output=True,
+            text=True,
+            timeout=360,
+        )
         if res.returncode == 0 and shorts_file.exists() and shorts_file.stat().st_size > 1000:
             mb_size = shorts_file.stat().st_size / (1024 * 1024)
             _append_log(
@@ -19351,7 +19418,14 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
             if vcodec != "libx264":
                 cmd[cmd.index("-c:v") + 1] = "libx264"
                 cmd[cmd.index("-preset") + 1] = "veryfast"
-                res = subprocess.run(cmd, capture_output=True, text=True, timeout=360)
+                res = _run_hidden(
+                    cmd,
+                    cwd=job.work,
+                    priority=render_priority(job),
+                    capture_output=True,
+                    text=True,
+                    timeout=360,
+                )
                 if res.returncode == 0 and shorts_file.exists():
                     mb_size = shorts_file.stat().st_size / (1024 * 1024)
                     _append_log(job, f"Dual Export Concluído (CPU fallback): {shorts_file.name} ({mb_size:.1f} MB) gerado.")
@@ -19376,7 +19450,7 @@ def write_render_report(job: Job, out_file: Path, final_duration: float):
         f"Duracao final: {final_duration:.2f}s",
         f"Perfil: {job.preflight_summary.get('export_profile', 'capcut_compact')}",
         f"Quality Boost: {'ligado' if job.preflight_summary.get('quality_boost') else 'desligado'}",
-        f"Turbo Produção: {'ligado' if job.turbo_summary.get('enabled') else 'desligado'}",
+        f"Render Studio: {'ativo' if job.turbo_summary.get('enabled') else 'inativo'}",
         f"Encoder efetivo: {job.turbo_summary.get('encoder_effective') or 'preset do projeto'}",
         f"Codec efetivo: {job.turbo_summary.get('codec_effective') or job.options.get('codec', 'hevc')}",
         (
@@ -19962,7 +20036,6 @@ def apply_auto_director(
             "enabled": False,
             "state": director_state,
             "reason": {
-                "suspenso_turbo": "suspenso no Turbo para preservar velocidade maxima",
                 "desativado": "opcao desligada pelo usuario",
                 "sem_srt_valido": "sem SRT valido para orientar a narracao",
             }.get(director_state, "diretor visual inativo"),
@@ -20120,7 +20193,6 @@ def apply_auto_director(
             "enabled": False,
             "state": director_state,
             "reason": {
-                "suspenso_turbo": "suspenso no Turbo para preservar velocidade maxima",
                 "desativado": "opcao desligada pelo usuario",
                 "sem_srt_valido": "sem SRT valido para orientar a narracao",
             }.get(director_state, "diretor visual inativo"),
@@ -20558,11 +20630,11 @@ def prepare_audio_foundation(
             audio_concat, audio_total = insert_dynamic_pauses(job, audio_concat, audio_total, pause_plan, work)
             analyze_audio_health(job, audio_concat, audio_total, work)
     else:
-        reason = "suspenso pelo Turbo Produção" if turbo_enabled(job) and bool(job.options.get("dynamicPauses", False)) else "sem SRT ou opção desligada"
+        reason = "recurso opcional desligado no motor atual" if bool(job.options.get("dynamicPauses", False)) else "sem SRT ou opção desligada"
         job.dynamic_pause_summary = {
             "enabled": False,
             "requested": bool(job.options.get("dynamicPauses", False)),
-            "suspended_by_turbo": bool(turbo_enabled(job) and job.options.get("dynamicPauses", False)),
+            "optional_feature_suspended": bool(turbo_enabled(job) and job.options.get("dynamicPauses", False)),
             "reason": reason,
         }
 
@@ -20804,6 +20876,17 @@ def render_worker(job_id: str):
                 job.render_budget_state = "disabled"
         performance_start(job, "total")
         job.percent = max(job.percent, 10)
+        # Injetar estimativa preliminar imediata para que o frontend exiba tempo restante
+        # durante toda a fase PREPARANDO, mesmo antes do preflight completo.
+        if initial_duration > 0 and initial_estimate:
+            preliminary_est = dict(initial_estimate)
+            preliminary_est["confidence"] = "preliminary"
+            preliminary_est["stage_forecast"] = {}
+            job.preflight_summary["active_render_estimate"] = preliminary_est
+            if not job.estimated_total_seconds:
+                job.estimated_total_seconds = float(initial_estimate.get("seconds") or 0.0)
+            if not job.estimate_confidence:
+                job.estimate_confidence = "preliminary"
         set_stage(job, "preparing", "Preparando render", "Render em segundo plano iniciado - mantenha o app aberto")
         graph = create_render_graph(job)
         apply_channel_preferences(job)
@@ -20831,6 +20914,8 @@ def render_worker(job_id: str):
         job.preflight_summary.update(preflight_now)
         job.render_decisions = build_render_decisions(job)
         apply_render_decisions(job)
+        job.percent = max(job.percent, 12)
+        job.message = "Analisando arquivos e configurações do projeto..."
         atomic_write_text(
             job.export_dir / "render_decisions.json",
             json.dumps(job.render_decisions, ensure_ascii=False, indent=2),
@@ -20849,17 +20934,17 @@ def render_worker(job_id: str):
         )
         if priority == "max":
             _append_log(job, (
-                "Turbo Produção aplicado: zoom, Quality Boost, transições visuais, pausas dinâmicas e "
-                "reforços de momentos fortes suspensos somente neste render."
+                "Render Studio aplicado: corte de cenas longas, efeitos de imagem, filtro anti-poluição, "
+                "score visual e acabamentos seguem as opções ativas do projeto."
             ))
             _append_log(job, (
-                f"Turbo Produção: resolução={job.turbo_summary['resolution']} | "
+                f"Render Studio: resolução={job.turbo_summary['resolution']} | "
                 f"bitrate={job.turbo_summary['bitrate_kbps']} kbps | "
                 f"codec={job.turbo_summary['codec_requested']}->{job.turbo_summary['codec_effective']} | "
                 f"encoder={job.turbo_summary['encoder_effective']} {job.turbo_summary['encoder_preset']}."
             ))
         else:
-            _append_log(job, "Modo Eficiente aplicado: efeitos visuais e codec do projeto preservados com recursos equilibrados.")
+            _append_log(job, "Render Studio aplicado: efeitos visuais e codec do projeto preservados com recursos equilibrados.")
         director_effective, director_state = smart_visual_director_effective(job.options, True)
         _append_log(
             job,
@@ -21008,7 +21093,7 @@ def render_worker(job_id: str):
             "strong_moment_enhance": visual["strong_moments"],
             "render_recovery": bool(job.options.get("renderRecovery", True)),
             "render_priority": priority,
-            "render_priority_requested": str(job.options.get("renderPriority") or "balanced"),
+            "render_priority_requested": "max",
             "render_priority_effective": priority,
             "gpu_requested": bool(job.options.get("gpu", False)),
             "gpu_enabled": (
@@ -21062,6 +21147,8 @@ def render_worker(job_id: str):
             preset_available_total,
             graph,
         )
+        job.percent = max(job.percent, 15)
+        job.message = f"Trilha de áudio preparada ({audio_total:.0f}s). Organizando sequência visual..."
         force_short = bool(job.options.get("forceShortRender", False))
         if not force_short:
             if audio_total < 15.0:
@@ -21129,6 +21216,10 @@ def render_worker(job_id: str):
                 f"ajustou o orçamento total para {round(job.render_budget_seconds)}s automaticamente."
             )
         job.preflight_summary["active_render_estimate"] = estimate
+        # Estimativa real agora disponível — substituir a preliminar e avançar progresso
+        job.estimate_confidence = str(estimate.get("confidence") or "heuristic")
+        job.percent = max(job.percent, 18)
+        job.message = f"Planejamento concluído. Timeline: {timeline_total:.0f}s | Iniciando render..."
         job.preflight_summary["render_budget"] = {
             "mode": render_mode_label(priority),
             "limit_seconds": round(job.render_budget_seconds),
@@ -21244,11 +21335,12 @@ def render_worker(job_id: str):
             "zoom": effective_visual.get("zoom"),
             "transitions": effective_visual.get("transitions"),
             "quality_boost": effective_visual.get("quality_boost"),
-            "continuity": False,
+            "continuity": bool(effective_visual.get("continuity_match")),
             "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", True)),
             "visual_clean": bool(job.options.get("visualCleanFilter", True)),
             "score_visual_windows": bool(job.options.get("scoreVisualWindows", True)),
             "adaptive_quality_boost": bool(job.options.get("adaptiveQualityBoost", True)),
+            "motion_graphics_premium": bool(effective_visual.get("motion_graphics_premium")),
             "codec": job.options.get("codec", "hevc"),
             "gpu": bool(job.options.get("gpu", False)),
             "priority": render_priority(job),
@@ -21367,6 +21459,12 @@ def render_worker(job_id: str):
         try:
             out_file = deliver_final_video(job, technical_out_file)
             validate_final_output(job, out_file, final_duration)
+            # Depois que o destino final passou pela validação, remova apenas o
+            # intermediário técnico desta execução. Em caso de falha, ele fica
+            # disponível para diagnóstico e não há risco de apagar um MP4 útil.
+            if out_file.resolve() != technical_out_file.resolve() and technical_out_file.exists():
+                technical_out_file.unlink()
+                job.delivery_summary["internal_mp4_removed"] = True
         finally:
             performance_stop(job, "delivery")
         if job.render_budget_seconds and render_budget_elapsed(job) > job.render_budget_seconds:
@@ -21818,19 +21916,35 @@ def status(job_id: str):
         )
         observed_total = elapsed / progress_fraction
         estimated_total = estimated_total * 0.58 + observed_total * 0.42 if estimated_total else observed_total
-    if job.status == "running":
+    if job.status == "running" and not active_estimate:
+        # Antes do preflight terminar, a duração enviada pelo frontend é apenas
+        # uma pista. Nunca a apresente como contagem regressiva precisa.
+        estimated_total = 0.0
+        eta_state = "warming_up"
+        eta_confidence = "low"
+        eta_reason = "preparando o plano e medindo as etapas"
+    elif job.status == "running":
         # A deadline is a guardrail, not an ETA clamp. Keep showing the honest
         # forecast when a stage is slower than expected.
         estimated_total = max(elapsed + 1.0, estimated_total)
     remaining = max(0.0, estimated_total - elapsed) if job.status == "running" else 0.0
-    eta_confidence = str(job.estimate_confidence or "heuristic")
-    eta_state = "complete" if job.status != "running" else "estimated"
-    eta_reason = ""
-    if job.status == "running":
-        if elapsed < 15.0 or job.percent < 8.0:
+    if job.status != "running":
+        eta_confidence = str(job.estimate_confidence or "heuristic")
+        eta_state = "complete"
+        eta_reason = ""
+    elif active_estimate:
+        eta_confidence = str(job.estimate_confidence or "heuristic")
+        eta_state = "estimated"
+        eta_reason = ""
+        if elapsed < 15.0 and job.percent < 8.0:
+            # warming_up só quando AMBOS: elapsed curto E progresso baixo
             eta_state = "warming_up"
             eta_confidence = "low"
             eta_reason = "coletando dados iniciais deste render"
+        elif eta_confidence == "preliminary":
+            # Estimativa preliminar: mostrar como variável mas com valor real
+            eta_state = "variable"
+            eta_reason = "estimativa preliminar enquanto o projeto é preparado"
         elif not estimated_total:
             eta_state = "unknown"
             eta_confidence = "low"
@@ -21845,6 +21959,10 @@ def status(job_id: str):
         else:
             eta_state = "adaptive"
             eta_reason = "ajustada pelo progresso observado"
+    else:
+        eta_confidence = "low"
+        eta_state = "warming_up"
+        eta_reason = "preparando o plano e medindo as etapas"
     spread = 0.16 if eta_state == "calibrated" else (0.28 if eta_state == "adaptive" else 0.42)
     eta_summary = {
         "elapsed_seconds": round(elapsed),
@@ -21886,7 +22004,7 @@ def status(job_id: str):
         "cancelled_at": job.cancelled_at,
         "uploaded_files": job.uploaded_files,
         "expected_files": job.expected_files,
-        "render_priority_requested": str(job.options.get("renderPriority") or "balanced"),
+        "render_priority_requested": "max",
         "render_priority_effective": render_priority(job),
         "gpu_requested": bool(job.options.get("gpu", False)),
         "gpu_enabled": (
