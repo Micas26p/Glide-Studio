@@ -4912,7 +4912,7 @@ function getShowcaseTone(){
 
 function setRenderStage(stage){
   const normalized = normalizeRenderStage(stage);
-  const STAGE_ORDER = ['preparing','uploading','audio','rendering','cta','muxing','done'];
+  const STAGE_ORDER = ['preparing','uploading','audio','rendering','cta','muxing','done','queue_done'];
   const currentIdx = STAGE_ORDER.indexOf(normalized);
   renderSteps.querySelectorAll('span').forEach(item => {
     const itemStage = item.dataset.stage || '';
