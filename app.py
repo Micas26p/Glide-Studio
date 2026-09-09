@@ -1364,31 +1364,7 @@ def _load_queue_projects() -> list[dict[str, Any]]:
             data = json.loads(candidate.read_text(encoding="utf-8"))
             projects = data.get("projects", data if isinstance(data, list) else [])
             if isinstance(projects, list):
-                res = [item for item in projects if isinstance(item, dict) and item.get("id")]
-                for p in res:
-                    pid = str(p.get("id") or "").strip()
-                    m = p.get("media") if isinstance(p.get("media"), dict) else {}
-                    if pid and not (m.get("videos") or []):
-                        idx = _load_project_media_index(pid)
-                        if idx:
-                            vids = [r for r, meta in idx.items() if str(meta.get("kind") or "video").lower() in ("video", "image")]
-                            auds = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "audio"]
-                            txts = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("subtitle", "text_srt", "texts")]
-                            caps = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "caption_srt"]
-                            scrs = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("script_guide", "script")]
-                            if vids or auds:
-                                p["media"] = {
-                                    "videos": vids,
-                                    "audios": auds,
-                                    "background_music": list(m.get("background_music") or []),
-                                    "texts": txts or list(m.get("texts") or []),
-                                    "captions": caps or list(m.get("captions") or []),
-                                    "script_guides": scrs or list(m.get("script_guides") or []),
-                                }
-                                if vids and auds and p.get("status") == "error":
-                                    p["status"] = "ready"
-                                    p["error"] = None
-                return res
+                return [item for item in projects if isinstance(item, dict) and item.get("id")]
         except Exception:
             continue
     return []
@@ -1663,6 +1639,39 @@ def _save_project_media_index(project_id: str, items: dict[str, dict[str, Any]])
             indent=2,
         ),
     )
+
+
+def _sync_queue_projects_from_media_indices() -> None:
+    changed = False
+    for p in QUEUE_PROJECTS:
+        pid = str(p.get("id") or "").strip()
+        m = p.get("media") if isinstance(p.get("media"), dict) else {}
+        if pid and not (m.get("videos") or []):
+            idx = _load_project_media_index(pid)
+            if idx:
+                vids = [r for r, meta in idx.items() if str(meta.get("kind") or "video").lower() in ("video", "image")]
+                auds = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "audio"]
+                txts = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("subtitle", "text_srt", "texts")]
+                caps = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() == "caption_srt"]
+                scrs = [r for r, meta in idx.items() if str(meta.get("kind") or "").lower() in ("script_guide", "script")]
+                if vids or auds:
+                    p["media"] = {
+                        "videos": vids,
+                        "audios": auds,
+                        "background_music": list(m.get("background_music") or []),
+                        "texts": txts or list(m.get("texts") or []),
+                        "captions": caps or list(m.get("captions") or []),
+                        "script_guides": scrs or list(m.get("script_guides") or []),
+                    }
+                    if vids and auds and p.get("status") in ("error", "draft"):
+                        p["status"] = "ready"
+                        p["error"] = None
+                    changed = True
+    if changed:
+        _save_queue_projects(QUEUE_PROJECTS)
+
+
+_sync_queue_projects_from_media_indices()
 
 
 def _reference_style_dir(project_id: str) -> Path:
