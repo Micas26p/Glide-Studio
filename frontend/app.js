@@ -787,8 +787,8 @@ function persistedMediaObject(projectId, meta = {}){
     _contentUrl: contentUrl,
     _forcedKind: meta.kind || '',
     _persisted: true,
-    _persistedProjectId: meta.persistedProjectId || '',
-    _persistedStoredFile: meta.persistedStoredFile || '',
+    _persistedProjectId: meta.persistedProjectId || projectId || '',
+    _persistedStoredFile: meta.persistedStoredFile || meta.file || '',
     _persistedJobId: meta.persistedJobId || '',
     _persistedIndex: Number.isFinite(Number(meta.persistedIndex)) ? Number(meta.persistedIndex) : -1,
     _duration: Number(meta.duration || 0),
@@ -855,9 +855,14 @@ function storedProjectToModel(raw = {}, index = 0){
     return fallback;
   };
   const toMeta = (item, defaultKind) => {
-    if(item && typeof item === 'object') return item;
+    if(item && typeof item === 'object') return {persistedProjectId: project.id, ...item};
     const s = String(item || '');
-    return {rel: s, name: s.split('/').pop() || s, kind: inferKind(s, defaultKind)};
+    return {
+      rel: s,
+      name: s.split('/').pop() || s,
+      kind: inferKind(s, defaultKind),
+      persistedProjectId: project.id,
+    };
   };
 
   const vList = (rawMedia.videos || []).map(v => persistedMediaObject(project.id, toMeta(v, 'video')));
@@ -5193,9 +5198,9 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
           : (sourceCaptions.includes(file) ? 'caption_srt' : (sourceScripts.includes(file) ? 'script_guide' : 'text_srt')))),
     size: file.size,
     lastModified: Number(file.lastModified || 0),
-    ...(file._persistedProjectId && file._persistedStoredFile ? {
-      persistedProjectId: file._persistedProjectId,
-      persistedStoredFile: file._persistedStoredFile,
+    ...(file._persisted || file._persistedProjectId || projectSnapshot?.id ? {
+      persistedProjectId: file._persistedProjectId || projectSnapshot?.id || '',
+      persistedStoredFile: file._persistedStoredFile || '',
     } : {}),
     ...(file._persistedJobId && file._persistedIndex >= 0 ? {
       persistedJobId: file._persistedJobId,

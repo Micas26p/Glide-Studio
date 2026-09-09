@@ -2624,42 +2624,52 @@ def analyze_reference_style_video(project_id: str, video_path: Path, display_nam
     return dna
 
 
-def _repair_false_missing_audio_queue_errors() -> None:
+def _repair_false_queue_errors() -> None:
     changed = False
     for project in QUEUE_PROJECTS:
         error = str(project.get("error") or "").lower()
-        if "nenhum audio de narracao valido foi encontrado" not in error:
+        if not error:
             continue
         project_id = str(project.get("id") or "").strip()
-        groups = project.get("media") if isinstance(project.get("media"), dict) else {}
-        audio_rels = [str(item).replace("\\", "/") for item in (groups.get("audios") or [])]
-        index = _load_project_media_index(project_id)
-        has_persisted_audio = False
-        for rel in audio_rels:
-            record = index.get(rel)
-            if not record:
+        if "nenhum audio de narracao valido foi encontrado" in error:
+            groups = project.get("media") if isinstance(project.get("media"), dict) else {}
+            audio_rels = [str(item).replace("\\", "/") for item in (groups.get("audios") or [])]
+            index = _load_project_media_index(project_id)
+            has_persisted_audio = False
+            for rel in audio_rels:
+                record = index.get(rel)
+                if not record:
+                    continue
+                stored_file = Path(str(record.get("file") or "")).name
+                candidate = _project_media_dir(project_id) / stored_file
+                if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                    has_persisted_audio = True
+                    break
+            if not has_persisted_audio:
                 continue
-            stored_file = Path(str(record.get("file") or "")).name
-            candidate = _project_media_dir(project_id) / stored_file
-            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
-                has_persisted_audio = True
-                break
-        if not has_persisted_audio:
-            continue
-        project["status"] = "ready"
-        project["error"] = None
-        project["jobId"] = None
-        project["lastRenderSummary"] = None
-        options = project.get("options") if isinstance(project.get("options"), dict) else {}
-        options.pop("backgroundMusicAutoSelection", None)
-        project["options"] = options
-        project["updatedAt"] = _now_iso()
-        changed = True
+            project["status"] = "ready"
+            project["error"] = None
+            project["jobId"] = None
+            project["lastRenderSummary"] = None
+            options = project.get("options") if isinstance(project.get("options"), dict) else {}
+            options.pop("backgroundMusicAutoSelection", None)
+            project["options"] = options
+            project["updatedAt"] = _now_iso()
+            changed = True
+        elif "upload incompleto" in error:
+            index = _load_project_media_index(project_id)
+            if index:
+                project["status"] = "ready"
+                project["error"] = None
+                project["jobId"] = None
+                project["lastRenderSummary"] = None
+                project["updatedAt"] = _now_iso()
+                changed = True
     if changed:
         _save_queue_projects(QUEUE_PROJECTS)
 
 
-_repair_false_missing_audio_queue_errors()
+_repair_false_queue_errors()
 
 
 def _project_export_manifest(project: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2689,13 +2699,68 @@ def _duration_from_clip_name(name: str) -> float:
     return max(0.0, float(end - start))
 
 
-def _resolve_persisted_manifest_item(item: dict[str, Any]) -> Path | None:
-    project_id = str(item.get("persistedProjectId") or "").strip()
-    stored_file = Path(str(item.get("persistedStoredFile") or "")).name
+def _resolve_persisted_manifest_item(
+    item: dict[str, Any],
+    project_id_hint: str = "",
+    project_index_cache: dict[str, dict[str, Any]] | None = None,
+) -> Path | None:
+    project_id = str(item.get("persistedProjectId") or project_id_hint or "").strip()
+    stored_file = Path(str(item.get("persistedStoredFile") or item.get("file") or "")).name
     if project_id and stored_file:
         candidate = _project_media_dir(project_id) / stored_file
         if candidate.exists() and candidate.is_file():
             return candidate
+
+    rel_raw = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
+    base_name = Path(rel_raw).name
+
+    def _get_idx(pid: str) -> dict[str, dict[str, Any]]:
+        if project_index_cache is not None:
+            if pid not in project_index_cache:
+                project_index_cache[pid] = _load_project_media_index(pid)
+            return project_index_cache[pid]
+        return _load_project_media_index(pid)
+
+    if project_id:
+        idx = _get_idx(project_id)
+        if idx:
+            record = idx.get(rel_raw) or idx.get(base_name)
+            if not record and base_name:
+                for k, v in idx.items():
+                    if k == base_name or v.get("name") == base_name or k.endswith(f"/{base_name}"):
+                        record = v
+                        break
+            if record:
+                rec_file = Path(str(record.get("file") or "")).name
+                if rec_file:
+                    candidate = _project_media_dir(project_id) / rec_file
+                    if candidate.exists() and candidate.is_file():
+                        return candidate
+        if base_name:
+            candidate = _project_media_dir(project_id) / base_name
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+    if not project_id:
+        for p in QUEUE_PROJECTS:
+            pid = str(p.get("id") or "").strip()
+            if not pid:
+                continue
+            idx = _get_idx(pid)
+            if idx:
+                record = idx.get(rel_raw) or idx.get(base_name)
+                if not record and base_name:
+                    for k, v in idx.items():
+                        if k == base_name or v.get("name") == base_name or k.endswith(f"/{base_name}"):
+                            record = v
+                            break
+                if record:
+                    rec_file = Path(str(record.get("file") or "")).name
+                    if rec_file:
+                        candidate = _project_media_dir(pid) / rec_file
+                        if candidate.exists() and candidate.is_file():
+                            return candidate
+
     source_job_id = safe_folder_component(str(item.get("persistedJobId") or ""), "")
     try:
         source_index = int(item.get("persistedIndex"))
@@ -2706,6 +2771,7 @@ def _resolve_persisted_manifest_item(item: dict[str, Any]) -> Path | None:
         matches = list(source_dir.glob(f"u{source_index:04d}.*"))
         if matches and matches[0].is_file():
             return matches[0]
+
     for key in ("path", "rel", "name"):
         candidate_val = str(item.get(key) or "").strip()
         if candidate_val:
@@ -21531,10 +21597,12 @@ async def create_render_job(manifest: str = Form("[]"), options: str = Form("{}"
         export_dir=export_dir,
         output_dir=str(export_dir),
     )
+    queue_project_id = str(options_obj.get("queueProjectId") or options_obj.get("projectId") or "").strip()
+    manifest_idx_cache: dict[str, dict[str, Any]] = {}
     for item in files_manifest:
         if not isinstance(item, dict):
             continue
-        source = _resolve_persisted_manifest_item(item)
+        source = _resolve_persisted_manifest_item(item, project_id_hint=queue_project_id, project_index_cache=manifest_idx_cache)
         if not source:
             continue
         rel_key = str(item.get("rel") or item.get("name") or source.name).replace("\\", "/")
@@ -21617,7 +21685,34 @@ def launch_render(job_id: str):
     if job.thread_started:
         return {"job_id": job.id, "already_started": True}
     if job.expected_files and job.uploaded_files < job.expected_files:
-        raise HTTPException(status_code=400, detail=f"Upload incompleto: {job.uploaded_files}/{job.expected_files}")
+        queue_project_id = str((job.options or {}).get("queueProjectId") or (job.options or {}).get("projectId") or "").strip()
+        rescue_cache: dict[str, dict[str, Any]] = {}
+        for item in (job.manifest or []):
+            if not isinstance(item, dict):
+                continue
+            rel_key = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
+            if rel_key and (rel_key in job.upload_paths or Path(rel_key).name in job.upload_paths):
+                continue
+            source = _resolve_persisted_manifest_item(item, project_id_hint=queue_project_id, project_index_cache=rescue_cache)
+            if source and source.is_file():
+                display_name = Path(rel_key).name or source.name
+                job.upload_paths[rel_key] = source
+                job.upload_paths[Path(rel_key).name] = source
+                job.upload_names[rel_key] = display_name
+                job.upload_names[Path(rel_key).name] = display_name
+                job.upload_names[source.name] = display_name
+                job.uploaded_files += 1
+        if job.expected_files and job.uploaded_files < job.expected_files:
+            missing_items = [
+                str(it.get("rel") or it.get("name") or "unknown")
+                for it in (job.manifest or [])
+                if str(it.get("rel") or it.get("name") or "") not in job.upload_paths
+                and Path(str(it.get("rel") or it.get("name") or "")).name not in job.upload_paths
+            ]
+            detail_msg = f"Upload incompleto: {job.uploaded_files}/{job.expected_files}"
+            if missing_items:
+                detail_msg += f" (arquivos ausentes: {', '.join(missing_items[:4])})"
+            raise HTTPException(status_code=400, detail=detail_msg)
     job.status = "ready"
     job.message = "Render enviado para segundo plano"
     job.thread_started = True
