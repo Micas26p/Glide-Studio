@@ -814,7 +814,7 @@ function storedProjectToModel(raw = {}, index = 0){
   project.options = raw.options && typeof raw.options === 'object' ? raw.options : {};
   if(typeof project.options.trimSilence === 'undefined') project.options.trimSilence = true;
   if(typeof project.options.dualExportShorts === 'undefined') project.options.dualExportShorts = false;
-  if(typeof project.options.dualExportMode === 'undefined') project.options.dualExportMode = 'smart_crop';
+  if(typeof project.options.dualExportMode === 'undefined') project.options.dualExportMode = 'smart_auto';
   delete project.options.autoThumbnails;
   project.referenceStyleVideo = raw.referenceStyleVideo && typeof raw.referenceStyleVideo === 'object'
     ? raw.referenceStyleVideo
@@ -976,7 +976,7 @@ function captureControlSnapshot(includeSubtitle = true){
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : false,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
-    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop',
+    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_auto',
     forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     backgroundMusicVolumeDb: backgroundVolumeValue(),
     backgroundMusicPreset: backgroundVolumePreset?.value || 'immersive',
@@ -2994,7 +2994,7 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : false,
     trimSilence: trimSilenceToggle ? trimSilenceToggle.checked : true,
     dualExportShorts: dualExportShortsToggle ? dualExportShortsToggle.checked : false,
-    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop',
+    dualExportMode: dualExportModeSelect ? dualExportModeSelect.value : 'smart_auto',
     forceShortRender: forceShortRenderToggle ? forceShortRenderToggle.checked : false,
     zoom: $('#zoomSelect')?.value || 'off',
     transitions: $('#transitionSelect')?.value || 'off',
@@ -3101,7 +3101,7 @@ function syncLevel2Controls(){
   const mainMode = $('#dualExportModeSelect');
   const mainDual = $('#dualExportShortsToggle');
   if(lvl2Mode && mainMode){
-    lvl2Mode.value = mainMode.value || 'smart_crop';
+    lvl2Mode.value = mainMode.value || 'smart_auto';
   }
   if(lvl2Dual && mainDual){
     lvl2Dual.checked = mainDual.checked;
@@ -5233,7 +5233,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     allowAudioTrim: optionValue('allowAudioTrim', allowAudioTrimToggle ? allowAudioTrimToggle.checked : false) === true,
     trimSilence: optionValue('trimSilence', trimSilenceToggle ? trimSilenceToggle.checked : true) !== false,
     dualExportShorts: Boolean(optionValue('dualExportShorts', dualExportShortsToggle ? dualExportShortsToggle.checked : false)),
-    dualExportMode: String(optionValue('dualExportMode', dualExportModeSelect ? dualExportModeSelect.value : 'smart_crop')),
+    dualExportMode: String(optionValue('dualExportMode', dualExportModeSelect ? dualExportModeSelect.value : 'smart_auto')),
     forceShortRender: Boolean(optionValue('forceShortRender', forceShortRenderToggle ? forceShortRenderToggle.checked : false)),
     videoOrder: sourceVideos.map(rel),
     imageOrder: sourceVideos.filter(isImage).map(rel),
@@ -6776,7 +6776,7 @@ async function applyAutomatorDistribution(options = {}){
       method: 'POST',
       cache: 'no-store',
       signal: state.automatorAbortController.signal,
-    }, 60000);
+    }, 180000);
     if(!commitResponse.ok) throw new Error(await commitResponse.text());
     const committed = await commitResponse.json();
     progress(97, 'Verificando projetos persistidos...', true);
@@ -6952,8 +6952,14 @@ async function removeActiveProject(){
     return;
   }
   if(!window.confirm(`Remover ${current.name} da fila? Os arquivos originais no disco não serão apagados.`)) return;
+  try{
+    const response = await fetch(`/api/queue/projects/${encodeURIComponent(current.id)}`, {method: 'DELETE', cache: 'no-store'});
+    if(!response.ok) throw new Error(await response.text());
+  }catch(error){
+    showToast('Não foi possível remover', 'O projeto foi mantido. Verifique o motor local e tente novamente.', 'error');
+    return;
+  }
   state.projects = state.projects.filter(item => item.id !== current.id);
-  fetch(`/api/queue/projects/${encodeURIComponent(current.id)}`, {method: 'DELETE', cache: 'no-store'}).catch(() => {});
   state.activeProjectId = null;
   loadProject(state.projects[0].id);
   renderProjectQueue();
@@ -8769,6 +8775,47 @@ $('#closeModal').addEventListener('click', () => {
   document.title = 'Glide Studio';
 });
 
+// Keep keyboard navigation inside full dialogs; the minimized render panel stays non-modal.
+const modalFocusOrigins = new WeakMap();
+const visibleDialogs = () => Array.from(document.querySelectorAll('.modal.show:not(.minimized)'));
+const dialogFocusables = dialog => Array.from(dialog.querySelectorAll(
+  'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]'
+)).filter(element => element.getClientRects().length && !element.closest('[hidden], .hidden'));
+const modalFocusObserver = new MutationObserver(records => {
+  for(const {target} of records){
+    const isOpen = target.classList.contains('show') && !target.classList.contains('minimized');
+    if(isOpen && !modalFocusOrigins.has(target)){
+      modalFocusOrigins.set(target, document.activeElement);
+      const card = target.querySelector('.modal-card');
+      if(card){
+        card.tabIndex = -1;
+        (dialogFocusables(target)[0] || card).focus();
+      }
+    }else if(!isOpen && modalFocusOrigins.has(target)){
+      const origin = modalFocusOrigins.get(target);
+      modalFocusOrigins.delete(target);
+      if(origin?.isConnected && !visibleDialogs().length) origin.focus();
+    }
+  }
+});
+document.querySelectorAll('.modal').forEach(dialog => modalFocusObserver.observe(dialog, {
+  attributes: true, attributeFilter: ['class']
+}));
+document.addEventListener('keydown', event => {
+  if(event.key !== 'Tab') return;
+  const dialog = visibleDialogs().at(-1);
+  if(!dialog) return;
+  const controls = dialogFocusables(dialog);
+  const first = controls[0] || dialog.querySelector('.modal-card');
+  const last = controls.at(-1) || first;
+  if(!dialog.contains(document.activeElement) ||
+      (event.shiftKey && document.activeElement === first) ||
+      (!event.shiftKey && document.activeElement === last)){
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus();
+  }
+});
+
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     const activeModals = [
@@ -8780,6 +8827,10 @@ window.addEventListener('keydown', (e) => {
     ];
     for (const m of activeModals) {
       if (m && m.classList.contains('show')) {
+        if(m === automatorModal){
+          closeAutomator();
+          return;
+        }
         m.classList.remove('show');
         m.setAttribute('aria-hidden', 'true');
         return;

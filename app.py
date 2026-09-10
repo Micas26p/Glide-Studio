@@ -521,6 +521,8 @@ SFX_RENDER_PROFILE_CACHE: dict[str, dict[str, float]] = {}
 CACHE_MAINTENANCE_LOCK = threading.Lock()
 CACHE_WARM_LOCK = threading.Lock()
 VIDEO_HEALTH_CACHE: dict[str, dict[str, Any]] = {}
+MEDIA_DURATION_CACHE: dict[str, float] = {}
+MEDIA_DURATION_LOCK = threading.RLock()
 
 
 def is_image_path(path: Path | str) -> bool:
@@ -5849,23 +5851,26 @@ def probe_duration(path: Path, cwd: Path | None = None) -> float:
 
 def safe_probe_duration(path: Path, cwd: Path | None = None) -> float:
     try:
-        return probe_duration(path, cwd=cwd)
+        source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
+        cache_key = f"{source.name}_{source.stat().st_size}"
     except Exception:
-        return 0.0
+        source = path
+        cache_key = str(path)
+    with MEDIA_DURATION_LOCK:
+        if cache_key in MEDIA_DURATION_CACHE:
+            return MEDIA_DURATION_CACHE[cache_key]
+    try:
+        dur = probe_duration(source, cwd=cwd)
+    except Exception:
+        dur = 0.0
+    if dur > 0:
+        with MEDIA_DURATION_LOCK:
+            MEDIA_DURATION_CACHE[cache_key] = dur
+    return dur
 
 
 def cached_probe_duration(path: Path, cwd: Path | None = None) -> float:
-    if cwd is not None:
-        return safe_probe_duration(path, cwd=cwd)
-    try:
-        key = str(path.resolve())
-    except Exception:
-        key = str(path)
-    if key in SFX_DURATION_CACHE:
-        return SFX_DURATION_CACHE[key]
-    duration = safe_probe_duration(path)
-    SFX_DURATION_CACHE[key] = duration
-    return duration
+    return safe_probe_duration(path, cwd=cwd)
 
 
 def probe_has_audio(path: Path, cwd: Path | None = None) -> bool:
@@ -6058,8 +6063,8 @@ def probe_visible_video_frame(path: Path, duration: float, cwd: Path | None = No
     return {"visible": False, "reason": "amostras pretas/sem conteudo visual", "samples": samples}
 
 
-def probe_video_render_health(path: Path, duration: float, cwd: Path | None = None) -> dict[str, Any]:
-    key = video_health_cache_key(path, cwd)
+def probe_video_render_health(path: Path, duration: float, cwd: Path | None = None, probe_frames: bool = True) -> dict[str, Any]:
+    key = f"{video_health_cache_key(path, cwd)}_{probe_frames}"
     if key in VIDEO_HEALTH_CACHE:
         return dict(VIDEO_HEALTH_CACHE[key])
     size_mb = video_file_size_mb(path, cwd)
@@ -6107,6 +6112,18 @@ def probe_video_render_health(path: Path, duration: float, cwd: Path | None = No
             return summary
     except Exception:
         pass
+
+    if not probe_frames:
+        summary.update({
+            "valid": True,
+            "reason": "ok",
+            "visual_checked": False,
+            "visible_frame": True,
+            "suggested_offset": 0.0,
+            "visual_samples": [],
+        })
+        VIDEO_HEALTH_CACHE[key] = dict(summary)
+        return summary
 
     visual = probe_visible_video_frame(path, duration, cwd=cwd)
     summary.update({
@@ -14969,24 +14986,32 @@ def commit_automator_session(session_id: str):
                 group = "videos" if kind in ("video", "image") else "audios" if kind == "audio" else "script_guides" if kind in ("script_guide", "script") else "texts"
                 project_results[project_id][group].append(rel_key)
 
-            # Probe de duração paralelo para vídeos com duration=0 (retroativo)
-            if needs_probe:
-                def _probe_one(args: tuple[str, str, Path, dict[str, Any]]) -> None:
-                    _pid, _rel, tgt, rec = args
-                    try:
-                        d = safe_probe_duration(tgt)
-                        if d > 0:
-                            rec["duration"] = round(d, 4)
-                    except Exception:
-                        pass
-
-                max_probe_workers = min(8, len(needs_probe))
-                with ThreadPoolExecutor(max_workers=max_probe_workers) as _probe_ex:
-                    list(_probe_ex.map(_probe_one, needs_probe))
-
-
             for project_id, items in project_media_indices.items():
                 _save_project_media_index(project_id, items)
+
+            # Desacoplamento assíncrono: para vídeos com duration=0, dispara probe suave em background
+            # sem bloquear o commit (commit responde em ~1s) e com throttling térmico para não aquecer CPU
+            if needs_probe:
+                def _bg_probe_automator_videos(probes: list[tuple[str, str, Path, dict[str, Any]]]) -> None:
+                    for _pid, _rel, tgt, _ in probes:
+                        try:
+                            time.sleep(0.015)  # Throttling térmico suave para manter o PC frio e ágil
+                            cur_index = _load_project_media_index(_pid)
+                            if float((cur_index.get(_rel) or {}).get("duration") or 0.0) > 0:
+                                continue
+                            d = safe_probe_duration(tgt)
+                            if d > 0 and _rel in cur_index:
+                                cur_index[_rel]["duration"] = round(d, 4)
+                                _save_project_media_index(_pid, cur_index)
+                        except Exception:
+                            pass
+
+                threading.Thread(
+                    target=_bg_probe_automator_videos,
+                    args=(list(needs_probe),),
+                    daemon=True,
+                    name="glide-automator-bg-probe",
+                ).start()
 
             for row in session.get("rows") or []:
                 project_id = str(row.get("projectId") or "")
@@ -18118,7 +18143,7 @@ def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> t
                     "visible_frame": False,
                 }
         dur = safe_probe_duration(p, cwd=work)
-        health = probe_video_render_health(p, dur, cwd=work)
+        health = probe_video_render_health(p, dur, cwd=work, probe_frames=False)
         if health.get("valid"):
             return True, p, dur, None
         else:
