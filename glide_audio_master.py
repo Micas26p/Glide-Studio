@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from typing import Any
 
@@ -69,7 +70,7 @@ def parse_loudnorm_output(text: str) -> dict[str, Any]:
 def second_pass_filter(measurement: dict[str, Any], profile: str | None = None) -> str:
     settings = profile_settings(profile)
     required = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
-    if not all(key in measurement for key in required):
+    if not all(_number(measurement.get(key)) is not None for key in required):
         return first_pass_filter(settings["key"]) + ":linear=true"
     return (
         f"loudnorm=I={settings['target_i']}:TP={settings['target_tp']}:LRA={settings['target_lra']}:"
@@ -113,6 +114,7 @@ def summary(measurement: dict[str, Any], output_measurement: dict[str, Any] | No
 
 def _number(value: Any, fallback: float | None = None) -> float | None:
     try:
-        return round(float(value), 2)
+        number = float(value)
+        return round(number, 2) if math.isfinite(number) else fallback
     except Exception:
         return fallback

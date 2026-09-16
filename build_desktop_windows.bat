@@ -12,10 +12,10 @@ echo.
 
 set "LOCAL_PY=%CD%\.uv-python\cpython-3.11.15-windows-x86_64-none\python.exe"
 if exist "%LOCAL_PY%" (
-  set "PYTHON=%LOCAL_PY%"
+  set PYTHON="%LOCAL_PY%"
 ) else (
   where py >nul 2>nul
-  if %errorlevel%==0 (
+  if !errorlevel!==0 (
     py -3.11 --version >nul 2>nul
     if !errorlevel! == 0 (
       set "PYTHON=py -3.11"

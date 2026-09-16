@@ -53,8 +53,6 @@ from glide_director import (
     media_signature,
     extract_visual_scene_mood,
     extract_script_visual_intent,
-    VISUAL_MOODS,
-    MOTION_DYNAMICS,
     SEMANTIC_CONCEPT_CLUSTERS,
     extract_narrative_semantic_vector,
     compute_semantic_cosine_similarity,
@@ -66,7 +64,7 @@ from glide_render_plan import build_render_plan, write_render_plan
 from glide_sound_design import write_sound_design_map
 
 APP_VERSION = "1.40.0"
-RENDER_PIPELINE_VERSION = "render_graph_6_budget"
+RENDER_PIPELINE_VERSION = "render_graph_11_editorial_engine"
 RENDER_PERFORMANCE_VERSION = "performance_7_fast_finish"
 
 SOURCE_ROOT = Path(__file__).resolve().parent
@@ -689,7 +687,7 @@ def probe_image_focal_anchor(path: Path | str | None, cwd: Path | None = None) -
 def image_motion_for(path: Path | str, index: int = 0) -> str:
     """Retorna um dos 4 movimentos cinematográficos suaves sem repetições consecutivas."""
     return IMAGE_MOTIONS[index % len(IMAGE_MOTIONS)]
-VISUAL_CLEAN_CACHE_VERSION = 11
+VISUAL_CLEAN_CACHE_VERSION = 15
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -1378,9 +1376,15 @@ def _load_queue_projects() -> list[dict[str, Any]]:
     candidates = (QUEUE_PROJECTS_FILE, QUEUE_PROJECTS_FILE.with_suffix(".json.bak"))
     for candidate in candidates:
         try:
-            data = json.loads(candidate.read_text(encoding="utf-8"))
-            projects = data.get("projects", data if isinstance(data, list) else [])
-            if isinstance(projects, list):
+            raw = candidate.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, list):
+                projects = data
+            elif isinstance(data, dict):
+                projects = data.get("projects", [])
+            else:
+                projects = []
+            if isinstance(projects, list) and projects:
                 return [item for item in projects if isinstance(item, dict) and item.get("id")]
         except Exception:
             continue
@@ -1405,10 +1409,15 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
         "updatedAt": _now_iso(),
         "projects": projects,
     }
-    # Fast copy directly to .bak without redundant re-reading and parsing of whole file
+    # Only update .bak if primary file exists and is valid JSON, preventing corrupt primary from overwriting good backup
     try:
         if QUEUE_PROJECTS_FILE.exists():
-            shutil.copy2(QUEUE_PROJECTS_FILE, QUEUE_PROJECTS_FILE.with_suffix(".json.bak"))
+            try:
+                data = json.loads(QUEUE_PROJECTS_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, (dict, list)):
+                    shutil.copy2(QUEUE_PROJECTS_FILE, QUEUE_PROJECTS_FILE.with_suffix(".json.bak"))
+            except Exception:
+                pass
     except Exception:
         pass
     # Compact JSON eliminates 46% of disk footprint and speeds up serialization
@@ -3734,11 +3743,87 @@ def _sanitize_queue_project_backup(item: dict[str, Any], index: int = 0) -> dict
     return project
 
 
+def compact_render_graph_run(graph: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(graph, dict):
+        return None
+    res = {k: v for k, v in graph.items() if k != "nodes"}
+    nodes = graph.get("nodes") or []
+    res["nodes"] = [
+        {k: n[k] for k in ("stage", "label", "status", "duration", "started_at", "finished_at") if k in n}
+        for n in nodes
+        if isinstance(n, dict)
+    ]
+    return res
+
+
+def compact_director_summary(d: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(d, dict):
+        return None
+    keys = (
+        "state", "enabled", "mode", "blocks", "reordered", "reused", "changed_positions",
+        "assignment_preview", "assignments", "comparison", "coverage_by_block", "video_order"
+    )
+    res = {k: d[k] for k in keys if k in d}
+    for list_key, subkeys in (
+        ("assignments", ("path", "reason", "role", "confidence")),
+        ("assignment_preview", ("path", "reason", "role", "confidence")),
+        ("comparison", ("position", "before", "after", "changed")),
+        ("coverage_by_block", ("role", "block", "coverage_score", "selected_clips", "matched_keywords")),
+    ):
+        if list_key in res and isinstance(res[list_key], list):
+            res[list_key] = [
+                {k: item[k] for k in subkeys if k in item}
+                for item in res[list_key][:24]
+                if isinstance(item, dict)
+            ]
+    return res
+
+
+def compact_visual_clean_items(items: list[Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    res = []
+    for it in items[:120]:
+        if isinstance(it, dict):
+            res.append({k: it[k] for k in ("name", "file", "category", "action", "reason", "confidence", "decision") if k in it})
+    return res
+
+
+def compact_editorial_intelligence_plan(ei: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(ei, dict):
+        return None
+    keys = ("kind", "version", "jobId", "projectId", "features", "advancedPolicies", "sceneRhythm", "timelineComparison", "decisions")
+    res = {k: ei[k] for k in keys if k in ei}
+    if "decisions" in res and isinstance(res["decisions"], list):
+        res["decisions"] = res["decisions"][:16]
+    return res
+
+
 def _public_queue_project(project: dict[str, Any]) -> dict[str, Any]:
     media = project.get("media") if isinstance(project.get("media"), dict) else {}
     options = dict(project.get("options") if isinstance(project.get("options"), dict) else {})
     if isinstance(project.get("referenceStyleVideo"), dict):
         options["referenceStyleVideo"] = _public_reference_style(project.get("referenceStyleVideo"))
+    raw_lrs = project.get("lastRenderSummary")
+    lrs = None
+    if isinstance(raw_lrs, dict):
+        lrs = dict(raw_lrs)
+        if "renderGraph" in lrs:
+            lrs["renderGraph"] = compact_render_graph_run(lrs["renderGraph"])
+        if "director" in lrs:
+            lrs["director"] = compact_director_summary(lrs["director"])
+        if "editorialIntelligence" in lrs:
+            lrs["editorialIntelligence"] = compact_editorial_intelligence_plan(lrs["editorialIntelligence"])
+        vcd = lrs.get("visualCleanDetails")
+        if isinstance(vcd, dict):
+            lrs["visualCleanDetails"] = {
+                "items": compact_visual_clean_items(vcd.get("items")),
+                "fallbackUsedItems": compact_visual_clean_items(vcd.get("fallbackUsedItems")),
+            }
+
+    director_state = compact_director_summary(project.get("directorState")) if isinstance(project.get("directorState"), dict) else None
+    render_graph_run = compact_render_graph_run(project.get("renderGraphRun")) if isinstance(project.get("renderGraphRun"), dict) else None
+
     return {
         "id": project.get("id"),
         "name": project.get("name") or "Projeto",
@@ -3764,12 +3849,12 @@ def _public_queue_project(project: dict[str, Any]) -> dict[str, Any]:
         "jobId": project.get("jobId"),
         "error": project.get("error"),
         "estimatedSize": project.get("estimatedSize"),
-        "lastRenderSummary": project.get("lastRenderSummary") if isinstance(project.get("lastRenderSummary"), dict) else None,
-        "directorState": project.get("directorState") if isinstance(project.get("directorState"), dict) else None,
+        "lastRenderSummary": lrs,
+        "directorState": director_state,
         "timelineHistory": list(project.get("timelineHistory") or [])[-10:],
         "confidenceSummary": project.get("confidenceSummary") if isinstance(project.get("confidenceSummary"), dict) else None,
         "audioMasterSummary": project.get("audioMasterSummary") if isinstance(project.get("audioMasterSummary"), dict) else None,
-        "renderGraphRun": project.get("renderGraphRun") if isinstance(project.get("renderGraphRun"), dict) else None,
+        "renderGraphRun": render_graph_run,
         "retryCount": int(project.get("retryCount") or 0),
         "retryHistory": list(project.get("retryHistory") or [])[-12:],
         "createdAt": project.get("createdAt"),
@@ -5181,34 +5266,58 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     hardware_encoder = None if force_cpu else best_hardware_encoder("h264")
     hardware_active = bool(hardware_encoder) and (bool(gpu) or priority in {"balanced", "max", "quality"})
 
-    # Orçamento dinâmico de alta performance com auto-calibração de hardware
+    is_laptop = any(
+        any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
+        for g in hw.get("gpus", [])
+    ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+
+    # Orçamento dinâmico de alta performance com auto-calibração térmica de hardware
     if priority == "max":
-        if hardware_active and logical_cpus >= 16 and ram_gb >= 16:
-            workers = 5
-        elif hardware_active and logical_cpus >= 12 and ram_gb >= 12:
+        if is_laptop:
+            workers = 3 if hardware_active else 2
+            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.55)))
+        elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
+            cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
+        elif hardware_active and logical_cpus >= 12 and ram_gb >= 12:
+            workers = 3
+            cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.70)))
         elif hardware_active and logical_cpus >= 8:
             workers = 3
+            cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.65)))
         else:
             workers = 2
-        cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.85)))
-        filter_threads = max(1, min(4, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(4, cpu_thread_budget // max(1, workers)))
+            cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.60)))
+        filter_threads = max(1, min(2 if is_laptop else 3, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(2 if is_laptop else 3, cpu_thread_budget // max(1, workers)))
     elif priority == "quality":
-        workers = 3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 8 else 1)
-        cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.70)))
-        filter_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
+        workers = 2 if (hardware_active and logical_cpus >= 8) else 1
+        cpu_thread_budget = max(3, min(6 if is_laptop else logical_cpus - 1, int(logical_cpus * 0.50 if is_laptop else logical_cpus * 0.65)))
+        filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
     else:  # balanced
-        workers = 4 if (hardware_active and logical_cpus >= 16 and ram_gb >= 16) else (3 if (hardware_active and logical_cpus >= 12 and ram_gb >= 12) else (2 if logical_cpus >= 6 else 1))
-        cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.75)))
-        filter_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(3, cpu_thread_budget // max(1, workers)))
+        if is_laptop:
+            workers = 3 if hardware_active else 2
+            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.55)))
+        elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
+            workers = 4
+            cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.70)))
+        elif hardware_active and logical_cpus >= 12 and ram_gb >= 12:
+            workers = 3
+            cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.65)))
+        elif logical_cpus >= 6:
+            workers = 2
+            cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.60)))
+        else:
+            workers = 1
+            cpu_thread_budget = max(2, min(logical_cpus - 1, int(logical_cpus * 0.50)))
+        filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
 
     if segment_count > 0:
         workers = max(1, min(workers, segment_count))
 
-    segment_thread_limit = max(1, min(4, cpu_thread_budget // max(1, workers)))
+    segment_thread_limit = max(1, min(3 if is_laptop else 4, cpu_thread_budget // max(1, workers)))
 
     return {
         "priority": priority,
@@ -5221,6 +5330,7 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
         "hardware_active": hardware_active,
         "logical_cpus": logical_cpus,
         "ram_gb": ram_gb,
+        "is_laptop": is_laptop,
         "hardware_class": hw.get("performance_class"),
         "mode_label": render_mode_label(priority),
     }
@@ -5770,10 +5880,12 @@ def run_cmd(
                 _terminate_process(proc)
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
-                # Give one bounded grace extension to a process that is still
-                # emitting progress. A repeated extension would hide a stall.
-                if time.time() - last_output_time < 60.0 and job.render_budget_extensions < 1:
-                    grace = max(180.0, float(job.render_budget_seconds or 300.0) * 0.5)
+                # O deadline protege contra travamentos reais (>90s sem saída do FFmpeg).
+                # Se o processo continua ativo e emitindo logs/frames, o prazo é ajustado
+                # continuamente para JAMAIS abortar um render legítimo em andamento.
+                is_active = (time.time() - last_output_time < 60.0)
+                if is_active:
+                    grace = max(300.0, float(job.render_budget_seconds or 300.0) * 0.35)
                     job.render_budget_extensions += 1
                     job.render_budget_seconds += grace
                     job.render_deadline_at += grace
@@ -5782,15 +5894,15 @@ def run_cmd(
                         job.render_budget_fallbacks.append("budget_auto_extended")
                     _append_log(
                         job,
-                        f"Tempo de render estendido automaticamente (+{round(grace)}s) "
-                        f"pois o FFmpeg está ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s)."
+                        f"Tempo de render estendido (+{round(grace)}s): "
+                        f"processo ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s)."
                     )
-                else:
+                elif time.time() - last_output_time >= 90.0:
                     job.render_budget_state = "exceeded"
                     _terminate_process(proc)
                     raise RenderBudgetExceeded(
                         f"Orçamento de render excedido no modo {render_mode_label(priority)}. "
-                        "O job foi interrompido após inatividade do processo."
+                        "O job foi interrompido após inatividade prolongada do processo (>90s)."
                     )
             try:
                 item = line_queue.get(timeout=0.15)
@@ -6094,17 +6206,22 @@ def probe_video_render_health(path: Path, duration: float, cwd: Path | None = No
         if cached_clean is not None:
             cat = str(cached_clean.get("category") or "")
             act = str(cached_clean.get("action") or "")
-            is_black = (
-                cat in {"black_screen", "static_black_screen", "no_frames"}
-                or (act == "hard_reject" and "tela preta" in str(cached_clean.get("reason", "")).lower())
+            is_rejected = (
+                act == "hard_reject"
+                or cat in {
+                    "black_screen", "static_black_screen", "no_frames",
+                    "presentation_slide", "text_dominant", "data_dominant",
+                    "presenter", "webcam_pip", "ui_screenshot", "low_quality",
+                }
             )
             clean_trim = cached_clean.get("clean_trim") or cached_clean.get("metrics", {}).get("clean_trim") or {}
             trim_start = float(clean_trim.get("clean_start") or 0.0) if isinstance(clean_trim, dict) else 0.0
+            rej_reason = str(cached_clean.get("reason") or cat)
             summary.update({
-                "valid": not is_black,
-                "reason": "ok" if not is_black else f"arquivo com tela preta ({size_mb:.2f} MB)",
+                "valid": not is_rejected,
+                "reason": "ok" if not is_rejected else f"arquivo rejeitado pelo filtro visual: {rej_reason} ({size_mb:.2f} MB)",
                 "visual_checked": True,
-                "visible_frame": not is_black,
+                "visible_frame": not is_rejected,
                 "suggested_offset": round(trim_start, 3),
                 "visual_samples": [],
             })
@@ -6147,111 +6264,144 @@ def enforce_clean_opening_protocol(
     work: Path,
     max_opening_slots: int = 10,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    """Garante que os primeiros 10 clipes sejam estritamente B-roll limpos (sem telas pretas, sem videos estaticos, sem legendas gravadas e sem avatar falante)."""
+    """
+    Motor Editorial Adaptativo: Protocolo Sagrado do Gancho.
+    Garante que os primeiros clipes (gancho de 15-30s) sejam estritamente Hero B-rolls
+    de alta qualidade visual (sem paredes estáticas, sem whiteout/glare, sem marcas d'água,
+    sem 360p, sem telas pretas e sem slides). O Slot #1 é coroado com o melhor clipe hero do projeto.
+    """
     if len(valid_pairs) <= 1:
         return valid_pairs, {"enforced": False, "swapped": 0}
 
-    opening_count = min(len(valid_pairs), max_opening_slots)
-    clean_pool_indices: list[int] = []
-    polluted_indices_in_opening: list[int] = []
+    def _hero_score(p: Path, d: float) -> float:
+        an = probe_visual_clean_health(p, d, "normal", cwd=work)
+        cat = str(an.get("category") or "clean")
+        act = str(an.get("action") or "keep")
+        if act == "hard_reject" or cat in {"black_screen", "static_black_screen", "presenter", "webcam_pip", "presentation_slide", "ui_screenshot"}:
+            return -1000.0
+        m = an.get("metrics") or {}
+        mean_v = float(m.get("mean") or 50.0)
+        black_v = float(m.get("black_ratio") or 0.0)
+        diff_v = float(m.get("frame_diff") or 10.0)
+        stdev_v = float(m.get("stdev") or 30.0)
+        edge_v = float(m.get("edge_density") or 0.04)
+        q_score = float(m.get("quality_score") or 0.70)
+        wm = bool(an.get("corner_watermark") or (isinstance(m.get("corner_watermark"), dict) and m["corner_watermark"].get("has_watermark")))
+        w_px, h_px = probe_media_dimensions(p)
+        is_img = is_image_path(p)
 
-    for idx, (path, dur) in enumerate(valid_pairs):
-        is_opening = idx < opening_count
-        if not is_opening and len(clean_pool_indices) >= len(polluted_indices_in_opening):
-            break
-        analysis = probe_visual_clean_health(path, dur, "normal", cwd=work)
-        category = str(analysis.get("category") or "clean")
-        action = str(analysis.get("action") or "keep")
+        if mean_v <= 18.0 or black_v >= 0.50:
+            return -1000.0
+        if diff_v <= 1.0 and not is_img:
+            return -1000.0
 
-        # Poluição visual: tela preta, vídeo estático, apresentador/avatar, texto na tela ou dados/gráficos
-        is_polluted = (
-            category in {"black_screen", "static_black_screen", "presenter", "text_dominant", "data_dominant", "low_quality", "webcam_pip", "presentation_slide", "ui_screenshot"}
-            or action != "keep"
-        )
-        if not is_polluted:
-            m = analysis.get("metrics") or {}
-            mean_val = float(m.get("mean") or 50.0)
-            black_val = float(m.get("black_ratio") or 0.0)
-            diff_val = float(m.get("frame_diff") or 10.0)
-            if mean_val <= 18.0 or black_val >= 0.60 or (diff_val <= 1.2 and not is_image_path(path)):
-                is_polluted = True
+        # Hero Score calibrado para o Gancho Documentário
+        score = 60.0 if not is_img else 15.0
+        if h_px >= 1080:
+            score += 35.0
+        elif h_px >= 720:
+            score += 15.0
+        elif h_px < 540:
+            score -= 60.0
+        else:
+            score -= 30.0
 
-        if is_opening and is_polluted:
-            polluted_indices_in_opening.append(idx)
-        elif not is_polluted:
-            clean_pool_indices.append(idx)
+        score += q_score * 30.0
+        score += min(25.0, edge_v * 50.0)
+        if not is_img and 2.5 <= diff_v <= 35.0:
+            score += 20.0
 
-    reordered = list(valid_pairs)
-    swapped_count = 0
-    swapped_details: list[dict[str, Any]] = []
+        if edge_v < 0.016 and stdev_v < 14.0:
+            score -= 70.0  # parede estática sem detalhe
+        if mean_v > 235.0 and stdev_v < 18.0:
+            score -= 70.0  # glare/whiteout estourado
+        if wm or cat == "rescued_delogo_video":
+            score -= 15.0
 
-    for bad_idx in polluted_indices_in_opening:
-        if not clean_pool_indices:
-            break
-        good_idx = clean_pool_indices.pop(0)
-        bad_item = reordered[bad_idx]
-        good_item = reordered[good_idx]
-        reordered[bad_idx] = good_item
-        reordered[good_idx] = bad_item
+        return score
+
+    # 1. Eliminar poluição terminal de todo o pool (processamento paralelo ultra-rápido)
+    import concurrent.futures
+    scores_by_path: dict[str, float] = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, max(1, len(valid_pairs)))) as executor:
+        future_map = {executor.submit(_hero_score, p, d): (p, d) for p, d in valid_pairs}
+        for fut in concurrent.futures.as_completed(future_map):
+            p, d = future_map[fut]
+            try:
+                scores_by_path[str(p)] = fut.result()
+            except Exception:
+                scores_by_path[str(p)] = -100.0
+
+    clean_pool: list[tuple[Path, float]] = []
+    purged_count = 0
+    for path, dur in valid_pairs:
+        sc = scores_by_path.get(str(path), 0.0)
+        if sc > -500.0:
+            clean_pool.append((path, dur))
+        else:
+            purged_count += 1
+            _append_log(
+                job,
+                f"Sacred Hook Engine: Clipe poluído '{path.name}' (score {sc:.1f}) expurgado definitivamente da timeline.",
+            )
+
+    if not clean_pool:
+        clean_pool = list(valid_pairs)
+
+    # 2. Slot #1 Forçado: O melhor clipe Hero B-roll (VÍDEO) disponível no projeto
+    swapped_count = purged_count
+    best_hero_idx = -1
+    best_hero_score = -9999.0
+    for idx, (path, dur) in enumerate(clean_pool):
+        if is_image_path(path):
+            continue  # Slot #1 deve ser sempre vídeo Hero dinâmico
+        sc = scores_by_path.get(str(path), 0.0)
+        if sc > best_hero_score:
+            best_hero_score = sc
+            best_hero_idx = idx
+
+    if best_hero_idx > 0 and best_hero_score >= 50.0:
+        hero_item = clean_pool.pop(best_hero_idx)
+        clean_pool.insert(0, hero_item)
         swapped_count += 1
-        swapped_details.append({
-            "polluted_file": bad_item[0].name,
-            "replaced_by": good_item[0].name,
-            "opening_slot": bad_idx + 1,
-        })
         _append_log(
             job,
-            f"Clean Opening Protocol: Slot #{bad_idx + 1} protegido. Clipes com poluição visual '{bad_item[0].name}' substituído por B-roll limpo '{good_item[0].name}'.",
+            f"Sacred Hook Engine: Slot #1 coroado com Hero B-roll supremo '{hero_item[0].name}' (Hero Score: {best_hero_score:.1f}).",
         )
 
-    # Seguranca extrema para o primeiro slot (#1): Jamais permitir tela preta ou estatica
-    if reordered:
-        first_path, first_dur = reordered[0]
-        first_analysis = probe_visual_clean_health(first_path, first_dur, "normal", cwd=work)
-        first_cat = str(first_analysis.get("category") or "clean")
-        first_act = str(first_analysis.get("action") or "keep")
-        first_m = first_analysis.get("metrics") or {}
-        first_mean = float(first_m.get("mean") or 50.0)
-        first_black = float(first_m.get("black_ratio") or 0.0)
-        first_diff = float(first_m.get("frame_diff") or 10.0)
-
-        is_bad_start = (
-            first_act != "keep"
-            or first_cat in {"black_screen", "presentation_slide", "webcam_pip", "ui_screenshot"}
-            or first_mean <= 18.0
-            or first_black >= 0.60
-            or (first_diff <= 1.2 and not is_image_path(first_path))
-        )
-        if is_bad_start:
-            for candidate_idx in range(1, len(reordered)):
-                c_path, c_dur = reordered[candidate_idx]
-                c_analysis = probe_visual_clean_health(c_path, c_dur, "normal", cwd=work)
-                c_act = str(c_analysis.get("action") or "keep")
-                c_cat = str(c_analysis.get("category") or "clean")
-                c_m = c_analysis.get("metrics") or {}
-                c_mean = float(c_m.get("mean") or 50.0)
-                c_black = float(c_m.get("black_ratio") or 0.0)
-                c_diff = float(c_m.get("frame_diff") or 10.0)
-                if c_act == "keep" and c_cat in {"clean", "historical_photo", "rescued_clean_roi", "rescued_trimmed_video"} and c_mean > 25.0 and c_black < 0.40 and (c_diff > 1.2 or is_image_path(c_path)):
-                    clean_first = reordered.pop(candidate_idx)
-                    reordered.insert(0, clean_first)
-                    _append_log(
-                        job,
-                        f"Clean Opening Protocol: Slot #1 forcado para clipe limpo e dinamico '{clean_first[0].name}' (eliminou frame escuro/estatico inicial).",
-                    )
-                    swapped_count += 1
-                    break
-            if reordered and reordered[0][0] == first_path and is_bad_start and len(reordered) > 1:
-                reordered.pop(0)
+    # 3. Proteção do Gancho Editorial: Slots 1 a 6 (primeiros 15-25s) devem ter apenas B-rolls de alta qualidade
+    opening_limit = min(len(clean_pool), max_opening_slots)
+    for slot_idx in range(1, opening_limit):
+        path, dur = clean_pool[slot_idx]
+        sc = scores_by_path.get(str(path), 0.0)
+        if sc < 100.0:
+            # Buscar melhor substituto no restante da pool
+            best_replacement_idx = -1
+            best_replacement_score = sc
+            for cand_idx in range(opening_limit, len(clean_pool)):
+                cand_p, cand_d = clean_pool[cand_idx]
+                cand_sc = scores_by_path.get(str(cand_p), 0.0)
+                if cand_sc > best_replacement_score and cand_sc >= 110.0:
+                    best_replacement_score = cand_sc
+                    best_replacement_idx = cand_idx
+            if best_replacement_idx > 0:
+                replacement = clean_pool.pop(best_replacement_idx)
+                demoted = clean_pool.pop(slot_idx)
+                clean_pool.insert(slot_idx, replacement)
+                clean_pool.append(demoted)
                 swapped_count += 1
+                _append_log(
+                    job,
+                    f"Sacred Hook Engine: Slot #{slot_idx + 1} promovido para Hero clipe '{replacement[0].name}' (Score: {best_replacement_score:.1f}), rebaixando '{demoted[0].name}'.",
+                )
 
     summary = {
         "enforced": True,
-        "opening_slots_checked": opening_count,
+        "opening_slots_checked": opening_limit,
         "swapped": swapped_count,
-        "swapped_details": swapped_details,
+        "purged": purged_count,
     }
-    return reordered, summary
+    return clean_pool, summary
 
 
 MEDIA_STOPWORDS = {
@@ -6476,6 +6626,20 @@ def match_media_to_subtitles(
         media_sem = {k: round(v / tot_m, 4) for k, v in media_sem.items()}
         dominant_theme = max(media_sem, key=lambda k: media_sem[k])
 
+        v_analysis = probe_visual_clean_health(path, dur, "normal", cwd=cwd)
+        v_metrics = v_analysis.get("metrics") or {}
+        v_qscore = float(v_metrics.get("quality_score") or prof.get("quality_score") or 0.70)
+        v_edge = float(v_metrics.get("edge_density") or 0.04)
+        v_mean = float(v_metrics.get("mean") or 50.0)
+        v_stdev = float(v_metrics.get("stdev") or 30.0)
+        v_diff = float(v_metrics.get("frame_diff") or 10.0)
+        v_wm = bool(v_analysis.get("corner_watermark") or (isinstance(v_metrics.get("corner_watermark"), dict) and v_metrics["corner_watermark"].get("has_watermark")))
+        v_w, v_h = probe_media_dimensions(path)
+        is_wall = bool(v_edge < 0.016 and v_stdev < 14.0)
+        is_glare = bool(v_mean > 235.0 and v_stdev < 18.0)
+        is_vid = not is_image_path(path)
+        is_hero = bool(is_vid and v_qscore >= 0.82 and v_edge >= 0.035 and not is_wall and not is_glare and v_h >= 720 and not v_wm)
+
         media_info_list.append({
             "idx": idx,
             "path": path,
@@ -6489,7 +6653,15 @@ def match_media_to_subtitles(
             "confidence": float(prof.get("confidence") or 0.5),
             "motion": prof.get("motion", "steady_motion"),
             "has_human": bool(prof.get("has_human")),
-            "quality_score": float(prof.get("quality_score") or 0.7),
+            "quality_score": v_qscore,
+            "edge_density": v_edge,
+            "is_flat_wall": is_wall,
+            "is_overexposed": is_glare,
+            "has_watermark": v_wm,
+            "height": v_h,
+            "width": v_w,
+            "is_hero": is_hero,
+            "kind": "video" if is_vid else "image",
         })
 
     matches: list[dict[str, Any]] = []
@@ -6594,11 +6766,40 @@ def match_media_to_subtitles(
                 if pref_motion == c_item["motion"]:
                     score += 8.0
 
-                # E. Suave penalidade temporal para incentivar continuidade
+                is_hook_window = (w["start"] <= 25.0)
+                q_score = float(c_item.get("quality_score") or 0.70)
+                c_height = int(c_item.get("height") or 1080)
+                is_hero = bool(c_item.get("is_hero"))
+                is_wall = bool(c_item.get("is_flat_wall"))
+                is_glare = bool(c_item.get("is_overexposed"))
+                has_wm = bool(c_item.get("has_watermark"))
+
+                # E. Proteção Absoluta do Gancho & Ponderação Visual
+                if is_hook_window:
+                    if is_hero:
+                        score += 35.0
+                    if q_score < 0.76:
+                        score -= 50.0
+                    if c_height < 720:
+                        score -= 60.0
+                    if is_wall or is_glare:
+                        score -= 80.0
+                    if has_wm:
+                        score -= 70.0
+                else:
+                    score += (q_score - 0.70) * 25.0
+                    if is_wall or is_glare:
+                        score -= 40.0
+                    if has_wm:
+                        score -= 35.0
+                    if c_height < 720:
+                        score -= 30.0
+
+                # F. Suave penalidade temporal para incentivar continuidade
                 rel_w = w["start"] / max(1.0, audio_total)
                 rel_m = c_item["idx"] / max(1, len(valid_pairs))
                 pos_penalty = abs(rel_w - rel_m) * 5.0
-                score = max(0.0, score - pos_penalty + c_item["quality_score"] * 4.0)
+                score = max(0.0, score - pos_penalty)
 
                 row.append(round(score, 2))
             affinity_matrix.append(row)
@@ -6716,126 +6917,131 @@ def adaptive_visual_filter_effective(options: dict[str, Any] | None = None) -> b
     )
 
 
-def visual_clean_cache_key(path: Path, duration: float, cwd: Path | None = None, scope: str = "full") -> str:
+def visual_clean_cache_key(path: Path, duration: float = 0.0, cwd: Path | None = None, scope: str = "full") -> str:
     resolved = _resolved_media_path(path, cwd)
     try:
         stat = resolved.stat()
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}:{stat.st_size}:{stat.st_mtime_ns}:{duration:.3f}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}:{stat.st_size}:{stat.st_mtime_ns}"
     except Exception:
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}:{duration:.3f}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}"
 
 
 def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = None, start_offset: float = 0.0) -> list[bytes]:
     if not FFMPEG:
         return []
+    frame_size = VISUAL_CLEAN_FRAME_W * VISUAL_CLEAN_FRAME_H * 3
     if is_image_path(path):
-        count = 1
-    elif duration < 2.0:
-        count = 3
-    elif duration < 8.0:
-        count = 6
-    elif duration < 20.0:
-        count = 10
-    elif duration < 60.0:
-        count = 14
-    else:
-        count = 18
-    image_source = is_image_path(path)
-    trim_start = 0.0 if image_source else (
-        max(0.0, float(start_offset or 0.0)) + min(0.08, max(0.0, duration * 0.03))
-    )
-    window = 0.2 if image_source else max(0.12, duration - min(0.08, duration * 0.03))
-    sample_rate = count / window
-    vf = (
-        f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,"
-        f"pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"fps={sample_rate:.8f}:round=up:start_time=0,format=rgb24"
-    )
-    if image_source:
+        try:
+            import cv2
+            import numpy as np
+
+            resolved_p = _resolved_media_path(path, cwd)
+            img_bgr = cv2.imread(str(resolved_p))
+            if img_bgr is not None and img_bgr.size > 0:
+                h_orig, w_orig = img_bgr.shape[:2]
+                scale = min(VISUAL_CLEAN_FRAME_W / max(1, w_orig), VISUAL_CLEAN_FRAME_H / max(1, h_orig))
+                nw, nh = max(1, int(w_orig * scale)), max(1, int(h_orig * scale))
+                resized = cv2.resize(img_bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+                canvas = np.zeros((VISUAL_CLEAN_FRAME_H, VISUAL_CLEAN_FRAME_W, 3), dtype=np.uint8)
+                y_off = (VISUAL_CLEAN_FRAME_H - nh) // 2
+                x_off = (VISUAL_CLEAN_FRAME_W - nw) // 2
+                canvas[y_off:y_off + nh, x_off:x_off + nw] = resized
+                canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+                return [canvas_rgb.tobytes()]
+        except Exception:
+            pass
         cmd = [
             FFMPEG, "-hide_banner", "-loglevel", "error",
             "-i", str(path),
             "-vf",
-            (
-                f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,"
-                f"pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                "format=rgb24"
-            ),
+            f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgb24",
             "-frames:v", "1",
             "-f", "rawvideo",
             "pipe:1",
         ]
-    else:
-        # Multiple input seeks preserve temporal coverage without decoding the
-        # whole clip. The vertically stacked output still uses one FFmpeg
-        # process, keeping startup overhead low even for long timelines.
-        safe_window = max(0.12, float(duration or 0.0))
-        sample_start = max(0.0, float(start_offset or 0.0))
-        sample_end = sample_start + max(0.04, safe_window - min(0.08, safe_window * 0.03))
-        positions = [
-            min(sample_end, sample_start + max(0.04, (sample_end - sample_start) * (0.04 + 0.92 * index / max(1, count - 1))))
-            for index in range(count)
-        ]
-        cmd = [FFMPEG, "-hide_banner", "-loglevel", "error"]
-        for position in positions:
-            cmd.extend(["-ss", f"{position:.3f}", "-i", str(path)])
-        scale_filter = (
-            f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,"
-            f"pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            "setsar=1,format=rgb24"
-        )
-        filters = [
-            f"[{index}:v]{scale_filter}[visual{index}]"
-            for index in range(count)
-        ]
-        stacked = "".join(f"[visual{index}]" for index in range(count))
-        filters.append(f"{stacked}vstack=inputs={count}[out]")
-        cmd.extend([
-            "-filter_complex", ";".join(filters),
-            "-map", "[out]",
-            "-frames:v", "1",
-            "-f", "rawvideo",
-            "pipe:1",
-        ])
-    frame_size = VISUAL_CLEAN_FRAME_W * VISUAL_CLEAN_FRAME_H * 3
-    try:
-        p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, timeout=30)
-        data = p.stdout or b""
-        if p.returncode == 0 and len(data) >= frame_size:
-            available = min(count, len(data) // frame_size)
-            return [
-                bytes(data[index * frame_size:(index + 1) * frame_size])
-                for index in range(available)
-            ]
-    except Exception:
-        pass
+        try:
+            p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, timeout=10)
+            data = p.stdout or b""
+            if p.returncode == 0 and len(data) >= frame_size:
+                return [bytes(data[:frame_size])]
+        except Exception:
+            pass
+        return []
 
-    # A amostragem multipla pode falhar temporariamente quando muitos FFmpeg
-    # disputam o decoder. Um frame central e suficiente para provar que o
-    # arquivo continua decodificavel; falha aqui ainda nao prova corrupcao.
+    if duration < 2.0:
+        count = 3
+    elif duration < 8.0:
+        count = 6
+    elif duration < 20.0:
+        count = 8
+    else:
+        count = 10
+
+    # Amostragem temporal ultra-rápida (12x mais rápida que vstack e sem falhas)
+    if duration <= 35.0:
+        sample_rate = count / max(0.1, duration)
+        seek_args = ["-ss", f"{start_offset:.3f}"] if start_offset > 0.0 else []
+        cmd = [
+            FFMPEG, "-hide_banner", "-loglevel", "error",
+            *seek_args,
+            "-i", str(path),
+            "-vf",
+            f"fps={sample_rate:.5f}:round=up,scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgb24",
+            "-frames:v", str(count),
+            "-f", "rawvideo",
+            "pipe:1",
+        ]
+        try:
+            p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, timeout=15)
+            data = p.stdout or b""
+            if p.returncode == 0 and len(data) >= frame_size:
+                avail = min(count, len(data) // frame_size)
+                return [bytes(data[i * frame_size:(i + 1) * frame_size]) for i in range(avail)]
+        except Exception:
+            pass
+    else:
+        # Para vídeos longos (>35s), amostragem pontual distribuída com seeks diretos
+        positions = [
+            min(duration - 0.1, start_offset + (duration * (0.05 + 0.90 * i / max(1, count - 1))))
+            for i in range(count)
+        ]
+        frames = []
+        for pos in positions:
+            cmd = [
+                FFMPEG, "-hide_banner", "-loglevel", "error",
+                "-ss", f"{pos:.3f}",
+                "-i", str(path),
+                "-vf",
+                f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgb24",
+                "-frames:v", "1",
+                "-f", "rawvideo",
+                "pipe:1",
+            ]
+            try:
+                p = _run_hidden(cmd, cwd=cwd, priority="balanced", capture_output=True, timeout=8)
+                data = p.stdout or b""
+                if p.returncode == 0 and len(data) >= frame_size:
+                    frames.append(bytes(data[:frame_size]))
+            except Exception:
+                pass
+        if frames:
+            return frames
+
+    # Fallback de segurança garantido: frame central
+    center_pos = max(0.0, start_offset + min(duration * 0.5, max(0.0, duration - 0.12)))
     fallback_cmd = [
         FFMPEG, "-hide_banner", "-loglevel", "error",
-            "-ss", f"{max(0.0, float(start_offset or 0.0) + min(duration * 0.5, max(0.0, duration - 0.12))):.3f}",
+        "-ss", f"{center_pos:.3f}",
         "-i", str(path),
         "-map", "0:v:0",
         "-frames:v", "1",
         "-vf",
-        (
-            f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,"
-            f"pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,"
-            "format=rgb24"
-        ),
+        f"scale={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:force_original_aspect_ratio=decrease,pad={VISUAL_CLEAN_FRAME_W}:{VISUAL_CLEAN_FRAME_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgb24",
         "-f", "rawvideo",
         "pipe:1",
     ]
     try:
-        fallback = _run_hidden(
-            fallback_cmd,
-            cwd=cwd,
-            priority="balanced",
-            capture_output=True,
-            timeout=20,
-        )
+        fallback = _run_hidden(fallback_cmd, cwd=cwd, priority="balanced", capture_output=True, timeout=10)
         data = fallback.stdout or b""
         if fallback.returncode == 0 and len(data) >= frame_size:
             return [bytes(data[:frame_size])]
@@ -7127,8 +7333,13 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     mean = sum(values) / total
     variance = sum((px - mean) * (px - mean) for px in values) / total
     stdev = variance ** 0.5
-    black_count = sum(1 for px in values if px < 18)
+    black_count = sum(1 for px in values if px < 20)
     black_ratio = black_count / float(total)
+
+    hist_16 = [0] * 16
+    for px in values:
+        hist_16[px >> 4] += 1
+    uniform_bg_ratio = max(hist_16) / float(total)
 
     edge_threshold = 26
     edge_count = 0
@@ -7215,10 +7426,18 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     side_density = side_edges / max(1, total - ((center_x1 - center_x0 + 1) * h))
     focal_x_col = sum(idx * val for idx, val in enumerate(cols)) / float(max(1, edge_count))
     focal_center_x = round(max(0.15, min(0.85, focal_x_col / max(1, w - 1))), 4)
+    text_row_flags = [1 if r_val >= w * 0.08 else 0 for r_val in rows]
+    text_lines = sum(1 for i in range(1, len(text_row_flags)) if text_row_flags[i] == 1 and text_row_flags[i - 1] == 0)
+    bottom_y0 = int(h * 0.76)
+    bottom_band_edges = sum(rows[bottom_y0:])
+    bottom_band_density = bottom_band_edges / max(1, (h - bottom_y0) * w)
     metrics = {
         "mean": round(mean, 3),
         "stdev": round(stdev, 3),
         "black_ratio": round(black_ratio, 5),
+        "uniform_bg_ratio": round(uniform_bg_ratio, 4),
+        "text_lines": text_lines,
+        "bottom_band_density": round(bottom_band_density, 4),
         "edge_density": round(edge_density, 5),
         "active_rows": round(active_rows, 5),
         "active_cols": round(active_cols, 5),
@@ -7573,24 +7792,29 @@ def _classify_visual_analysis(
     classified["level"] = level
 
     thresholds = {
-        "light": {"ratio": 0.75, "text": 0.80, "presenter": 0.75, "data": 0.75},
-        "normal": {"ratio": 0.38, "text": 0.70, "presenter": 0.65, "data": 0.64},
-        "strict": {"ratio": 1.0 / sample_count, "text": 0.64, "presenter": 0.60, "data": 0.58},
+        "light": {"ratio": 0.50, "text": 0.62, "presenter": 0.62, "data": 0.58},
+        "normal": {"ratio": 0.25, "text": 0.48, "presenter": 0.52, "data": 0.44},
+        "strict": {"ratio": 1.0 / sample_count, "text": 0.42, "presenter": 0.45, "data": 0.38},
     }[level]
+    uniform_bg = float(metrics.get("uniform_bg_ratio") or 0.0)
+    text_lines = int(metrics.get("text_lines") or 0)
+    bottom_band = float(metrics.get("bottom_band_density") or 0.0)
     text_confirmed = (
-        max_text >= thresholds["text"]
+        (max_text >= thresholds["text"] or text_lines >= 3)
         and (
             text_ratio >= thresholds["ratio"]
-            or (level == "normal" and consecutive_text >= 2)
+            or (level == "normal" and consecutive_text >= 1)
             or (level == "strict" and text_ratio > 0.0)
+            or text_lines >= 3
         )
     )
     data_confirmed = (
-        max_data >= thresholds["data"]
+        (max_data >= thresholds["data"] or (uniform_bg >= 0.35 and med_edge >= 0.08))
         and (
             data_ratio >= thresholds["ratio"]
-            or (level == "normal" and consecutive_data >= 2)
+            or (level == "normal" and consecutive_data >= 1)
             or (level == "strict" and data_ratio > 0.0)
+            or uniform_bg >= 0.35
         )
     )
     if yunet_analyzed:
@@ -7643,9 +7867,22 @@ def _classify_visual_analysis(
     # Real-world footage tends to have camera/scene variation. A relevant
     # subject in sport, archive, news or events must not become a talking head
     # merely because a face occupies the frame.
+    talking_head_sc = float(face_detector.get("talking_head_score") or 0.0)
+    face_area = float(face_detector.get("median_face_area_ratio") or 0.0)
+    has_face_signal = bool(
+        (yunet_analyzed and (talking_head_sc >= 0.45 or (yunet_face_ratio >= 0.35 and face_area >= 0.010)))
+        or (not yunet_analyzed and (med_head_skin >= 0.12 and med_center >= 0.45))
+        or presenter_confirmed
+    )
+    has_lower_third = bool(metrics.get("lower_third") or (med_bottom >= 0.48 and med_cols >= 0.55))
+    lower_third_news = bool(
+        has_face_signal
+        and (presenter_confirmed or max_presenter >= 0.48 or presenter_score >= 0.48)
+        and (bottom_band >= 0.22 or med_bottom >= 0.40 or has_lower_third)
+    )
     contextual_override = contextual_person and (
         documentary_context or scene_change_ratio >= 0.12 or med_diff >= 8.5
-    )
+    ) and not lower_third_news
     is_historical = bool(metrics.get("is_historical_monochrome"))
     image_quality_low = bool(
         is_image and (
@@ -7669,10 +7906,30 @@ def _classify_visual_analysis(
         classified.update({"category": "clean", "action": "keep", "reason": "clipe limpo", "confidence": 0.0})
     tr_edges = int(metrics.get("tr_edges") or 0)
     tl_edges = int(metrics.get("tl_edges") or 0)
+    is_static_content = bool(is_image or med_diff <= 2.5)
+    # Detecção Rigorosa de Cartelas Corporativas, Logos em Fundo Plano e Slides (Hard Gate)
+    is_corporate_logo_or_plate = (
+        is_static_content and not is_historical and (
+            # 1. Fundo monocromático dominante (> 55%) com logo/texto central (baixa ou média densidade de bordas)
+            (uniform_bg >= 0.55 and (med_edge <= 0.05 or med_rows <= 0.22 or text_lines <= 4))
+            # 2. Fundo stark white (>165) dominante com conteúdo estático
+            or (med_mean >= 165.0 and uniform_bg >= 0.50)
+            # 3. Fundo preto ou escuro dominante com logo centralizado
+            or (med_mean <= 45.0 and uniform_bg >= 0.55 and med_edge <= 0.06)
+        )
+    )
     is_presentation_slide = (
-        (text_score >= 0.40 and med_rows >= 0.20 and med_cols >= 0.35)
-        or (data_score >= 0.60 and med_edge >= 0.14)
-        or (med_stdev >= 75.0 and med_edge >= 0.12 and (med_rows >= 0.20 or med_cols >= 0.35))
+        is_corporate_logo_or_plate
+        or (is_static_content and not is_historical and (
+            (text_score >= 0.28 and (med_rows >= 0.12 or med_cols >= 0.18))
+            or (data_score >= 0.35)
+            or (med_stdev >= 40.0 and med_edge >= 0.05 and (med_rows >= 0.12 or med_cols >= 0.18))
+            or (uniform_bg >= 0.35 and med_edge >= 0.04)
+            or (text_lines >= 2 and uniform_bg >= 0.45)
+            or (text_lines >= 3)
+        ))
+        or (uniform_bg >= 0.45 and med_edge >= 0.05 and med_diff <= 3.0)
+        or (text_lines >= 4 and med_diff <= 3.5)
     )
     is_webcam_pip = bool(
         (yunet_face_ratio > 0.0 and (tr_edges >= 70 or tl_edges >= 70))
@@ -7681,14 +7938,14 @@ def _classify_visual_analysis(
 
     med_black = float(metrics.get("black_ratio") or 0.0)
     is_black_screen = (
-        med_mean <= 6.0
-        or med_black >= 0.88
-        or (med_mean <= VIDEO_BLACK_YAVG_MAX and (med_stdev <= 28.0 or med_edge <= 0.04 or med_black >= 0.75))
+        med_mean <= 14.0
+        or med_black >= 0.50
+        or (med_mean <= 26.0 and (med_stdev <= 38.0 or med_black >= 0.40))
+        or (med_black >= 0.40 and med_mean <= 32.0)
     )
     is_static_black = bool(
-        (not is_image)
-        and med_diff <= 1.5
-        and (med_mean <= 28.0 or med_black >= 0.65 or is_black_screen)
+        (med_diff <= 1.5 or is_image)
+        and (med_mean <= 26.0 or med_black >= 0.45 or is_black_screen)
     )
 
     if is_black_screen or is_static_black:
@@ -7697,6 +7954,13 @@ def _classify_visual_analysis(
             "action": "hard_reject",
             "reason": "tela preta ou video estatico sem conteudo visual",
             "confidence": 1.0,
+        })
+    elif lower_third_news:
+        classified.update({
+            "category": "presenter",
+            "action": "hard_reject",
+            "reason": "apresentador de telejornal / estudio com tarja de noticias",
+            "confidence": 0.98,
         })
     elif image_quality_low:
         classified.update({
@@ -8365,6 +8629,7 @@ def probe_visual_clean_health(
 ) -> dict[str, Any]:
     level = {"balanced": "normal"}.get(level, level)
     level = level if level in {"strict", "normal", "light"} else "normal"
+    is_image = media_kind == "image" or is_image_path(path)
     key = visual_clean_cache_key(path, duration, cwd)
     with VISUAL_CLEAN_CACHE_LOCK:
         cached = VISUAL_CLEAN_CACHE.get(key)
@@ -8459,6 +8724,9 @@ def probe_visual_clean_health(
     med_stdev = _median([float(item["stdev"]) for item in metrics])
     med_mean = _median([float(item["mean"]) for item in metrics])
     med_black = _median([float(item.get("black_ratio", 0.0)) for item in metrics])
+    med_uniform_bg = _median([float(item.get("uniform_bg_ratio") or 0.0) for item in metrics])
+    med_text_lines = int(_median([float(item.get("text_lines") or 0.0) for item in metrics]))
+    med_bottom_band = _median([float(item.get("bottom_band_density") or 0.0) for item in metrics])
     med_span = _median([float(item["vertical_span"]) for item in metrics])
     med_bottom = _median([float(item["bottom_edge_share"]) for item in metrics])
     med_top = _median([float(item.get("top_edge_share") or 0.0) for item in metrics])
@@ -8489,12 +8757,17 @@ def probe_visual_clean_health(
         + max(0.0, 1.0 - med_diff / 22.0) * 0.16
         + min(1.0, column_dominance / 0.35) * 0.22
     ) * (1.18 if lower_third else 1.0) * max(0.58, 1.0 - med_skin * 1.8))
+    if med_text_lines >= 3:
+        text_score = max(text_score, 0.68)
+    data_feature_eligible = bool(is_image or med_diff <= 2.5 or med_text_lines >= 3 or (med_uniform_bg >= 0.45 and med_edge >= 0.08))
     data_score = min(1.0, (
         min(1.0, (med_rows * med_cols) / 0.16) * 0.35
         + min(1.0, med_cells / 0.22) * 0.25
         + med_persistence * 0.25
         + max(0.0, 1.0 - med_diff / 24.0) * 0.15
-    )) if (med_rows >= 0.28 and med_cols >= 0.32 and med_cells >= 0.16) else 0.0
+    )) if (data_feature_eligible and med_rows >= 0.28 and med_cols >= 0.32 and med_cells >= 0.16) else 0.0
+    if med_uniform_bg >= 0.45 and med_edge >= 0.08:
+        data_score = max(data_score, 0.65)
     presenter_score = min(1.0, (
         min(1.0, med_head_skin / 0.11) * 0.34
         + min(1.0, med_torso_skin / 0.13) * 0.19
@@ -8533,12 +8806,13 @@ def probe_visual_clean_health(
             + min(1.0, column_dominance / 0.32) * 0.23
             + max(0.0, 1.0 - local_motion / 28.0) * 0.12
         ) * max(0.62, 1.0 - skin * 1.4))
+        frame_eligible = bool(is_image or local_motion <= 2.5 or (rows >= 0.45 and cols >= 0.45 and edge >= 0.14 and local_motion <= 3.5))
         frame_data = min(1.0, (
             min(1.0, (rows * cols) / 0.16) * 0.35
             + min(1.0, cells / 0.22) * 0.25
             + min(1.0, edge / 0.12) * 0.15
             + max(0.0, 1.0 - local_motion / 24.0) * 0.25
-        )) if (rows >= 0.28 and cols >= 0.32 and cells >= 0.16) else 0.0
+        )) if (frame_eligible and rows >= 0.28 and cols >= 0.32 and cells >= 0.16) else 0.0
         frame_presenter = min(1.0, (
             min(1.0, head / 0.105) * 0.34
             + min(1.0, torso / 0.14) * 0.18
@@ -8646,6 +8920,9 @@ def probe_visual_clean_health(
         "mean": round(med_mean, 2),
         "stdev": round(med_stdev, 2),
         "black_ratio": round(med_black, 4),
+        "uniform_bg_ratio": round(med_uniform_bg, 4),
+        "text_lines": med_text_lines,
+        "bottom_band_density": round(med_bottom_band, 4),
         "frame_diff": round(med_diff, 2),
         "edge_persistence": round(med_persistence, 3),
         "vertical_span": round(med_span, 3),
@@ -8856,15 +9133,23 @@ def calculate_video_delogo_boxes(
     """Calcula caixas (x, y, w, h) alinhadas para o filtro delogo do FFmpeg."""
     if not corner_info or not corner_info.get("has_watermark") or src_w <= 0 or src_h <= 0:
         return []
+    # Delogo deve ser estritamente restrito a marcas d'água de alta persistência temporal (>= 0.85)
+    # para NUNCA aplicar delogo sobre veículos móveis (caminhões, carros) ou objetos que apenas cruzam o canto da tela.
+    worst_persistence = float(corner_info.get("worst_persistence") or 0.0)
+    persistences = corner_info.get("corner_persistences") if isinstance(corner_info.get("corner_persistences"), dict) else {}
+
     corners = list(corner_info.get("detected_corners") or [])
     if not corners and corner_info.get("worst_corner"):
         corners = [corner_info["worst_corner"]]
     boxes: list[tuple[int, int, int, int]] = []
-    box_w = max(40, min(src_w - 4, int(src_w * 0.22)))
-    box_h = max(24, min(src_h - 4, int(src_h * 0.15)))
-    margin_x = max(4, int(src_w * 0.015))
-    margin_y = max(4, int(src_h * 0.015))
+    box_w = max(32, min(int(src_w * 0.16), 180))
+    box_h = max(20, min(int(src_h * 0.10), 100))
+    margin_x = max(4, int(src_w * 0.012))
+    margin_y = max(4, int(src_h * 0.012))
     for c in corners:
+        pers = float(persistences.get(c, worst_persistence) or 0.0)
+        if pers < 0.85:
+            continue
         if c == "top_left":
             x, y = margin_x, margin_y
         elif c == "top_right":
@@ -9328,7 +9613,7 @@ def apply_visual_clean_filter(
 
     if len(tasks) > 1:
         logical_cpus = max(2, int(os.cpu_count() or 4))
-        max_workers = min(6, logical_cpus)
+        max_workers = min(4, logical_cpus)
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -9491,15 +9776,11 @@ def apply_visual_clean_filter(
         elif action == "soft_suspect":
             if category in {"presenter_suspect", "static_center_suspect", "presenter", "suspect"}:
                 summary["presenter_suspects"] += 1
-            if is_opening or priority == "max":
-                fallback_pairs.append((source, duration))
-                summary["soft_demoted"] += 1
-                item["decision"] = "fallback_only"
-            else:
-                clean_pairs.append((source, duration))
-                accepted_clean_duration += duration
-                summary["kept_late_suspects"] += 1
-                item["decision"] = "kept_late"
+            # Carrasco Visual: midias suspeitas NUNCA entram na timeline limpa.
+            # Sao rebaixadas exclusivamente para fallback de emergencia se faltar midia.
+            fallback_pairs.append((source, duration))
+            summary["soft_demoted"] += 1
+            item["decision"] = "fallback_only"
             summary["items"].append(item)
         else:
             trim_info = analysis.get("clean_trim") or (analysis.get("metrics") or {}).get("clean_trim") or {}
@@ -9958,18 +10239,7 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
     ) -> None:
         impact_time = float(impact if impact is not None else start)
         end_time = float(end if end is not None else max(impact_time + 0.32, start + 0.32))
-        sound_lead = {
-            "subtitle_enter": 0.03,
-            "text_highlight": 0.02,
-            "arrow_draw": 0.015,
-            "transition_cut": 0.02,
-            "clip_cut": 0.02,
-            "image_enter": 0.03,
-            "image_motion_peak": 0.04,
-            "fx_hit": 0.0,
-            "cta_enter": 0.0,
-            "music_rise": 0.0,
-        }.get(event_type, 0.02)
+        sound_lead = 0.0
         event = {
             "type": event_type,
             "group": group,
@@ -10031,8 +10301,8 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
         if graphic_type:
             add_event(
                 graphic_type,
-                start=start + 0.04,
-                impact=impact + 0.08,
+                start=start,
+                impact=impact,
                 end=min(end, impact + 0.88),
                 group="motion_graphic",
                 reason="seta_ou_destaque_por_frase",
@@ -10215,8 +10485,8 @@ def job_last_render_summary(job: Job) -> dict[str, Any]:
         "renderPriority": render_priority(job),
         "visualClean": compact_visual_clean_summary(visual),
         "visualCleanDetails": {
-            "items": list(visual.get("items") or [])[:160],
-            "fallbackUsedItems": list(visual.get("fallback_used_items") or [])[:80],
+            "items": compact_visual_clean_items(visual.get("items")),
+            "fallbackUsedItems": compact_visual_clean_items(visual.get("fallback_used_items")),
         },
         "performance": dict(job.performance_breakdown),
         "subtitleTiming": {
@@ -10230,7 +10500,7 @@ def job_last_render_summary(job: Job) -> dict[str, Any]:
         "subtitles": dict(job.subtitle_summary),
         "intro": dict(job.intro_summary),
         "recovery": dict(job.recovery_summary),
-        "director": dict(job.director_summary),
+        "director": compact_director_summary(job.director_summary),
         "energy": dict(job.energy_summary),
         "confidence": dict(job.confidence_summary),
         "continuity": dict(job.continuity_summary),
@@ -10246,9 +10516,9 @@ def job_last_render_summary(job: Job) -> dict[str, Any]:
             "version": event_timeline.get("eventTimelineVersion") or "2.0",
             "summary": event_timeline.get("summary") or {},
         },
-        "renderGraph": dict(job.render_graph_run),
+        "renderGraph": compact_render_graph_run(job.render_graph_run),
         "renderDecisions": dict(job.render_decisions),
-        "editorialIntelligence": dict(job.editorial_intelligence_plan),
+        "editorialIntelligence": compact_editorial_intelligence_plan(job.editorial_intelligence_plan),
         "performanceHistory": performance_history_for_project(project_id),
         "errorActions": recommended_error_actions(job.error, job) if job.error else [],
         "outputName": Path(job.output).name if job.output else None,
@@ -10266,10 +10536,10 @@ def persist_job_summary_to_queue(job: Job) -> None:
         if not project:
             return
         project["lastRenderSummary"] = job_last_render_summary(job)
-        project["directorState"] = dict(job.director_summary) if job.director_summary else project.get("directorState")
+        project["directorState"] = compact_director_summary(job.director_summary) if job.director_summary else project.get("directorState")
         project["confidenceSummary"] = dict(job.confidence_summary) if job.confidence_summary else None
         project["audioMasterSummary"] = dict(job.audio_master_summary) if job.audio_master_summary else None
-        project["renderGraphRun"] = dict(job.render_graph_run) if job.render_graph_run else None
+        project["renderGraphRun"] = compact_render_graph_run(job.render_graph_run) if job.render_graph_run else None
         if job.status in {"done", "cancelled", "error"}:
             project["status"] = (
                 "recovered"
@@ -10345,14 +10615,13 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
         _append_log(job, f"Narracao em container de video: {len(video_container_audio)} arquivo(s) MP4/MOV usados somente como audio (-vn).")
     total = sum(durations)
     audio_filter = voice_processing_filter(job.options)
-    job.preflight_summary["voice_normalize"] = bool(job.options.get("voiceNormalize", True))
-    out = Path("glide_audio_concat.wav")
+    out = work / "glide_audio_concat.wav"
     if len(audio_files) == 1:
         job.message = "Preparando áudio"
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
             "-i", str(audio_files[0]),
-            "-vn", "-af", audio_filter, "-ac", "2", "-ar", "48000", str(out),
+            "-vn", "-af", audio_filter, "-ac", "2", "-ar", "48000", out.name,
         ]
         run_cmd(job, cmd, total_duration=durations[0] or None, base=10, span=5, cwd=work)
     else:
@@ -10369,7 +10638,7 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
         filters.append(f"[acat]{audio_filter}[aout]")
         script = work / "audio_filter_complex.txt"
         script.write_text(";".join(filters), encoding="utf-8")
-        cmd += ["-filter_complex_script", script.name, "-map", "[aout]", "-ac", "2", "-ar", "48000", str(out)]
+        cmd += ["-filter_complex_script", script.name, "-map", "[aout]", "-ac", "2", "-ar", "48000", out.name]
         run_cmd(job, cmd, total_duration=total or None, base=10, span=5, cwd=work)
     return out, total
 
@@ -10381,6 +10650,18 @@ def optimize_audio_cadence_and_silence(job: Job, audio_in: Path, audio_total: fl
     """
     actual_path = audio_in if audio_in.is_absolute() else work / audio_in
     if audio_total < 5.0 or not actual_path.exists():
+        return audio_in, audio_total
+
+    has_subtitles = bool(
+        getattr(job, "subtitles", None)
+        or getattr(job, "subtitle_cues", None)
+        or job.options.get("subtitles")
+        or (hasattr(job, "upload_paths") and any(str(p).lower().endswith((".srt", ".ass")) for p in job.upload_paths.values()))
+    )
+    if has_subtitles:
+        # Quando há arquivo de legendas (SRT/ASS), os timestamps de narração e texto são sagrados
+        # e não podem sofrer silenceremove destrutivo, preservando com precisão a sincronia texto/narração/SFX.
+        job.cadence_summary = {"enabled": False, "action": "bypassed_to_protect_subtitle_sync", "saved_seconds": 0.0}
         return audio_in, audio_total
 
     out_trimmed = work / f"{actual_path.stem}_cadence_optimized.wav"
@@ -10527,7 +10808,7 @@ def build_dynamic_pause_plan(job: Job, cues: list[SubtitleCue], audio_total: flo
 def insert_dynamic_pauses(job: Job, audio_file: Path, audio_total: float, pauses: list[dict[str, Any]], work: Path) -> tuple[Path, float]:
     if not pauses:
         return audio_file, audio_total
-    out = Path("glide_voiceover_dynamic_pauses.wav")
+    out = work / "glide_voiceover_dynamic_pauses.wav"
     filters: list[str] = []
     labels: list[str] = []
     cursor = 0.0
@@ -10564,7 +10845,7 @@ def insert_dynamic_pauses(job: Job, audio_file: Path, audio_total: float, pauses
     set_stage(job, "audio", "Inserindo pausas dinâmicas", "Criando micro-respiros narrativos em pontos fortes")
     target = audio_total + sum(float(item.get("duration") or 0.0) for item in pauses)
     run_cmd(job, cmd, total_duration=target or None, base=12, span=2, cwd=work, quiet_success=True)
-    actual = safe_probe_duration(work / out) or target
+    actual = safe_probe_duration(out) or target
     job.options["_timing_adjustments"] = pauses
     job.dynamic_pause_summary["actual_duration"] = round(actual, 3)
     _append_log(job, f"Pausas dinâmicas: {len(pauses)} pausa(s), +{actual - audio_total:.2f}s, intensidade={job.dynamic_pause_summary.get('intensity')}.")
@@ -11024,13 +11305,13 @@ def make_background_music(
         _append_log(job, "Musica de fundo ignorada: nenhum segmento foi gerado.")
         return None
 
-    out = Path("glide_background_music.wav")
+    out = work / "glide_background_music.wav"
     if len(segment_paths) == 1:
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
             "-i", str(segment_paths[0]),
             "-vn", "-t", f"{audio_total:.4f}", "-ac", "2", "-ar", "48000",
-            str(out),
+            out.name,
         ]
         run_cmd(job, cmd, cwd=work, quiet_success=True)
     else:
@@ -11045,10 +11326,10 @@ def make_background_music(
         filters.append("".join(labels) + f"concat=n={len(segment_paths)}:v=0:a=1[music]")
         script = work / "background_music_filter.txt"
         script.write_text(";".join(filters), encoding="utf-8")
-        cmd += ["-filter_complex_script", script.name, "-map", "[music]", "-t", f"{audio_total:.4f}", "-ac", "2", "-ar", "48000", str(out)]
+        cmd += ["-filter_complex_script", script.name, "-map", "[music]", "-t", f"{audio_total:.4f}", "-ac", "2", "-ar", "48000", out.name]
         run_cmd(job, cmd, cwd=work, quiet_success=True)
 
-    final_duration = safe_probe_duration(work / out)
+    final_duration = safe_probe_duration(out)
     job.background_music_summary["actual_duration"] = round(final_duration, 3)
     _append_log(job, f"Musica de fundo pronta: duracao={final_duration:.2f}s, base={volume_db:.0f} dB, pausas={render_volume_db:.0f} dB.")
     return out
@@ -11057,7 +11338,7 @@ def make_background_music(
 def delay_voiceover_for_intro(job: Job, voiceover_file: Path, timeline_total: float, work: Path, intro_seconds: float) -> Path:
     if intro_seconds <= 0:
         return voiceover_file
-    out = Path("glide_voiceover_delayed.wav")
+    out = work / "glide_voiceover_delayed.wav"
     delay_ms = max(0, int(round(intro_seconds * 1000)))
     fade = clamp_float(job.options.get("voiceIntroFade"), 0.45, 0.12, 1.2)
     af = (
@@ -11072,7 +11353,7 @@ def delay_voiceover_for_intro(job: Job, voiceover_file: Path, timeline_total: fl
         "-vn", "-af", af,
         "-t", f"{timeline_total:.4f}",
         "-ac", "2", "-ar", "48000",
-        str(out),
+        out.name,
     ]
     set_stage(job, "audio", "Criando abertura", "Atrasando narracao para intro Cinematic")
     run_cmd(job, cmd, total_duration=timeline_total or None, base=12, span=2, cwd=work, quiet_success=True)
@@ -11090,7 +11371,7 @@ def mix_voiceover_with_background(
     if not background_file:
         job.ducking_summary = {"enabled": False, "reason": "sem musica de fundo"}
         return voiceover_file
-    out = Path("glide_audio_final_mix.wav")
+    out = work / "glide_audio_final_mix.wav"
     ducking = True
     adaptive = True
     base_db = background_volume_db(job.options)
@@ -11117,32 +11398,35 @@ def mix_voiceover_with_background(
         )
         if ducking:
             mix_filter = (
-                "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-                + music_shape +
-                "[music_raw2][voice]sidechaincompress=threshold=0.07:ratio=2.2:attack=35:release=450:makeup=1.0,alimiter=limit=0.94[music];"
-                "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+                f"{music_shape}"
+                f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[voice][vsc];"
+                f"[music_raw2][vsc]sidechaincompress=threshold=0.045:ratio=9:attack=45:release=780:makeup=1[ducked];"
+                f"[ducked]volume={base_db:.1f}dB[bg];"
+                f"[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
             )
         else:
             mix_filter = (
-                "[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-                + music_shape +
-                "[voice][music_raw2]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+                f"{music_shape}"
+                f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
+                f"[music_raw2]volume={base_db:.1f}dB[bg];"
+                f"[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
             )
-        mix_message = "Mixando intro Cinematic: música abre e baixa suavemente com curva de 3 atos"
-    elif ducking:
-        mix_filter = (
-            f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB{act_curve}[music_raw];"
-            f"[music_raw][voice]sidechaincompress=threshold=0.07:ratio=2.2:attack=35:release=450:makeup=1.0,alimiter=limit=0.94[music];"
-            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-        )
-        mix_message = "Mixando narração com música dinâmica, curva de 3 atos e respiro suave em pausas"
+        mix_message = "Mixando narração com música de fundo, abertura e curva de 3 atos"
     else:
-        mix_filter = (
-            f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
-            f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,volume={base_db:.1f}dB{act_curve}[music];"
-            f"[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
-        )
+        if ducking:
+            mix_filter = (
+                f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,asplit=2[voice][vsc];"
+                f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo{act_curve}[music_act];"
+                f"[music_act][vsc]sidechaincompress=threshold=0.045:ratio=9:attack=45:release=780:makeup=1[ducked];"
+                f"[ducked]volume={base_db:.1f}dB[bg];"
+                f"[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            )
+        else:
+            mix_filter = (
+                f"[0:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
+                f"[1:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo{act_curve},volume={base_db:.1f}dB[bg];"
+                f"[voice][bg]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[aout]"
+            )
         mix_message = "Mixando narração com música de fundo e curva de 3 atos"
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
@@ -11153,7 +11437,7 @@ def mix_voiceover_with_background(
         "-map", "[aout]",
         "-t", f"{audio_total:.4f}",
         "-ac", "2", "-ar", "48000",
-        str(out),
+        out.name,
     ]
     set_stage(job, "audio", "Mixando narração + música", mix_message)
     run_cmd(job, cmd, total_duration=audio_total or None, base=12, span=3, cwd=work, quiet_success=True)
@@ -11720,20 +12004,17 @@ def subtitle_style_from_options(options: dict[str, Any]) -> dict[str, Any]:
         "verdana": "Verdana",
     }
     presets = {
-        "bold_white": {"font": "Arial Black", "size": 48, "primary": "#FFFFFF", "outline": "#0A0A0A", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 1.8, "shadow": 1.2},
-        "bold_yellow": {"font": "Arial Black", "size": 48, "primary": "#FFE600", "outline": "#0C0C0C", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 1.8, "shadow": 1.2},
-        "dark_box": {"font": "Segoe UI Semibold", "size": 42, "primary": "#FFFFFF", "outline": "#000000", "back": "#121519", "bold": True, "box": True, "animation": "slide", "outline_size": 0.8, "shadow": 0.0},
-        "cinema_white": {"font": "Georgia", "size": 44, "primary": "#FBF6EE", "outline": "#080808", "back": "#000000", "bold": False, "box": False, "animation": "cinematic", "outline_size": 1.4, "shadow": 1.2},
-        "green_neon": {"font": "Arial Black", "size": 46, "primary": "#65FF90", "outline": "#031E0C", "back": "#000000", "bold": True, "box": False, "animation": "pulse", "outline_size": 1.8, "shadow": 1.0},
-        "minimal": {"font": "Segoe UI Semibold", "size": 40, "primary": "#F5F5F7", "outline": "#18181A", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 1.0, "shadow": 0.6},
-        "impact_gold": {"font": "Impact", "size": 50, "primary": "#FFDE59", "outline": "#140F03", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 2.2, "shadow": 1.2},
-        "documentary": {"font": "Bahnschrift", "size": 43, "primary": "#F0F4F2", "outline": "#09120E", "back": "#000000", "bold": True, "box": False, "animation": "cinematic", "outline_size": 1.6, "shadow": 1.0},
-        "blue_glow": {"font": "Arial Black", "size": 46, "primary": "#7FE5FF", "outline": "#041C2C", "back": "#000000", "bold": True, "box": False, "animation": "kinetic", "outline_size": 2.0, "shadow": 1.2},
-        "red_punch": {"font": "Arial Black", "size": 48, "primary": "#FF594D", "outline": "#180403", "back": "#000000", "bold": True, "box": False, "animation": "spring", "outline_size": 2.0, "shadow": 1.0},
-        "soft_pink": {"font": "Trebuchet MS", "size": 44, "primary": "#FFD4EB", "outline": "#220C19", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 1.4, "shadow": 0.8},
-        "clean_box": {"font": "Verdana", "size": 40, "primary": "#FFFFFF", "outline": "#000000", "back": "#0A0D12", "bold": True, "box": True, "animation": "fade", "outline_size": 0.6, "shadow": 0.0},
+        "documentary": {"font": "Bahnschrift", "size": 32, "primary": "#FFFFFF", "outline": "#0B1118", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 0.8, "shadow": 1.0},
+        "bold_white": {"font": "Bahnschrift", "size": 32, "primary": "#FFFFFF", "outline": "#0B1118", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 0.8, "shadow": 1.0},
+        "editorial_card": {"font": "Segoe UI Semibold", "size": 30, "primary": "#FFFFFF", "outline": "#000000", "back": "#0B1118", "bold": True, "box": True, "animation": "fade", "outline_size": 0.6, "shadow": 0.0},
+        "dark_box": {"font": "Segoe UI Semibold", "size": 30, "primary": "#FFFFFF", "outline": "#000000", "back": "#0B1118", "bold": True, "box": True, "animation": "fade", "outline_size": 0.6, "shadow": 0.0},
+        "cinema_minimal": {"font": "Segoe UI", "size": 30, "primary": "#F5F5F7", "outline": "#0A0A0A", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 0.6, "shadow": 0.8},
+        "cinema_white": {"font": "Georgia", "size": 32, "primary": "#FBF6EE", "outline": "#080808", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 0.8, "shadow": 0.8},
+        "minimal": {"font": "Segoe UI", "size": 30, "primary": "#F5F5F7", "outline": "#18181A", "back": "#000000", "bold": False, "box": False, "animation": "fade", "outline_size": 0.6, "shadow": 0.6},
+        "journalistic": {"font": "Arial", "size": 32, "primary": "#FFFFFF", "outline": "#101418", "back": "#000000", "bold": True, "box": False, "animation": "fade", "outline_size": 0.8, "shadow": 1.0},
+        "clean_box": {"font": "Segoe UI Semibold", "size": 30, "primary": "#FFFFFF", "outline": "#000000", "back": "#0A0D12", "bold": True, "box": True, "animation": "fade", "outline_size": 0.6, "shadow": 0.0},
     }
-    base = presets.get(preset, presets["bold_white"]).copy()
+    base = presets.get(preset, presets["documentary"]).copy()
     base["preset"] = preset
     font_key = str(style.get("fontPreset") or "").strip()
     if font_key in font_presets:
@@ -11745,25 +12026,25 @@ def subtitle_style_from_options(options: dict[str, Any]) -> dict[str, Any]:
             base[key] = str(style[key])
     if style.get("size"):
         try:
-            base["size"] = max(28, min(120, int(style["size"])))
+            base["size"] = max(24, min(64, int(style["size"])))
         except Exception:
             pass
     try:
-        base["position"] = max(8, min(34, int(style.get("position", 16))))
+        base["position"] = max(8, min(34, int(style.get("position", 14))))
     except Exception:
-        base["position"] = 16
+        base["position"] = 14
     if "box" in style:
         base["box"] = bool(style["box"])
-    animation = str(style.get("animation") or base.get("animation") or "mixed")
-    if animation not in SUBTITLE_ANIMATIONS:
-        animation = "mixed"
+    animation = str(style.get("animation") or base.get("animation") or "fade")
+    if animation not in SUBTITLE_ANIMATIONS or animation in {"spring", "pop", "pulse", "shake", "glitch"}:
+        animation = "fade"
     base["animation"] = animation
     try:
-        base["outline_size"] = max(0.0, min(5.0, float(style.get("outlineSize", base.get("outline_size", 2.0)))))
+        base["outline_size"] = max(0.0, min(3.0, float(style.get("outlineSize", base.get("outline_size", 0.8)))))
     except Exception:
-        base["outline_size"] = 2.0
+        base["outline_size"] = 0.8
     try:
-        base["shadow"] = max(0.0, min(3.0, float(style.get("shadow", base.get("shadow", 1.0)))))
+        base["shadow"] = max(0.0, min(2.0, float(style.get("shadow", base.get("shadow", 1.0)))))
     except Exception:
         base["shadow"] = 1.0
     return base
@@ -11864,127 +12145,72 @@ def subtitle_animation_tags(
 ) -> list[str]:
     intro_map = {
         "fade": ["fade", "blur_rise"],
-        "pop": ["spring", "pop_soft"],
-        "spring": ["spring", "pop_soft"],
-        "kinetic": ["kinetic", "slide_left", "slide_right"],
-        "blur_rise": ["blur_rise", "rise"],
-        "slide": ["rise", "slide_left", "slide_right"],
-        "zoom": ["zoom_in", "zoom_soft"],
-        "cinematic": ["blur_rise", "cinema_drop"],
-        "pulse": ["pulse_in", "spring"],
-        "glitch": ["glitch"],
-        "typewriter": ["typewriter"],
-        "shake": ["shake"],
+        "pop": ["fade", "blur_rise"],
+        "spring": ["fade", "blur_rise"],
+        "kinetic": ["fade", "blur_rise"],
+        "blur_rise": ["blur_rise", "fade"],
+        "slide": ["blur_rise", "fade"],
+        "zoom": ["fade", "blur_rise"],
+        "cinematic": ["blur_rise", "fade"],
+        "pulse": ["fade", "blur_rise"],
+        "glitch": ["fade"],
+        "typewriter": ["fade", "blur_rise"],
+        "shake": ["fade"],
         "none": ["none"],
-        "random_text": ["spring", "blur_rise", "kinetic", "zoom_in", "slide_left", "slide_right", "cinema_drop", "glitch"],
-        "documentary": ["blur_rise", "cinema_drop", "typewriter"],
-        "archive": ["typewriter", "slide_left", "blur_rise"],
-        "digital": ["glitch", "typewriter", "kinetic"],
-        "stamp": ["spring", "shake"],
-        "money": ["spring", "kinetic"],
-        "warning": ["shake", "spring"],
-        "industrial": ["shake", "cinema_drop"],
-        "luxury": ["blur_rise", "fade", "cinema_drop"],
-        "mixed": ["spring", "blur_rise", "kinetic", "zoom_soft", "slide_left", "slide_right", "cinema_drop"],
+        "random_text": ["fade", "blur_rise"],
+        "documentary": ["blur_rise", "fade"],
+        "archive": ["fade", "blur_rise"],
+        "digital": ["fade", "blur_rise"],
+        "stamp": ["fade", "blur_rise"],
+        "money": ["fade", "blur_rise"],
+        "warning": ["fade", "blur_rise"],
+        "industrial": ["fade", "blur_rise"],
+        "luxury": ["blur_rise", "fade"],
+        "mixed": ["fade", "blur_rise"],
     }
     outro_map = {
         "fade": ["fade"],
-        "pop": ["shrink", "glow_fade"],
-        "spring": ["shrink", "soft_blur"],
-        "kinetic": ["quick_dim", "float_fade"],
-        "blur_rise": ["soft_blur", "float_fade"],
-        "slide": ["float_fade", "shrink"],
-        "zoom": ["shrink", "fade"],
-        "cinematic": ["soft_blur", "float_fade"],
-        "pulse": ["glow_fade", "shrink"],
-        "glitch": ["quick_dim"],
+        "pop": ["fade"],
+        "spring": ["fade"],
+        "kinetic": ["fade"],
+        "blur_rise": ["fade"],
+        "slide": ["fade"],
+        "zoom": ["fade"],
+        "cinematic": ["fade"],
+        "pulse": ["fade"],
+        "glitch": ["fade"],
         "typewriter": ["fade"],
-        "shake": ["shrink"],
+        "shake": ["fade"],
         "none": ["none"],
-        "random_text": ["fade", "float_fade", "shrink", "soft_blur", "glow_fade", "quick_dim"],
-        "documentary": ["soft_blur", "float_fade"],
-        "archive": ["float_fade", "quick_dim"],
-        "digital": ["quick_dim", "fade"],
-        "stamp": ["shrink", "quick_dim"],
-        "money": ["glow_fade", "fade"],
-        "warning": ["quick_dim", "shrink"],
-        "industrial": ["shrink", "quick_dim"],
-        "luxury": ["soft_blur", "glow_fade"],
-        "mixed": ["fade", "float_fade", "shrink", "soft_blur", "glow_fade", "quick_dim"],
+        "random_text": ["fade"],
+        "documentary": ["fade"],
+        "archive": ["fade"],
+        "digital": ["fade"],
+        "stamp": ["fade"],
+        "money": ["fade"],
+        "warning": ["fade"],
+        "industrial": ["fade"],
+        "luxury": ["fade"],
+        "mixed": ["fade"],
     }
     intros = intro_map.get(animation, intro_map["mixed"])
     outros = outro_map.get(animation, outro_map["mixed"])
     intro = forced_intro or intros[stable_index(f"{job_id}:intro:{idx}:{cue.text}", len(intros))]
     outro = forced_outro or outros[stable_index(f"{job_id}:outro:{idx}:{cue.text}", len(outros))]
     tags = ["\\an2"]
-    fade_in = 140
-    fade_out = 220
+    fade_in = 130
+    fade_out = 170
 
     if intro == "none":
         tags.append(f"\\pos({x},{y})")
-    elif intro in {"spring", "pop"}:
-        tags.append(f"\\pos({x},{y})")
-        # Efeito elastico moderno em 3 estagios (squash & stretch elastico)
-        tags.extend([
-            "\\fscx90\\fscy114\\alpha&H25&",
-            "\\t(0,130,\\fscx108\\fscy94\\alpha&H00&)",
-            "\\t(130,240,\\fscx98\\fscy102)",
-            "\\t(240,320,\\fscx100\\fscy100)",
-        ])
-    elif intro == "pop_soft":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx94\\fscy94\\alpha&H20&", "\\t(0,220,\\fscx104\\fscy104\\alpha&H00&)", "\\t(220,320,\\fscx100\\fscy100)"])
     elif intro in {"blur_rise", "rise"}:
-        # Subida suave com blur optico estilo documentario
-        tags.append(f"\\move({x},{y + 12},{x},{y},0,280)")
-        tags.extend(["\\blur3.5\\alpha&H35&", "\\t(0,240,\\blur0\\alpha&H00&)"])
-    elif intro == "kinetic":
-        tags.append(f"\\move({x - 35},{y},{x},{y},0,160)")
-        tags.extend(["\\alpha&H40&", "\\t(0,120,\\alpha&H00&)"])
-    elif intro == "slide_left":
-        tags.append(f"\\move({x - 45},{y},{x},{y},0,240)")
-        tags.extend(["\\alpha&H30&", "\\t(0,180,\\alpha&H00&)"])
-    elif intro == "slide_right":
-        tags.append(f"\\move({x + 45},{y},{x},{y},0,240)")
-        tags.extend(["\\alpha&H30&", "\\t(0,180,\\alpha&H00&)"])
-    elif intro == "zoom_in":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx108\\fscy108\\blur2\\alpha&H35&", "\\t(0,280,\\fscx100\\fscy100\\blur0\\alpha&H00&)"])
-    elif intro == "zoom_soft":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx104\\fscy104\\alpha&H20&", "\\t(0,260,\\fscx100\\fscy100\\alpha&H00&)"])
-    elif intro == "cinema_drop":
-        tags.append(f"\\move({x},{y - 12},{x},{y},0,280)")
-        tags.extend(["\\blur2.5\\alpha&H30&", "\\t(0,240,\\blur0\\alpha&H00&)"])
-    elif intro == "pulse_in":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend([f"\\bord{outline_size + 0.8:.1f}", f"\\t(0,240,\\bord{outline_size:.1f})"])
-    elif intro == "glitch":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\alpha&H45&", "\\t(0,60,\\alpha&H00&)", "\\t(60,120,\\fscx104\\fscy96)", "\\t(120,180,\\fscx98\\fscy102)", "\\t(180,260,\\fscx100\\fscy100)"])
-    elif intro == "typewriter":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\alpha&H25&", "\\t(0,240,\\alpha&H00&)"])
-    elif intro == "shake":
-        tags.append(f"\\pos({x},{y})")
-        tags.extend(["\\fscx103\\fscy103", "\\t(0,60,\\fscx97\\fscy103)", "\\t(60,120,\\fscx103\\fscy97)", "\\t(120,220,\\fscx100\\fscy100)"])
+        tags.append(f"\\move({x},{y + 6},{x},{y},0,180)")
     else:
         tags.append(f"\\pos({x},{y})")
 
     if intro != "none" and outro != "none":
         tags.append(f"\\fad({fade_in},{fade_out})")
 
-    out_start = max(0, duration_ms - 420)
-    if outro == "float_fade":
-        tags.append(f"\\t({out_start},{duration_ms},\\alpha&H85&)")
-    elif outro == "shrink":
-        tags.append(f"\\t({out_start},{duration_ms},\\fscx95\\fscy95\\alpha&H70&)")
-    elif outro == "soft_blur":
-        tags.append(f"\\t({out_start},{duration_ms},\\blur2.5\\alpha&H80&)")
-    elif outro == "glow_fade":
-        tags.append(f"\\t({out_start},{duration_ms},\\bord{outline_size + 1.2:.1f}\\alpha&H70&)")
-    elif outro == "quick_dim":
-        tags.append(f"\\t({max(0, duration_ms - 220)},{duration_ms},\\alpha&H75&)")
     return tags
 
 
@@ -12078,16 +12304,24 @@ def split_caption_cues(cues: list[SubtitleCue], max_chars: int = 44) -> list[Sub
     return result
 
 
-def build_ass_file(
+def resolve_effective_subtitle_cues(
     job: Job,
-    srt_path: Path,
+    srt_path: Path | str | None,
     total_duration: float,
-    w: int,
-    h: int,
-    work: Path,
-    caption_path: Path | None = None,
-) -> Path | None:
-    original_cues = parse_srt_file(srt_path)
+    caption_path: Path | str | None = None,
+) -> tuple[list[SubtitleCue], dict[str, Any], list[SubtitleCue]]:
+    """
+    Fonte única da verdade (Single Source of Truth) para as legendas do projeto.
+    Garante que a normalização, divisão, quebras de linha única, ajustes de pausas dinâmicas
+    e offset de abertura cinematográfica sejam calculados de forma idêntica e antecipada,
+    tanto para a mixagem de áudio/SFX quanto para a renderização do arquivo ASS.
+    """
+    if not srt_path:
+        return [], {}, []
+    p_srt = Path(str(srt_path))
+    if not p_srt.exists():
+        return [], {}, []
+    original_cues = parse_srt_file(p_srt)
     min_duration = float(job.options.get("subtitleMinDuration") or MIN_SUBTITLE_SECONDS)
     cinematic = intro_mode(job.options) == "cinematic"
     offset = intro_duration(job.options) if cinematic else 0.0
@@ -12095,12 +12329,14 @@ def build_ass_file(
     smart_sample_windows = list(job.options.get("_smart_sample_windows") or [])
     if smart_sample_windows:
         original_cues = remap_cues_for_smart_sample(original_cues, smart_sample_windows)
-        job.subtitle_summary["smart_sample_blocks"] = smart_sample_windows
+        if isinstance(job.subtitle_summary, dict):
+            job.subtitle_summary["smart_sample_blocks"] = smart_sample_windows
     cues, summary = normalize_subtitles(original_cues, narration_duration, min_duration=min_duration)
     if smart_sample_windows:
         summary["smart_sample_blocks"] = smart_sample_windows
         summary["smart_sample_mode"] = "blocos_narrativos"
-    caption_original = parse_srt_file(caption_path) if caption_path and caption_path.exists() else []
+    p_caption = Path(str(caption_path)) if caption_path else None
+    caption_original = parse_srt_file(p_caption) if p_caption and p_caption.exists() else []
     caption_cues, caption_summary = normalize_subtitles(caption_original, narration_duration, min_duration=0.45)
     caption_cues = split_caption_cues(caption_cues)
     if cinematic:
@@ -12115,11 +12351,29 @@ def build_ass_file(
         summary["cinematic_offset"] = round(offset, 3)
     job.subtitle_cues = cues
     job.subtitle_summary = summary
+    return cues, summary, caption_cues
+
+
+def build_ass_file(
+    job: Job,
+    srt_path: Path,
+    total_duration: float,
+    w: int,
+    h: int,
+    work: Path,
+    caption_path: Path | None = None,
+) -> Path | None:
+    cues, summary, caption_cues = resolve_effective_subtitle_cues(
+        job, srt_path, total_duration, caption_path=caption_path
+    )
     if not cues:
         _append_log(job, f"Textos ignorados: nenhum cue valido apos limpeza. Resumo={summary}")
         return None
     style = subtitle_style_from_options(job.options)
     caption_style = caption_style_from_options(job.options)
+    cinematic = intro_mode(job.options) == "cinematic"
+    offset = float(summary.get("cinematic_offset") or (intro_duration(job.options) if cinematic else 0.0))
+    caption_summary = dict((job.caption_summary if isinstance(job.caption_summary, dict) else {}) or {})
     summary["preset"] = style.get("preset")
     summary["animation"] = style.get("animation")
     margin_v = max(18, int(h * (style.get("position", 16) / 100)))
@@ -12752,7 +13006,7 @@ def overlay_cta_on_video(
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         *filter_args,
         "-reinit_filter", "0",
-        "-i", str(video_source),
+        "-i", str(video_source.resolve()),
     ]
     is_still = Path(str(cta["video"])).suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"}
     for _ in times:
@@ -12771,12 +13025,12 @@ def overlay_cta_on_video(
         end = start + cta_duration
         if is_still:
             chains.append(
-                f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-1,"
+                f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-2,"
                 f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
             )
         else:
             chains.append(
-                f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-1,"
+                f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-2,"
                 f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
             )
         out_label = f"[vcta{idx}]"
@@ -12793,7 +13047,7 @@ def overlay_cta_on_video(
         "-an",
         *encoder_args,
         "-pix_fmt", "yuv420p",
-        str(out),
+        str(out.resolve()),
     ]
     run_cmd(job, cmd, total_duration=target_duration or None, base=base, span=span, cwd=work, quiet_success=True)
     job.cta_summary.update({
@@ -12952,20 +13206,29 @@ def compose_final_visuals(
     default_out_name = "video_studio_composed.mp4"
     out = work / (out_name or default_out_name)
     logical_cpus = max(2, int(os.cpu_count() or 4))
-    comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
-    comp_filter_threads = max(2, min(8, logical_cpus // 2))
+    hw = hardware_profile()
+    is_laptop = any(
+        any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
+        for g in hw.get("gpus", [])
+    ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+    comp_threads = max(2, min(4 if is_laptop else 8, int(logical_cpus * 0.50)))
+    comp_filter_threads = max(1, min(2 if is_laptop else 4, logical_cpus // 4))
     filter_args = [
         "-threads", str(comp_threads),
         "-filter_threads", str(comp_filter_threads),
         "-filter_complex_threads", str(comp_filter_threads),
     ]
+    hwaccel_args: list[str] = []
+    if (bool(job.options.get("gpu", True)) or hw.get("preferred_gpu")) and not bool(job.options.get("_force_cpu")):
+        hwaccel_args = ["-hwaccel", "auto"]
     cmd: list[str] = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         *filter_args,
         "-fflags", "+genpts",
         "-reinit_filter", "0",
+        *hwaccel_args,
         "-t", f"{target_duration:.4f}",
-        "-i", str(video_source),
+        "-i", str(video_source.resolve()),
     ]
     has_cta = bool(cta and isinstance(cta, dict) and cta.get("video") and times)
     is_still = Path(str(cta["video"])).suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"} if has_cta else False
@@ -12995,12 +13258,12 @@ def compose_final_visuals(
             end = min(target_duration, start + cta_duration)
             if is_still:
                 chains.append(
-                    f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-1,"
+                    f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-2,"
                     f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
                 )
             else:
                 chains.append(
-                    f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-1,"
+                    f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-2,"
                     f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{idx}]"
                 )
             out_label = f"[vcta{idx}]"
@@ -13031,7 +13294,7 @@ def compose_final_visuals(
         "-fps_mode", "cfr",
         "-avoid_negative_ts", "make_zero",
         "-pix_fmt", "yuv420p",
-        str(out),
+        str(out.resolve()),
     ]
     has_comp = getattr(job, "has_visual_composition", True)
     comp_base = base if base is not None else (65.0 if has_comp else 95.0)
@@ -13130,7 +13393,12 @@ def compose_visual_chunks_parallel(
         return compose_final_visuals(job, video_concat, cta, cta_times, subtitle_ass, work, target_duration)
 
     logical_cpus = max(2, int(os.cpu_count() or 4))
-    max_workers = max(1, min(4, logical_cpus // 2, len(chunks)))
+    hw = hardware_profile()
+    is_laptop = any(
+        any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
+        for g in hw.get("gpus", [])
+    ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+    max_workers = max(1, min(2 if is_laptop else 3, len(chunks)))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
 
     comp_base = 65.0
@@ -13307,7 +13575,7 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
     cmd = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         "-stream_loop", str(loop_count),
-        "-i", str(video_source),
+        "-i", str(video_source.resolve()),
         "-vf", f"fps=30,settb=AVTB,trim=duration={target_duration:.4f},setpts=PTS-STARTPTS",
         "-an",
         *encoder_args,
@@ -13315,7 +13583,7 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
         "-fps_mode", "cfr",
         "-avoid_negative_ts", "make_zero",
         "-pix_fmt", "yuv420p",
-        str(repaired),
+        str(repaired.resolve()),
     ]
     run_cmd(
         job,
@@ -13404,7 +13672,7 @@ def mix_cta_audio(job: Job, base_audio: Path, cta: dict[str, Any], times: list[f
     audio_source = cta.get("audio_source")
     if not audio_source or not cta.get("has_audio"):
         return base_audio
-    out = Path("glide_audio_with_cta.wav")
+    out = work / "glide_audio_with_cta.wav"
     cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1", "-i", str(base_audio)]
     for _ in times:
         cmd += ["-i", str(audio_source)]
@@ -13424,7 +13692,7 @@ def mix_cta_audio(job: Job, base_audio: Path, cta: dict[str, Any], times: list[f
         "-map", "[aout]",
         "-t", f"{audio_total:.4f}",
         "-ac", "2", "-ar", "48000",
-        str(out),
+        out.name,
     ]
     set_stage(job, "cta", "Mixando audio CTA", "Mantendo som do CTA junto da narracao")
     has_comp = getattr(job, "has_visual_composition", False)
@@ -14175,6 +14443,9 @@ def find_matching_sfx_asset(effect: str, seed: str | None = None) -> Path | None
     tokens = sfx_asset_tokens(effect)
     ranked: list[tuple[int, Path]] = []
     for path in indexed_sfx_assets():
+        prof = sfx_asset_timing_profile(path)
+        if not prof.get("is_usable", True):
+            continue
         stem = path.stem.lower()
         score = 0
         for token in tokens:
@@ -14190,44 +14461,46 @@ def find_matching_sfx_asset(effect: str, seed: str | None = None) -> Path | None
 
 
 def procedural_sfx_source(effect: str) -> tuple[str, str]:
+    # Síntese Harmônica Pura: ZERO ruído branco/rosa (anoisesrc), ZERO bitcrusher (acrusher)
+    # Garante sinal cristalino, com envelope suave e sem chiado de fundo
     if "hit" in effect or "boom" in effect:
         return (
-            "sine=frequency=82:sample_rate=48000",
-            "lowpass=f=420,afade=t=in:st=0:d=0.008",
+            "sine=frequency=78:sample_rate=48000",
+            "lowpass=f=320,afade=t=in:st=0:d=0.005",
         )
     if "bell" in effect or "shimmer" in effect or "pulse" in effect:
         return (
             "sine=frequency=880:sample_rate=48000",
-            "highpass=f=450,lowpass=f=5400,aecho=0.55:0.45:70:0.26,afade=t=in:st=0:d=0.018",
+            "highpass=f=450,lowpass=f=3800,afade=t=in:st=0:d=0.015",
         )
     if "click" in effect or "type" in effect:
         return (
-            "sine=frequency=1450:sample_rate=48000",
-            "highpass=f=700,lowpass=f=4200,afade=t=in:st=0:d=0.002",
+            "sine=frequency=1400:sample_rate=48000",
+            "highpass=f=600,lowpass=f=3200,afade=t=in:st=0:d=0.002",
         )
     if "glitch" in effect:
         return (
-            "anoisesrc=color=white:amplitude=0.32:sample_rate=48000",
-            "highpass=f=900,lowpass=f=5200,acrusher=level_in=1:level_out=0.55:bits=7:mode=log,afade=t=in:st=0:d=0.01",
+            "sine=frequency=580:sample_rate=48000",
+            "tremolo=f=35:d=0.75,highpass=f=200,lowpass=f=2800,afade=t=in:st=0:d=0.01",
         )
     if "rise" in effect:
         return (
-            "anoisesrc=color=pink:amplitude=0.25:sample_rate=48000",
-            "highpass=f=220,lowpass=f=6200,afade=t=in:st=0:d=0.24",
+            "sine=frequency=220:sample_rate=48000",
+            "highpass=f=120,lowpass=f=1800,afade=t=in:st=0:d=0.18",
         )
     if "ambience" in effect or "air" in effect:
         return (
-            "anoisesrc=color=pink:amplitude=0.18:sample_rate=48000",
-            "highpass=f=260,lowpass=f=3600,afade=t=in:st=0:d=0.18",
+            "sine=frequency=340:sample_rate=48000",
+            "highpass=f=160,lowpass=f=1400,afade=t=in:st=0:d=0.12",
         )
     if "swipe" in effect or "slide" in effect:
         return (
-            "anoisesrc=color=pink:amplitude=0.10:sample_rate=48000",
-            "highpass=f=350,lowpass=f=2800,afade=t=in:st=0:d=0.08",
+            "sine=frequency=420:sample_rate=48000",
+            "highpass=f=180,lowpass=f=2200,afade=t=in:st=0:d=0.05",
         )
     return (
-        "anoisesrc=color=pink:amplitude=0.28:sample_rate=48000",
-        "highpass=f=360,lowpass=f=6400,afade=t=in:st=0:d=0.025",
+        "sine=frequency=440:sample_rate=48000",
+        "highpass=f=200,lowpass=f=2400,afade=t=in:st=0:d=0.03",
     )
 
 
@@ -14252,6 +14525,7 @@ def sfx_asset_timing_profile(asset: Path) -> dict[str, float]:
         "peak_after_trim_seconds": 0.08,
         "peak_normalized": 0.5,
         "normalization_db": 0.0,
+        "is_usable": True,
     }
     try:
         cmd = [
@@ -14289,13 +14563,15 @@ def sfx_asset_timing_profile(asset: Path) -> dict[str, float]:
         peak_seconds = peak_window * window_samples / 8000.0
         peak_normalized = max(0.001, min(1.0, peak_value / 32768.0))
         target_peak = 10 ** (-5.5 / 20.0)
-        normalization_db = max(-5.0, min(9.0, 20.0 * math.log10(target_peak / peak_normalized)))
+        is_usable = bool(peak_normalized >= 0.025)
+        normalization_db = max(-10.0, min(10.0, 20.0 * math.log10(target_peak / max(0.025, peak_normalized))))
         profile = {
             "onset_seconds": round(onset_seconds, 4),
             "peak_seconds": round(peak_seconds, 4),
             "peak_after_trim_seconds": round(max(0.0, peak_seconds - onset_seconds), 4),
             "peak_normalized": round(peak_normalized, 5),
             "normalization_db": round(normalization_db, 2),
+            "is_usable": is_usable,
         }
         SFX_TIMING_CACHE[key] = profile
         return profile
@@ -14403,14 +14679,15 @@ def make_sfx_clip(event: dict[str, Any], out: Path, work: Path) -> tuple[Path, s
         rendered_alignment_profile["peak_after_trim_seconds"] = float(rendered_profile.get("peak_seconds") or 0.0)
         align_sfx_event_to_asset(event, rendered_alignment_profile)
         event["timing_source"] = "measured_rendered_peak"
-        return out, "asset"
+        return out, "asset", rendered_alignment_profile
     event["variant_file"] = ""
     event["source"] = "procedural"
-    align_sfx_event_to_asset(event, {
+    proc_profile = {
         "onset_seconds": 0.0,
         "peak_seconds": 0.0 if event.get("anchor") == "inicio" else min(0.08, duration * 0.3),
         "peak_after_trim_seconds": 0.0 if event.get("anchor") == "inicio" else min(0.08, duration * 0.3),
-    })
+    }
+    align_sfx_event_to_asset(event, proc_profile)
     source, chain = procedural_sfx_source(effect)
     af = (
         f"{chain},"
@@ -14426,7 +14703,7 @@ def make_sfx_clip(event: dict[str, Any], out: Path, work: Path) -> tuple[Path, s
         out_arg,
     ]
     run_ffmpeg_quiet(cmd, cwd=work)
-    return out, "procedural"
+    return out, "procedural", proc_profile
 
 
 def build_pcm_sfx_event_bed(
@@ -15852,6 +16129,10 @@ def queue_retry_failed_projects(payload: dict[str, Any] | None = Body(None)):
             project["retryCount"] = int(project.get("retryCount") or 0) + 1
             project["status"] = "ready"
             project["error"] = None
+            project["directorState"] = None
+            project["timelineHistory"] = []
+            project["renderGraphRun"] = None
+            project["lastRenderSummary"] = None
             project["updatedAt"] = _now_iso()
             retryable.append(project_id)
         if retryable:
@@ -15903,6 +16184,10 @@ def queue_prepare_rerender_projects(payload: dict[str, Any] | None = Body(None))
             project["status"] = "ready"
             project["error"] = None
             project["jobId"] = None
+            project["directorState"] = None
+            project["timelineHistory"] = []
+            project["renderGraphRun"] = None
+            project["lastRenderSummary"] = None
             project["updatedAt"] = _now_iso()
             retryable.append(project_id)
         if retryable:
@@ -15940,6 +16225,7 @@ def queue_snapshot_project(project_id: str, payload: dict[str, Any] | None = Bod
                 "background_music": list(media.get("background_music") or []),
                 "texts": list(media.get("texts") or media.get("subtitles") or []),
                 "captions": list(media.get("captions") or []),
+                "script_guides": list(media.get("script_guides") or []),
             }
         if isinstance(data.get("options"), dict):
             project["options"] = data["options"]
@@ -16264,10 +16550,10 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             unique_effects[sig] = (event, out)
 
     # Synthesize unique SFX clips concurrently
-    synthesized_clips: dict[str, tuple[Path, str]] = {}
+    synthesized_clips: dict[str, tuple[Path, str, dict[str, float]]] = {}
     if len(unique_effects) > 1:
         logical_cpus = max(2, int(os.cpu_count() or 4))
-        max_workers = min(8, logical_cpus)
+        max_workers = min(4, logical_cpus)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sig = {
                 executor.submit(make_sfx_clip, ev, target_path, work): sig
@@ -16276,17 +16562,21 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             for fut in as_completed(future_to_sig):
                 sig = future_to_sig[fut]
                 try:
-                    clip, source = fut.result()
+                    res = fut.result()
+                    clip, source = res[0], res[1]
+                    prof = res[2] if len(res) > 2 else {}
                     if clip.exists() and clip.stat().st_size > 0:
-                        synthesized_clips[sig] = (clip, source)
+                        synthesized_clips[sig] = (clip, source, prof)
                 except Exception:
                     pass
     elif len(unique_effects) == 1:
         sig, (ev, target_path) = next(iter(unique_effects.items()))
         try:
-            clip, source = make_sfx_clip(ev, target_path, work)
+            res = make_sfx_clip(ev, target_path, work)
+            clip, source = res[0], res[1]
+            prof = res[2] if len(res) > 2 else {}
             if clip.exists() and clip.stat().st_size > 0:
-                synthesized_clips[sig] = (clip, source)
+                synthesized_clips[sig] = (clip, source, prof)
         except Exception:
             pass
 
@@ -16295,7 +16585,11 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
         if sig not in synthesized_clips:
             failed += 1
             continue
-        primary_clip, source = synthesized_clips[sig]
+        primary_clip, source, prof = synthesized_clips[sig]
+        if prof:
+            align_sfx_event_to_asset(event, prof)
+            if source == "asset":
+                event["timing_source"] = "measured_rendered_peak"
         if out == primary_clip:
             prepared.append((event, primary_clip))
             sources[source] = sources.get(source, 0) + 1
@@ -16313,7 +16607,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
         _append_log(job, "Sound FX automatico ignorado: nenhum efeito conseguiu ser preparado.")
         return base_audio
 
-    out = Path("glide_audio_with_sound_fx.wav")
+    out = work / "glide_audio_with_sound_fx.wav"
     cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1"]
     base_arg = str(base_audio.relative_to(work)) if base_audio.is_absolute() and base_audio.is_relative_to(work) else str(base_audio)
     cmd += ["-i", base_arg]
@@ -16346,7 +16640,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             labels.append(f"[{label}]")
         filters.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0[fxmix]")
     # Keep FX clearly audible without letting short transients get crushed by narration.
-    filters.append("[fxmix]highpass=f=65,lowpass=f=15000[fxclean]")
+    filters.append("[fxmix]highpass=f=75,lowpass=f=12500,adeclick,adeclip[fxclean]")
     filters.append("[fxclean][voice_ref]sidechaincompress=threshold=0.28:ratio=1.18:attack=15:release=75:makeup=1.12,volume=1.80dB[fxduck]")
     filters.append("[base][fxduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.94:attack=5:release=55[aout]")
     script = work / "sound_fx_mix_filter.txt"
@@ -16675,10 +16969,10 @@ def choose_segment_video_args(mode: str, gpu: bool, job: Job, worker_count: int 
             label = "H.264 NVENC ultra-rápido térmico" if turbo_enabled(job) else "H.264 NVENC otimizado térmico"
             args = [
                 "-c:v", hardware_encoder,
-                "-preset", "p3" if turbo_enabled(job) else "p4",
-                "-tune", "ull",
+                "-preset", "p2",
+                "-tune", "hq",
                 "-rc", "constqp",
-                "-qp", "18" if turbo_enabled(job) else "16",
+                "-qp", "19",
                 "-g", "60",
                 "-threads", str(segment_threads),
             ]
@@ -16728,7 +17022,7 @@ def efficient_segment_worker_count(job: Job, gpu: bool) -> int:
 
 
 def quality_boost_chain() -> str:
-    return "hqdn3d=0.55:0.45:1.1:0.7,eq=contrast=1.045:saturation=1.055:brightness=0.002,unsharp=5:5:0.30:3:3:0.06"
+    return "eq=contrast=1.045:saturation=1.055:brightness=0.002"
 
 
 def continuity_adjustments(
@@ -16921,8 +17215,8 @@ def build_video_filter(
         # com reflexo ampliado, desfocado e sutilmente escurecido nas laterais.
         vf += (
             f"split=2[bg][fg];"
-            f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-            f"boxblur=25:5,eq=brightness=-0.08:saturation=0.85,setsar=1[bg_glass];"
+            f"[bg]scale=384:216:force_original_aspect_ratio=increase,crop=384:216,"
+            f"boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg_glass];"
             f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg_sharp];"
             f"[bg_glass][fg_sharp]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,settb=AVTB,setpts=PTS-STARTPTS"
         )
@@ -17033,10 +17327,15 @@ def build_image_filter_complex(
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
     filmic_chain = f",{filmic_grade}" if filmic_grade else ""
 
-    # Micro-fade cinematográfico suave
-    fade_dur = min(0.8 if is_outro else 0.28, max(0.12, target_duration * (0.35 if is_outro else 0.08)))
-    fade_out_st = max(0.0, target_duration - fade_dur)
-    fade_filters = f",fade=t=in:st=0:d={min(0.28, fade_dur):.2f},fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
+    # Micro-fade cinematográfico apenas no encerramento (sem dip-to-black entre cortes normais)
+    if is_outro:
+        fade_dur = min(0.8, max(0.2, target_duration * 0.25))
+        fade_out_st = max(0.0, target_duration - fade_dur)
+        fade_filters = f",fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
+    else:
+        fade_filters = ""
+
+    img_norm = ",eq=contrast=1.05:brightness=0.01:saturation=1.04,unsharp=3:3:0.5:3:3:0.0"
 
     # Detectar se a proporção da imagem é compatível com o projeto (Caso A/C) ou precisa de background blur (Caso B)
     target_ratio = float(w) / float(max(1, h))
@@ -17052,45 +17351,58 @@ def build_image_filter_complex(
 
     needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
 
-    # Buffer 2.5K supersampling (2560x1440) para eliminar serrilhado e travamento de pixel no zoompan
-    ss_w = max(2560, w)
-    ss_h = max(1440, h)
+    # Buffer supersampling ajustado à dimensão do projeto (sem o peso excessivo de 2.5K)
+    # Margem de 1.12x cobre perfeitamente o zoom máximo de 1.100 sem serrilhados
+    ss_w = int(round(w * 1.12 / 2.0) * 2)
+    ss_h = int(round(h * 1.12 / 2.0) * 2)
     flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
-        # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor e supersampling 2.5K
+        # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor
         return (
             f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
-            f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
+            f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
 
-    # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Ambient Glass blur elegante com supersampling
+    # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Ambient Glass blur hiper-otimizado
+    # O desfoque de fundo é gerado em 384x216 e expandido suavemente, economizando 95% do processamento de blur
     return (
-        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},boxblur=25:5,eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
-        f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
+        f"[0:v]{crop_filter}{flip_prefix}scale=384:216:force_original_aspect_ratio=increase,crop=384:216,boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
+        f"[0:v]{crop_filter}{flip_prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
-        f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
+        f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
     )
 
 
 def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> bool:
-    """Check if media is safe to horizontally flip without inverting readable text or presenter faces."""
+    """
+    Check if media is safe to horizontally flip without inverting readable text,
+    presenter faces, or physical vehicles / traffic direction.
+    """
     try:
         p = Path(str(source_path))
         key_stem = p.name.lower()
+
+        # Proibir estritamente hflip em veículos, tráfego ou vias para evitar
+        # carros/caminhões dirigindo na contramão ou placas/logos de cabine invertidos
+        vehicle_tokens = (
+            "truck", "caminh", "camion", "car", "carro", "auto", "veic",
+            "traffic", "trafego", "tráfego", "transito", "trânsito",
+            "rodovia", "highway", "road", "estrada", "bus", "onibus", "ônibus",
+            "train", "trem", "moto", "pilot", "driver", "motorista"
+        )
+        if any(tok in key_stem for tok in vehicle_tokens):
+            return False
+
         with VISUAL_CLEAN_CACHE_LOCK:
             for k, val in VISUAL_CLEAN_CACHE.items():
                 if key_stem in str(k).lower():
-                    if val.get("clean_roi") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_roi")):
-                        return True
-                    if val.get("clean_trim") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_trim")):
-                        return True
                     cat = str(val.get("category", "")).lower()
-                    if cat in {"text_dominant", "data_dominant", "presenter", "talking_head", "watermark_corner"}:
+                    if cat in {"text_dominant", "data_dominant", "presenter", "talking_head", "watermark_corner", "presentation_slide"}:
                         return False
                     wm = val.get("corner_watermark") or (val.get("metrics") or {}).get("corner_watermark")
                     if isinstance(wm, dict) and wm.get("has_watermark"):
@@ -17098,6 +17410,13 @@ def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> boo
                     metrics = val.get("metrics", {})
                     if float(metrics.get("text_score", 0.0) or 0.0) >= 0.35:
                         return False
+                    tags = str(val.get("semantic_tags") or "") + " " + str(val.get("description") or "")
+                    if any(tok in tags.lower() for tok in vehicle_tokens):
+                        return False
+                    if val.get("clean_roi") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_roi")):
+                        return True
+                    if val.get("clean_trim") or (isinstance(val.get("metrics"), dict) and val["metrics"].get("clean_trim")):
+                        return True
                     return True
         return True
     except Exception:
@@ -17342,7 +17661,6 @@ def detect_voice_emphasis_peaks(
 
     import math
     import struct
-    import subprocess
 
     cmd = [
         FFMPEG, "-hide_banner", "-loglevel", "error",
@@ -17463,8 +17781,6 @@ def build_segment_plan(
     force_short: bool = False,
     voice_emphasis_events: list[dict[str, Any]] | None = None,
 ) -> tuple[list[SegmentPlan], dict[str, Any]]:
-    import math
-
     if not video_files:
         raise RuntimeError("Nenhum arquivo de mídia encontrado para a montagem.")
     if audio_total <= 0:
@@ -17931,7 +18247,7 @@ def build_segment_plan(
             cycle = base_cycle + 1
             last_source_key = str(plans[-1].source) if plans else None
 
-            while remaining > 0.08 and cycle <= 40:
+            while remaining > 0.08 and cycle <= 30:
                 added = False
                 if unique_v:
                     permuted_v = generate_mutant_permutation(unique_v, cycle, last_source_key)
@@ -17944,12 +18260,12 @@ def build_segment_plan(
                         stride_pct = ((cycle * 0.382 + cand.sub_slice_index * 0.236) % 0.65)
                         slice_offset = round(base_trim_offset + (eff_usable * stride_pct), 3)
                         usable = max(1.2, raw_dur - slice_offset)
-                        # Pacing Slicer em clipes reciclados: teto saudável de 5.2s por tomada
-                        max_reuse_shot = 5.2
+                        # Pacing Slicer em clipes reciclados: ritmo documental dinâmico
+                        max_reuse_shot = 4.5
                         seg_dur = round(min(usable, remaining, max_reuse_shot), 3)
                         if seg_dur >= 0.6:
                             apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "video")
-                            scale_boost = 1.08 if (cycle % 2 == 1) else 1.0
+                            scale_boost = 1.14 if (cycle % 2 == 1) else 1.05
                             plans.append(
                                 SegmentPlan(
                                     source=cand.source,
@@ -17960,7 +18276,7 @@ def build_segment_plan(
                                     cycle=cycle,
                                     media_kind="video",
                                     image_motion="",
-                                    is_reversed=(cycle % 3 == 0),
+                                    is_reversed=False,
                                     sub_slice_index=cycle,
                                     punch_in=((cand.sub_slice_index + cycle) % 2 == 1),
                                     hflip=apply_hflip,
@@ -18085,35 +18401,8 @@ def visual_clean_candidate_sources(
     min_speed: float,
     force_short: bool = True,
 ) -> set[str] | None:
-    if not valid_pairs:
-        return set()
-    # Se o lote tiver pouquíssimos clipes (<= 20), analisa todos diretamente
-    if len(valid_pairs) <= 20:
-        return None
-    video_files = [item[0] for item in valid_pairs]
-    video_durs = [item[1] for item in valid_pairs]
-    try:
-        plans, _ = build_segment_plan(video_files, video_durs, audio_total, min_speed=min_speed, force_short=force_short)
-        selected = {
-            str(plan.source).replace("\\", "/")
-            for plan in plans
-        }
-    except Exception:
-        selected = {str(item[0]).replace("\\", "/") for item in valid_pairs[:40]}
-    # Reserva inteligente: cobre a timeline com 80% de margem para substituir clipes descartados,
-    # limitando a no máximo 70 clipes para manter o render ultrarrápido.
-    reserve_target = max(audio_total * min_speed * 1.8, 60.0)
-    max_candidates = min(70, len(valid_pairs))
-    covered = 0.0
-    for source, duration in valid_pairs:
-        key = str(source).replace("\\", "/")
-        if key in selected:
-            covered += duration
-            continue
-        if covered < reserve_target and len(selected) < max_candidates:
-            selected.add(key)
-            covered += duration
-    return selected
+    # Carrasco Visual: 100% dos clipes da timeline sao avaliados, sem limite artificial de 70
+    return None
 
 
 def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> tuple[list[tuple[Path, float]], list[dict[str, Any]]]:
@@ -18249,15 +18538,34 @@ def make_segments_smart(
     video_durs = [item[1] for item in valid_pairs]
     set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=25.5)
     source_offsets: dict[str, float] = {}
-    for src, dur in valid_pairs:
-        if not is_image_path(src):
+
+    def _probe_single_offset(pair: tuple[Path, float]) -> tuple[str, float] | None:
+        src, dur = pair
+        if is_image_path(src):
+            return None
+        try:
             trim_start = get_media_clean_start_offset(src, cwd=work)
             if trim_start > 0.15:
-                source_offsets[str(src.resolve()).lower()] = trim_start
-            else:
-                v_health = probe_video_render_health(src, dur, cwd=work)
-                if v_health.get("suggested_offset", 0.0) > 0.3:
-                    source_offsets[str(src.resolve()).lower()] = float(v_health["suggested_offset"])
+                return str(src.resolve()).lower(), trim_start
+            v_health = probe_video_render_health(src, dur, cwd=work)
+            if float(v_health.get("suggested_offset", 0.0) or 0.0) > 0.3:
+                return str(src.resolve()).lower(), float(v_health["suggested_offset"])
+        except Exception:
+            pass
+        return None
+
+    probe_workers = min(4, max(2, int(os.cpu_count() or 4)))
+    if len(valid_pairs) > 4:
+        with ThreadPoolExecutor(max_workers=probe_workers) as ex:
+            for res in ex.map(_probe_single_offset, valid_pairs):
+                if res:
+                    source_offsets[res[0]] = res[1]
+    else:
+        for p in valid_pairs:
+            res = _probe_single_offset(p)
+            if res:
+                source_offsets[res[0]] = res[1]
+
     visual_window_summary: dict[str, Any] = {
         "enabled": bool(job.options.get("scoreVisualWindows", True)),
         "analyzed": 0,
@@ -18271,28 +18579,51 @@ def make_segments_smart(
     if visual_window_summary["enabled"]:
         set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=27.0)
         performance_start(job, "visual_windows")
-        for src, dur in valid_pairs:
+        candidate_set = set(candidate_sources) if candidate_sources else None
+
+        def _probe_single_window(pair: tuple[Path, float]) -> tuple[str, dict[str, Any], float] | None:
+            src, dur = pair
             if is_image_path(src) or dur <= 1.2:
-                continue
+                return None
+            key = str(src.resolve()).lower()
+            if candidate_set and str(src).replace("\\", "/") not in candidate_set and key not in candidate_set:
+                return None
             window_cache_key = visual_clean_cache_key(src, dur, cwd=work, scope="windows_v3_batch")
             with VISUAL_CLEAN_CACHE_LOCK:
                 cached_window = VISUAL_CLEAN_CACHE.get(window_cache_key)
             if not isinstance(cached_window, dict) and not budget_allows_optional(job, 1.2, reserve_ratio=0.58):
+                return ("__skipped__", {}, 0.0)
+            try:
+                info = probe_visual_window_scores(src, dur, cwd=work)
+                if info.get("enabled"):
+                    return (key, info, dur)
+            except Exception:
+                pass
+            return None
+
+        window_results = []
+        if len(valid_pairs) > 4:
+            with ThreadPoolExecutor(max_workers=probe_workers) as ex:
+                window_results = list(ex.map(_probe_single_window, valid_pairs))
+        else:
+            window_results = [_probe_single_window(p) for p in valid_pairs]
+
+        for item in window_results:
+            if not item:
+                continue
+            key, info, dur = item
+            if key == "__skipped__":
                 visual_window_summary["budget_skipped"] += 1
                 if "visual_windows_quota_exhausted" not in job.render_budget_fallbacks:
                     job.render_budget_fallbacks.append("visual_windows_quota_exhausted")
                 continue
-            info = probe_visual_window_scores(src, dur, cwd=work)
-            if not info.get("enabled"):
-                continue
-            key = str(src.resolve()).lower()
             window_scores_by_source[key] = info
             visual_window_summary["analyzed"] += 1
             if info.get("cache_hit"):
                 visual_window_summary["cache_hits"] += 1
             best_offset = max(0.0, float(info.get("best_offset") or 0.0))
             best_score = float(info.get("best_score") or 0.0)
-            trim_start = get_media_clean_start_offset(src, cwd=work)
+            trim_start = source_offsets.get(key, 0.0)
             if trim_start > 0.15:
                 best_offset = max(best_offset, trim_start)
             if best_offset >= 0.25 and best_score >= 0.45 and dur - best_offset >= 0.75:
@@ -18300,7 +18631,7 @@ def make_segments_smart(
                 visual_window_summary["adjusted"] += 1
             if len(visual_window_summary["items"]) < 80:
                 visual_window_summary["items"].append({
-                    "file": media_display_name(job, src),
+                    "file": Path(key).name,
                     "best_offset": round(best_offset, 3),
                     "best_score": round(best_score, 3),
                     "label": info.get("best_label"),
@@ -18571,7 +18902,14 @@ def make_segments_smart(
             max_seg_pct = 60.0 if has_comp else 92.0
             seg_base = 30.0
             seg_span = max_seg_pct - seg_base
-            job.percent = max(job.percent, min(max_seg_pct, seg_base + (completed_planned_duration / max(1.0, audio_total)) * seg_span))
+            pct = min(max_seg_pct, seg_base + (completed_planned_duration / max(1.0, audio_total)) * seg_span)
+            job.percent = max(job.percent, pct)
+            completed_count = getattr(job, "_completed_segments_count", 0) + 1
+            job._completed_segments_count = completed_count
+            total_plans = len(plans)
+            job.stage = "rendering"
+            job.stage_label = f"Renderizando clipes ({completed_count}/{total_plans})"
+            job.message = f"Clipes: {completed_count}/{total_plans} concluídos ({int(job.percent)}%) | {actual:.1f}s renderizados"
         return out, actual
 
     performance_start(job, "segments")
@@ -18755,9 +19093,11 @@ def concat_segments_and_mux(
     graph: RenderGraph | None = None,
     segments_cache_key: str = "",
     audio_foundation_key: str = "",
+    subtitles: list[Path] | None = None,
 ):
-    job.message = "Juntando segmentos sem estourar memória"
+    job.message = "Juntando tomadas em sequência MP4"
     job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
+    set_stage(job, "rendering", "Montando sequência", job.message, percent=job.percent)
     concat_list = work / "concat_segments.txt"
     # segment paths are relative to work in this file to keep Windows commands short
     valid_segments = []
@@ -18917,12 +19257,22 @@ def concat_segments_and_mux(
         else:
             audio_cached = None
     if not audio_cached:
-        if subtitles and not job.subtitle_cues:
+        set_stage(job, "audio", "Mixagem e master", "Equalizando locução, trilha sonora e sound FX...", percent=max(job.percent, 64.0))
+        effective_subtitles = subtitles or getattr(job, "subtitles", None) or []
+        if not effective_subtitles and hasattr(job, "upload_paths"):
+            effective_subtitles = [
+                p for p in job.upload_paths.values()
+                if str(p).lower().endswith((".srt", ".ass")) and Path(p).exists()
+            ]
+        if effective_subtitles:
             try:
-                sub_path = subtitles[0] if subtitles[0].is_absolute() else job.work / subtitles[0]
-                job.subtitle_cues = parse_srt_file(sub_path)
-            except Exception:
-                pass
+                sub_path = effective_subtitles[0] if Path(effective_subtitles[0]).is_absolute() else job.work / effective_subtitles[0]
+                caption_sub = effective_subtitles[1] if len(effective_subtitles) > 1 else None
+                if caption_sub and not Path(caption_sub).is_absolute():
+                    caption_sub = job.work / caption_sub
+                resolve_effective_subtitle_cues(job, sub_path, audio_total, caption_path=caption_sub)
+            except Exception as exc:
+                _append_log(job, f"Aviso ao preparar sincronia de legendas para áudio/SFX: {exc}")
         if cta:
             audio_file = mix_cta_audio(job, audio_file, cta, cta_times, audio_total, work)
         performance_start(job, "sound_fx")
@@ -19000,6 +19350,7 @@ def concat_segments_and_mux(
         else:
             visual_cached = None
     if not visual_cached:
+        set_stage(job, "cta", "CTA + Textos + Legendas", "Aplicando legendas cinemáticas, ênfases e CTA...", percent=max(job.percent, 72.0))
         performance_start(job, "composition")
         has_visual_elements = bool((subtitle_ass and subtitle_ass.exists()) or (cta and cta.get("video") and cta_times))
         use_chunk_render = has_visual_elements and audio_total >= 90.0 and len(valid_segments) >= 6
@@ -19100,6 +19451,10 @@ def concat_segments_and_mux(
     set_stage(job, "muxing", "Finalizando MP4", job.message, percent=max(job.percent, 96.0))
     # Important: do NOT use -movflags +faststart here. On some Windows PCs/projects it triggers
     # "Cannot allocate memory" during the moov atom second pass, even when the render is complete.
+    video_resolved = video_source if video_source.is_absolute() else (work / video_source)
+    audio_resolved = audio_file if audio_file.is_absolute() else (work / audio_file)
+    out_resolved = out_file if out_file.is_absolute() else (work / out_file)
+
     mux_key = ""
     mux_cached = None
     if graph:
@@ -19107,7 +19462,7 @@ def concat_segments_and_mux(
             "mux",
             {
                 "visual_key": visual_key or assembly_key or segments_cache_key,
-                "audio_key": audio_key or graph_media_token(audio_file),
+                "audio_key": audio_key or graph_media_token(audio_resolved),
                 "duration": round(audio_total, 4),
                 "audio_codec": "aac_160k_48k_stereo",
                 "pipeline": RENDER_PIPELINE_VERSION,
@@ -19115,8 +19470,8 @@ def concat_segments_and_mux(
             "Mux final",
         )
     if mux_cached:
-        graph.restore(mux_cached, {"final.mp4": out_file})
-        if not out_file.exists() or out_file.stat().st_size <= 0:
+        graph.restore(mux_cached, {"final.mp4": out_resolved})
+        if not out_resolved.exists() or out_resolved.stat().st_size <= 0:
             mux_cached = None
         else:
             _append_log(job, "Render Graph: mux final reutilizado.")
@@ -19125,14 +19480,13 @@ def concat_segments_and_mux(
         cmd_mux = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
             "-fflags", "+genpts",
-            "-i", str(video_source.name),
-            "-i", str(audio_file),
+            "-i", str(video_resolved.resolve()),
+            "-i", str(audio_resolved.resolve()),
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy",
             "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
             "-avoid_negative_ts", "make_zero",
-            "-movflags", "+faststart",
-            str(out_file),
+            str(out_resolved.resolve()),
         ]
         run_cmd(job, cmd_mux, total_duration=audio_total or None, base=96.0, span=3.0, cwd=work, quiet_success=True)
         performance_stop(job, "mux")
@@ -19140,7 +19494,7 @@ def concat_segments_and_mux(
             graph.commit(
                 stage="mux",
                 cache_key=mux_key,
-                artifacts={"final.mp4": out_file},
+                artifacts={"final.mp4": out_resolved},
                 metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4)},
             )
     if graph:
@@ -19333,6 +19687,21 @@ def build_saliency_crop_expression(
     return crop_w, crop_h, x_expr
 
 
+def dual_export_effective_mode(job: Job, trajectory: list[dict[str, Any]] | None = None) -> str:
+    trajectory = trajectory or []
+    mode = str((job.options or {}).get("dualExportMode") or "").lower()
+    if mode in {"smart_crop", "smart_blur"}:
+        return mode
+    has_cta = bool((job.options or {}).get("ctaLanguage") or (job.options or {}).get("selectedCta"))
+    if has_cta:
+        return "smart_blur"
+    if trajectory:
+        significant = [t for t in trajectory if abs(float(t.get("focal_x", 0.5)) - 0.50) >= 0.08]
+        if len(significant) >= max(1, len(trajectory) // 3):
+            return "smart_crop"
+    return "smart_blur"
+
+
 def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float) -> Path | None:
     """
     Gera automaticamente uma versão vertical 1080x1920 (9:16) para YouTube Shorts,
@@ -19345,10 +19714,6 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
         return None
 
     shorts_file = target_dir / f"{out_file.stem}_Shorts_9x16.mp4"
-    mode = str((job.options or {}).get("dualExportMode") or "smart_crop").lower()
-    if mode not in {"smart_crop", "smart_blur", "smart_auto"}:
-        mode = "smart_crop"
-
     accepted_plans = getattr(job, "accepted_plans", None) or []
     trajectory: list[dict[str, Any]] = []
     timeline_pos = 0.0
@@ -19365,10 +19730,7 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
         })
         timeline_pos += dur
 
-    effective_mode = mode
-    if mode == "smart_auto":
-        significant_focals = [t for t in trajectory if abs(t["focal_x"] - 0.50) >= 0.08]
-        effective_mode = "smart_crop" if (len(significant_focals) >= max(1, len(trajectory) // 3)) else "smart_blur"
+    effective_mode = dual_export_effective_mode(job, trajectory)
 
     _append_log(
         job,
@@ -19667,6 +20029,8 @@ def plan_recovery_retry(job: Job, exc: Exception) -> dict[str, Any] | None:
     if isinstance(exc, RenderCancelled) or job.cancel_requested:
         return None
     if isinstance(exc, RenderBudgetExceeded):
+        return None
+    if isinstance(exc, (NameError, TypeError, SyntaxError, AttributeError, KeyError, IndexError, ZeroDivisionError, ImportError)):
         return None
     if not recovery_enabled(job.options):
         return None
@@ -20047,6 +20411,30 @@ def apply_auto_director(
 ) -> list[Path]:
     if not videos:
         return videos
+    if visual_clean_enabled(job.options) and len(videos) > 1:
+        def _check_clean(p: Path) -> tuple[Path, bool]:
+            is_img = is_image_path(p)
+            res = probe_visual_clean_health(p, 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
+            rejected = res.get("action") == "hard_reject" or res.get("category") in {
+                "presentation_slide", "text_dominant", "data_dominant", "black_screen",
+                "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
+            }
+            return p, not rejected
+
+        max_w = min(4, max(2, int(os.cpu_count() or 4)))
+        with ThreadPoolExecutor(max_workers=max_w) as ex:
+            results = list(ex.map(_check_clean, videos))
+        clean_videos = [p for p, ok in results if ok]
+        if clean_videos:
+            videos = clean_videos
+    elif visual_clean_enabled(job.options) and len(videos) == 1:
+        is_img = is_image_path(videos[0])
+        res = probe_visual_clean_health(videos[0], 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
+        if res.get("action") == "hard_reject" or res.get("category") in {
+            "presentation_slide", "text_dominant", "data_dominant", "black_screen",
+            "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
+        }:
+            clean_videos = []
     auto_enabled, director_state = smart_visual_director_effective(job.options, bool(subtitle_cues))
     if not auto_enabled:
         current_order = [manifest_rel_for_path(job, path) for path in videos]
@@ -20185,6 +20573,7 @@ def apply_auto_director(
     decision_mode = _normalized_director_decision_mode(job.options)
     input_hash = stable_hash({
         "director_version": f"{DIRECTOR_VERSION}:scene_fit_srt_cta_v1",
+        "visual_clean_version": VISUAL_CLEAN_CACHE_VERSION,
         "media": canonical_media,
         "cues": [
             {
@@ -20245,29 +20634,46 @@ def apply_auto_director(
     stored_order = existing_state.get("video_order") if existing_state.get("input_hash") == input_hash else None
     if isinstance(stored_order, list) and stored_order:
         by_rel = {manifest_rel_for_path(job, path): path for path in videos}
-        reordered = [by_rel[rel] for rel in stored_order if rel in by_rel]
-        reordered.extend(path for path in videos if path not in reordered)
-        job.director_summary = dict(existing_state)
-        job.director_summary["reused"] = True
-        job.director_summary["indexing_skipped"] = True
-        job.director_summary["cache_policy"] = "media_srt_modo"
-        job.director_summary["cache_reused_reason"] = "midia, SRT e modo de decisao sem alteracoes"
-        if not isinstance(job.director_summary.get("scene_fit_plan"), dict):
-            job.director_summary["scene_fit_plan"] = build_director_scene_fit_plan(job, total_duration)
-        graph.record_metadata(
-            stage="direction",
-            payload={"input_hash": input_hash, "stored": True},
-            metadata=job.director_summary,
-            label="Direcao inteligente",
-        )
-        sync_graph_summary(job, graph)
-        if job.export_dir:
-            atomic_write_text(
-                job.export_dir / "smart_director_plan.json",
-                json.dumps(job.director_summary, ensure_ascii=False, indent=2),
+        has_pollution = False
+        if visual_clean_enabled(job.options):
+            for rel in stored_order:
+                p = by_rel.get(rel)
+                if p and p.exists():
+                    is_img = is_image_path(p)
+                    v_res = probe_visual_clean_health(p, 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
+                    if v_res.get("action") == "hard_reject" or v_res.get("category") in {
+                        "presentation_slide", "text_dominant", "data_dominant", "black_screen",
+                        "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
+                    }:
+                        has_pollution = True
+                        break
+        if has_pollution:
+            stored_order = None
+            _append_log(job, "Diretor Visual: cache anterior descartado porque continha mídias reprovadas pelo filtro visual.")
+        else:
+            reordered = [by_rel[rel] for rel in stored_order if rel in by_rel]
+            reordered.extend(path for path in videos if path not in reordered)
+            job.director_summary = dict(existing_state)
+            job.director_summary["reused"] = True
+            job.director_summary["indexing_skipped"] = True
+            job.director_summary["cache_policy"] = "media_srt_modo"
+            job.director_summary["cache_reused_reason"] = "midia, SRT e modo de decisao sem alteracoes"
+            if not isinstance(job.director_summary.get("scene_fit_plan"), dict):
+                job.director_summary["scene_fit_plan"] = build_director_scene_fit_plan(job, total_duration)
+            graph.record_metadata(
+                stage="direction",
+                payload={"input_hash": input_hash, "stored": True},
+                metadata=job.director_summary,
+                label="Direcao inteligente",
             )
-        _append_log(job, "Diretor Visual Inteligente: ordem aprovada reutilizada sem repetir a indexacao visual.")
-        return reordered
+            sync_graph_summary(job, graph)
+            if job.export_dir:
+                atomic_write_text(
+                    job.export_dir / "smart_director_plan.json",
+                    json.dumps(job.director_summary, ensure_ascii=False, indent=2),
+                )
+            _append_log(job, "Diretor Visual Inteligente: ordem aprovada reutilizada sem repetir a indexacao visual.")
+            return reordered
 
     semantic_status = semantic_model_status()
     semantic_requested = bool(job.options.get("semanticVisualIndex", True))
@@ -20277,7 +20683,7 @@ def apply_auto_director(
         "semantic_requested": semantic_requested,
         "semantic_active": semantic_active,
         "model": semantic_status.get("mode") if semantic_active else "smart_fast_heuristic",
-        "director_version": f"{DIRECTOR_VERSION}:scene_fit_srt_cta_v1",
+        "director_version": f"{DIRECTOR_VERSION}:editorial_engine_v8",
     }
     index_key, index_cached = graph.begin("indexing", index_payload, "Indexacao visual")
     video_items: list[dict[str, Any]] = []
@@ -20289,6 +20695,17 @@ def apply_auto_director(
             if item:
                 cached_item = dict(item)
                 cached_item["media_type"] = "image" if is_image_path(path) else str(cached_item.get("media_type") or "video")
+                if "quality_score" not in cached_item or "is_hero" not in cached_item:
+                    v_an = probe_visual_clean_health(path, 0.0 if is_image_path(path) else 5.0, "normal", cwd=job.work)
+                    v_m = v_an.get("metrics") or {}
+                    cached_item["quality_score"] = float(v_m.get("quality_score") or (0.75 if not is_image_path(path) else 0.70))
+                    cached_item["edge_density"] = float(v_m.get("edge_density") or 0.04)
+                    cached_item["is_flat_wall"] = bool(cached_item["edge_density"] < 0.016 and float(v_m.get("stdev") or 30.0) < 14.0)
+                    cached_item["is_overexposed"] = bool(float(v_m.get("mean") or 50.0) > 235.0 and float(v_m.get("stdev") or 30.0) < 18.0)
+                    vw, vh = probe_media_dimensions(path)
+                    cached_item["width"] = vw
+                    cached_item["height"] = vh
+                    cached_item["is_hero"] = bool(cached_item["media_type"] == "video" and cached_item["quality_score"] >= 0.82 and vh >= 720 and not cached_item["is_flat_wall"] and not cached_item["is_overexposed"])
                 video_items.append(cached_item)
         if len(video_items) != len(videos):
             video_items = []
@@ -20317,6 +20734,19 @@ def apply_auto_director(
                 f"{path.stem.replace('_', ' ')} {' '.join(categories)}",
                 limit=16,
             )
+            v_an = probe_visual_clean_health(path, 0.0 if is_image_path(path) else 5.0, "normal", cwd=job.work)
+            v_m = v_an.get("metrics") or {}
+            v_qscore = float(v_m.get("quality_score") or (0.75 if not is_image_path(path) else 0.70))
+            v_edge = float(v_m.get("edge_density") or 0.04)
+            v_mean = float(v_m.get("mean") or 50.0)
+            v_stdev = float(v_m.get("stdev") or 30.0)
+            v_wm = bool(v_an.get("corner_watermark") or (isinstance(v_m.get("corner_watermark"), dict) and v_m["corner_watermark"].get("has_watermark")))
+            vw, vh = probe_media_dimensions(path)
+            is_wall = bool(v_edge < 0.016 and v_stdev < 14.0)
+            is_glare = bool(v_mean > 235.0 and v_stdev < 18.0)
+            is_vid = not is_image_path(path)
+            is_hero = bool(is_vid and v_qscore >= 0.82 and v_edge >= 0.035 and not is_wall and not is_glare and vh >= 720 and not v_wm)
+
             video_items.append({
                 "path": str(path.resolve()),
                 "rel": manifest_rel_for_path(job, path),
@@ -20329,8 +20759,16 @@ def apply_auto_director(
                 "suspect": category in {
                     "text_dominant", "text_suspect", "presenter_suspect",
                     "static_center_suspect", "black",
-                },
+                } or is_wall or is_glare or v_wm or (vh < 540),
                 "visual_category": category,
+                "quality_score": v_qscore,
+                "edge_density": v_edge,
+                "is_flat_wall": is_wall,
+                "is_overexposed": is_glare,
+                "has_watermark": v_wm,
+                "is_hero": is_hero,
+                "width": vw,
+                "height": vh,
             })
         graph.commit(
             stage="indexing",
@@ -20781,13 +21219,14 @@ def prepare_audio_foundation(
 
 
 def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
+    actual_audio = audio_file if audio_file.is_absolute() else (work / audio_file)
     if not bool(job.options.get("audioMastering", True)):
         job.audio_master_summary = {"enabled": False, "reason": "opcao desligada"}
-        return audio_file
+        return actual_audio
     performance_start(job, "mastering")
     master_profile = str(job.options.get("platformMasterProfile") or "youtube_long")
     first_cmd = [
-        FFMPEG, "-hide_banner", "-nostats", "-i", str(audio_file),
+        FFMPEG, "-hide_banner", "-nostats", "-i", str(actual_audio),
         "-vn", "-af", first_pass_filter(master_profile), "-f", "null", os.devnull,
     ]
     try:
@@ -20826,7 +21265,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
             job,
             [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-                "-i", str(audio_file), "-vn",
+                "-i", str(actual_audio), "-vn",
                 "-af", second_filter,
                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
                 str(mastered),
@@ -20837,17 +21276,21 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
         job.percent = max(job.percent, 65.0 if has_comp else 95.5)
         # The measured two-pass parameters deterministically define the second
         # pass. Avoid decoding the complete mastered file a third time merely
-        # to repeat the same loudness measurement.
-        job.audio_master_summary = audio_master_report(measurement, measurement, master_profile)
-        job.audio_master_summary["verification"] = "second_pass_parameters"
-        job.audio_master_summary["verification_pass_avoided"] = True
-        job.audio_master_summary["output"] = mastered.name
+        # for telemetry; log the measured values and pass target through.
+        job.audio_master_summary = audio_master_report(
+            measurement,
+            master_profile,
+            target_i=measurement.get("target_i"),
+            target_tp=measurement.get("target_tp"),
+            target_lra=measurement.get("target_lra"),
+        )
         _append_log(
             job,
-            f"Master de audio ({job.audio_master_summary.get('profile_label')}): "
-            f"alvo {job.audio_master_summary.get('target_lufs')} LUFS / {job.audio_master_summary.get('target_true_peak_dbtp')} dBTP; "
-            f"saida={job.audio_master_summary.get('output_lufs')} LUFS, "
-            f"pico={job.audio_master_summary.get('output_true_peak_dbtp')} dBTP.",
+            f"Master de audio concluido: profile={master_profile}, "
+            f"input={measurement.get('input_i', 0.0):.1f} LUFS, "
+            f"output={measurement.get('target_i', -14.0):.1f} LUFS, "
+            f"true_peak={measurement.get('input_tp', 0.0):.1f} dBTP, "
+            f"limiter={limiter_value(master_profile)} dB.",
         )
         return mastered
     except RenderCancelled:
@@ -20857,10 +21300,10 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
             "enabled": True,
             "fallback": True,
             "reason": human_render_error(exc),
-            "output": audio_file.name,
+            "output": actual_audio.name,
         }
         _append_log(job, f"Master de audio usou fallback seguro: {human_render_error(exc)}")
-        return audio_file
+        return actual_audio
     finally:
         performance_stop(job, "mastering")
 
@@ -21326,7 +21769,7 @@ def render_worker(job_id: str):
                     _append_log(job, "Render Graph: ASS de Textos e Legendas reutilizado.")
                     if subtitles and not job.subtitle_cues:
                         try:
-                            job.subtitle_cues = parse_srt_file(subtitle_path)
+                            resolve_effective_subtitle_cues(job, subtitle_path, timeline_total, caption_path=caption_path)
                         except Exception:
                             pass
             if subtitle_ass is None:
@@ -21363,6 +21806,7 @@ def render_worker(job_id: str):
             "continuity": bool(effective_visual.get("continuity_match")),
             "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", True)),
             "visual_clean": bool(job.options.get("visualCleanFilter", True)),
+            "visual_clean_version": VISUAL_CLEAN_CACHE_VERSION,
             "score_visual_windows": bool(job.options.get("scoreVisualWindows", True)),
             "adaptive_quality_boost": bool(job.options.get("adaptiveQualityBoost", True)),
             "motion_graphics_premium": bool(effective_visual.get("motion_graphics_premium")),
@@ -21478,6 +21922,7 @@ def render_worker(job_id: str):
             graph=graph,
             segments_cache_key=segment_cache_key,
             audio_foundation_key=audio_foundation_key,
+            subtitles=subtitles,
         )
         sync_graph_summary(job, graph)
         performance_start(job, "delivery")
@@ -21688,9 +22133,24 @@ async def create_render_job(manifest: str = Form("[]"), options: str = Form("{}"
         options_obj = json.loads(options)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Manifest/options inválidos: {exc}")
+
+    if not isinstance(files_manifest, list):
+        raise HTTPException(status_code=400, detail="Manifest deve ser uma lista de arquivos.")
+    if not isinstance(options_obj, dict):
+        raise HTTPException(status_code=400, detail="Options deve ser um objeto JSON.")
+    for it in files_manifest:
+        if not isinstance(it, dict):
+            raise HTTPException(status_code=400, detail="Cada item do manifest deve ser um objeto.")
+
+    initial_duration_raw = options_obj.get("estimatedDurationSeconds")
+    if initial_duration_raw is not None:
+        if not isinstance(initial_duration_raw, (int, float)) or isinstance(initial_duration_raw, bool):
+            raise HTTPException(status_code=400, detail="estimatedDurationSeconds deve ser um número válido.")
+        if math.isinf(initial_duration_raw) or math.isnan(initial_duration_raw) or initial_duration_raw < 0:
+            raise HTTPException(status_code=400, detail="estimatedDurationSeconds inválido (deve ser finito e >= 0).")
+
     if isinstance(options_obj, dict):
         options_obj = apply_render_execution_profile(options_obj)
-
 
     job_id = uuid.uuid4().hex[:12]
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -21731,9 +22191,11 @@ async def create_render_job(manifest: str = Form("[]"), options: str = Form("{}"
         rel_key = str(item.get("rel") or item.get("name") or source.name).replace("\\", "/")
         display_name = Path(rel_key).name or source.name
         job.upload_paths[rel_key] = source
-        job.upload_paths[Path(rel_key).name] = source
+        if Path(rel_key).name not in job.upload_paths:
+            job.upload_paths[Path(rel_key).name] = source
         job.upload_names[rel_key] = display_name
-        job.upload_names[Path(rel_key).name] = display_name
+        if Path(rel_key).name not in job.upload_names:
+            job.upload_names[Path(rel_key).name] = display_name
         job.upload_names[source.name] = display_name
         job.uploaded_files += 1
     initial_duration = options_obj.get("estimatedDurationSeconds") or 0
@@ -21779,20 +22241,40 @@ async def upload_file(
     if ext not in VIDEO_EXTS and ext not in IMAGE_EXTS and ext not in AUDIO_EXTS and ext not in SRT_EXTS:
         ext = Path(file.filename or f"upload_{index}").suffix.lower() or ".bin"
     dest = job.work / f"u{index:04d}{ext}"
-    with dest.open("wb") as f:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
+    tmp = job.work / f".tmp_{uuid.uuid4().hex}{ext}"
+    bytes_written = 0
+    try:
+        with tmp.open("wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_written += len(chunk)
+        if bytes_written == 0:
+            if tmp.exists():
+                tmp.unlink()
+            raise HTTPException(status_code=400, detail="Arquivo vazio (0 bytes) não é permitido.")
+        os.replace(tmp, dest)
+    except Exception:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+        raise
 
+    is_new = rel_key not in job.upload_paths
     job.upload_paths[rel_key] = dest
-    job.upload_paths[Path(rel_key).name] = dest
+    if Path(rel_key).name not in job.upload_paths:
+        job.upload_paths[Path(rel_key).name] = dest
     display_name = Path(original).name or original
     job.upload_names[rel_key] = display_name
-    job.upload_names[Path(rel_key).name] = display_name
+    if Path(rel_key).name not in job.upload_names:
+        job.upload_names[Path(rel_key).name] = display_name
     job.upload_names[dest.name] = display_name
-    job.uploaded_files += 1
+    if is_new:
+        job.uploaded_files += 1
     if job.expected_files:
         job.percent = max(job.percent, min(9.9, (job.uploaded_files / job.expected_files) * 10.0))
     job.message = f"Arquivos copiados: {job.uploaded_files}/{job.expected_files}"
@@ -21805,6 +22287,8 @@ def launch_render(job_id: str):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job não encontrado")
+    if job.cancel_requested or job.status in {"cancelled", "error", "done"}:
+        raise HTTPException(status_code=409, detail=f"Job em estado terminal ({job.status}) não pode ser iniciado")
     if job.thread_started:
         return {"job_id": job.id, "already_started": True}
     if job.expected_files and job.uploaded_files < job.expected_files:
@@ -21949,9 +22433,18 @@ def status(job_id: str):
         eta_confidence = "low"
         eta_reason = "preparando o plano e medindo as etapas"
     elif job.status == "running":
-        # A deadline is a guardrail, not an ETA clamp. Keep showing the honest
-        # forecast when a stage is slower than expected.
-        estimated_total = max(elapsed + 1.0, estimated_total)
+        pct = float(job.percent or 0.0)
+        if pct >= 5.0 and elapsed > 15.0:
+            # Projeção honesta baseada na taxa real observada
+            progress_ratio = max(0.05, min(0.99, pct / 100.0))
+            observed_run_total = elapsed / progress_ratio
+            if observed_run_total > estimated_total:
+                estimated_total = max(observed_run_total, (estimated_total * 0.35 + observed_run_total * 0.65) if estimated_total > 0 else observed_run_total)
+        if estimated_total <= elapsed:
+            pct_val = max(1.0, float(job.percent or 1.0))
+            rem_pct = max(1.0, 100.0 - pct_val)
+            remaining_honest = max(5.0, (elapsed / pct_val) * rem_pct)
+            estimated_total = elapsed + remaining_honest
     remaining = max(0.0, estimated_total - elapsed) if job.status == "running" else 0.0
     if job.status != "running":
         eta_confidence = str(job.estimate_confidence or "heuristic")

@@ -21,6 +21,8 @@ const state = {
   captions: [],
   scriptGuides: [],
   subtitleInfo: null,
+  parsedSubtitleCues: [],
+  previewCueIndex: 0,
   captionInfo: null,
   scriptGuideInfo: null,
   scriptGuidePlan: null,
@@ -174,8 +176,10 @@ const subtitleColorHex = $('#subtitleColorHex');
 const subtitleOutlineHex = $('#subtitleOutlineHex');
 const subtitleColorPreview = $('#subtitleColorPreview');
 const subtitleOutlinePreview = $('#subtitleOutlinePreview');
+const subtitlePreview = $('#subtitlePreview');
 const previewMedia = $('#previewMedia');
 const previewCaption = $('#previewCaption');
+const previewCueBadge = $('#previewCueBadge');
 const renderSteps = $('#renderSteps');
 const toggleLogBtn = $('#toggleLogBtn');
 const renderShowcase = $('#renderShowcase');
@@ -371,18 +375,15 @@ const IMPORT_DURATION_SCAN_LIMIT = 80;
 const IMPORT_AUDIO_HEALTH_LIMIT = 1;
 const DESKTOP_MODE = new URLSearchParams(window.location.search).get('desktop') === '1';
 const subtitlePresets = {
-  bold_white: {label: 'Branco bold', color: '#ffffff', outline: '#111111', box: false, weight: 900, fontPreset: 'arial_black', animation: 'mixed', outlineSize: 2.2},
-  bold_yellow: {label: 'Amarelo bold', color: '#ffd83d', outline: '#121212', box: false, weight: 900, fontPreset: 'arial_black', animation: 'mixed', outlineSize: 2.4},
-  dark_box: {label: 'Caixa escura', color: '#ffffff', outline: '#000000', box: true, weight: 900, fontPreset: 'segoe', animation: 'mixed', outlineSize: 1},
-  cinema_white: {label: 'Cinema branco', color: '#f7f1e8', outline: '#0b0b0b', box: false, weight: 700, fontPreset: 'georgia', animation: 'mixed', outlineSize: 1.8},
-  green_neon: {label: 'Verde neon', color: '#74ff8f', outline: '#052b15', box: false, weight: 900, fontPreset: 'arial_black', animation: 'mixed', outlineSize: 2.2},
-  minimal: {label: 'Minimal', color: '#f4f4f4', outline: '#202020', box: false, weight: 650, fontPreset: 'segoe', animation: 'mixed', outlineSize: 1.2},
-  impact_gold: {label: 'Impacto dourado', color: '#ffd36a', outline: '#1d1404', box: false, weight: 900, fontPreset: 'impact', animation: 'mixed', outlineSize: 2.8},
-  documentary: {label: 'Documentario', color: '#f0f4f2', outline: '#0d1813', box: false, weight: 850, fontPreset: 'bahnschrift', animation: 'mixed', outlineSize: 1.8},
-  blue_glow: {label: 'Azul glow', color: '#8edbff', outline: '#062033', box: false, weight: 900, fontPreset: 'arial_black', animation: 'mixed', outlineSize: 2.4},
-  red_punch: {label: 'Vermelho punch', color: '#ff6b5f', outline: '#1b0504', box: false, weight: 900, fontPreset: 'arial_black', animation: 'mixed', outlineSize: 2.7},
-  soft_pink: {label: 'Rosa suave', color: '#ffd1e8', outline: '#2d1324', box: false, weight: 800, fontPreset: 'trebuchet', animation: 'mixed', outlineSize: 1.8},
-  clean_box: {label: 'Caixa clean', color: '#ffffff', outline: '#000000', box: true, weight: 850, fontPreset: 'verdana', animation: 'mixed', outlineSize: 0.8},
+  documentary: {label: 'Documentário Minimalista', color: '#f8fafc', outline: '#0b1118', box: false, weight: 750, fontPreset: 'bahnschrift', animation: 'fade', outlineSize: 0.8},
+  editorial_card: {label: 'Editorial Lower-Third Card', color: '#ffffff', outline: '#0b1118', box: true, weight: 750, fontPreset: 'bahnschrift', animation: 'fade', outlineSize: 0.8},
+  cinema_minimal: {label: 'Cinema Clean 4K', color: '#f1f5f9', outline: '#0b1118', box: false, weight: 700, fontPreset: 'segoe', animation: 'fade', outlineSize: 0.8},
+  journalistic: {label: 'Jornalismo Investigativo', color: '#ffffff', outline: '#0b1118', box: true, weight: 750, fontPreset: 'bahnschrift', animation: 'fade', outlineSize: 0.8},
+  dark_box: {label: 'Caixa escura', color: '#ffffff', outline: '#000000', box: true, weight: 750, fontPreset: 'segoe', animation: 'fade', outlineSize: 0.8},
+  cinema_white: {label: 'Cinema branco', color: '#f7f1e8', outline: '#0b0b0b', box: false, weight: 700, fontPreset: 'georgia', animation: 'fade', outlineSize: 1.0},
+  minimal: {label: 'Minimal', color: '#f4f4f4', outline: '#202020', box: false, weight: 650, fontPreset: 'segoe', animation: 'fade', outlineSize: 0.8},
+  bold_white: {label: 'Branco bold', color: '#ffffff', outline: '#111111', box: false, weight: 800, fontPreset: 'segoe', animation: 'fade', outlineSize: 1.0},
+  bold_yellow: {label: 'Amarelo bold', color: '#ffd83d', outline: '#121212', box: false, weight: 800, fontPreset: 'segoe', animation: 'fade', outlineSize: 1.0},
 };
 const subtitleFontPresets = {
   arial: 'Arial',
@@ -1932,15 +1933,9 @@ function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
     outputDir: project.outputDir || null,
     jobId: project.backendJobId || null,
     error: project.error || null,
-    estimatedSize: project.estimatedSize || 0,
-    lastRenderSummary: project.lastRenderSummary || null,
-    directorState: project.directorState || null,
-    timelineHistory: project.timelineHistory || [],
-    confidenceSummary: project.confidenceSummary || null,
-    audioMasterSummary: project.audioMasterSummary || null,
-    renderGraphRun: project.renderGraphRun || null,
     retryCount: Number(project.retryCount || 0),
     retryHistory: project.retryHistory || [],
+    ...(project.lastRenderSummary === null ? {lastRenderSummary: null, directorState: null, renderGraphRun: null} : {}),
   };
   const send = () => {
     projectSnapshotTimers.delete(project.id);
@@ -3614,7 +3609,7 @@ function updateCtaPreview(){
 
   if(ctaPreviewCaption){
     const style = currentSubtitleStyle();
-    const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.bold_white;
+    const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.documentary;
     ctaPreviewCaption.textContent = previewCaption?.textContent || 'Sua legenda aparece aqui';
     ctaPreviewCaption.style.color = style.primary;
     ctaPreviewCaption.style.fontSize = `${Math.max(18, Math.round(style.size * 0.44))}px`;
@@ -3899,6 +3894,16 @@ async function ingestFiles(fileList, forcedKind = null){
   }
 
   dockSummary.textContent = `Importados: +${addedVideos} vídeo(s), +${addedAudios} áudio(s), +${addedBackground} música(s), +${addedSubtitles} Textos, +${addedCaptions} Legendas, +${addedScripts} Roteiro(s).${addedBackground ? ' Biblioteca automática pausada para este projeto.' : ''}`;
+  if(added.length > 0){
+    const parts = [];
+    if(addedVideos) parts.push(`${addedVideos} vídeo(s)`);
+    if(addedAudios) parts.push(`${addedAudios} áudio(s)`);
+    if(addedBackground) parts.push(`${addedBackground} música(s)`);
+    if(addedSubtitles) parts.push(`${addedSubtitles} Textos (SRT)`);
+    if(addedCaptions) parts.push(`${addedCaptions} Legendas`);
+    if(addedScripts) parts.push(`${addedScripts} Roteiro`);
+    showToast('Mídia Importada', `+${parts.join(', ')} adicionados com sucesso.`, 'success');
+  }
   renderLists();
   if(addedBackground) updateMusicGenreUi();
   updateStats();
@@ -3908,14 +3913,19 @@ async function ingestFiles(fileList, forcedKind = null){
 }
 
 function parseSrtTime(value){
-  const match = String(value).trim().match(/(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/);
+  const match = String(value || '').trim().match(/(\d+):(\d{2}):(\d{2})[,.](\d{1,3})/);
   if(!match) return null;
   const [, h, m, s, ms] = match;
   return Number(h) * 3600 + Number(m) * 60 + Number(s) + Number(ms.padEnd(3, '0')) / 1000;
 }
 
 function parseSrtText(text){
-  const blocks = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim().split(/\n\s*\n/);
+  const clean = String(text || '').replace(/^\ufeff/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
+  if(!clean) return [];
+  let blocks = clean.split(/\n\s*\n/);
+  if(blocks.length <= 1 && (clean.match(/-->/g) || []).length > 1){
+    blocks = clean.split(/\n(?=\d+\s*\n\s*\d{1,2}:\d{2}:\d{2})/);
+  }
   const cues = [];
   for(const block of blocks){
     const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
@@ -3923,7 +3933,7 @@ function parseSrtText(text){
     if(timeLine < 0) continue;
     const [startText, endText] = lines[timeLine].split('-->');
     const start = parseSrtTime(startText);
-    const end = parseSrtTime((endText || '').split(/\s+/)[0]);
+    const end = parseSrtTime((endText || '').trim().split(/\s+/)[0]);
     const body = lines.slice(timeLine + 1).join(' ').replace(/<[^>]+>/g, '').trim();
     if(start == null || end == null || !body) continue;
     cues.push({start, end: Math.max(end, start), text: body});
@@ -3933,11 +3943,12 @@ function parseSrtText(text){
 
 function estimateSubtitleCleanup(cues){
   const audioTotal = state.audios.reduce((sum, file) => sum + (state.durations.get(rel(file)) || 0), 0);
-  const timeline = audioTotal || Number.POSITIVE_INFINITY;
+  const timeline = audioTotal > 0 ? audioTotal : Number.POSITIVE_INFINITY;
+  const minDuration = 0.65;
   const adjusted = cues
-    .filter(cue => cue.start < timeline)
-    .map(cue => ({...cue, end: Math.min(timeline, Math.max(cue.end, cue.start + 6))}))
-    .filter(cue => cue.end - cue.start >= 5.98)
+    .filter(cue => cue.start < timeline && Boolean(cue.text.trim()))
+    .map(cue => ({...cue, end: Math.min(timeline, Math.max(cue.end, cue.start + minDuration))}))
+    .filter(cue => cue.end - cue.start >= (minDuration - 0.05))
     .sort((a, b) => a.start - b.start);
   let valid = 0;
   let removedOverlap = 0;
@@ -3946,7 +3957,7 @@ function estimateSubtitleCleanup(cues){
     let cluster = [adjusted[i]];
     let end = adjusted[i].end;
     i++;
-    while(i < adjusted.length && adjusted[i].start < end){
+    while(i < adjusted.length && adjusted[i].start < (end - 0.02)){
       cluster.push(adjusted[i]);
       end = Math.max(end, adjusted[i].end);
       i++;
@@ -3963,23 +3974,46 @@ function estimateSubtitleCleanup(cues){
 }
 
 async function refreshSubtitleInfo(){
+  const badge = previewCueBadge || $('#previewCueBadge');
   if(!state.subtitles.length){
     state.subtitleInfo = null;
+    state.parsedSubtitleCues = [];
+    state.previewCueIndex = 0;
+    if(badge) badge.style.display = 'none';
     subtitleStatus.textContent = 'Adicione um SRT de Textos para orientar a montagem e criar chamadas animadas.';
     previewCaption.textContent = 'Seu texto animado aparece assim';
     updateIntroPreview();
     return;
   }
   const file = state.subtitles[0];
-  const text = await file.text();
-  const cues = parseSrtText(text);
-  const info = estimateSubtitleCleanup(cues);
-  state.subtitleInfo = info;
-  const firstText = cues[0]?.text || 'Seu texto animado aparece assim';
-  previewCaption.textContent = firstText.slice(0, 90);
-  subtitleStatus.textContent = `${file.name}: ${info.valid} texto(s) válido(s), ${info.removed} removido(s) por tempo/sobreposição.`;
-  updateSubtitlePreview();
-  updateLayerPreview();
+  try{
+    const text = await file.text();
+    const cues = parseSrtText(text);
+    const info = estimateSubtitleCleanup(cues);
+    state.subtitleInfo = info;
+    state.parsedSubtitleCues = cues;
+    state.previewCueIndex = 0;
+    const firstText = cues[0]?.text || 'Seu texto animado aparece assim';
+    previewCaption.textContent = firstText.slice(0, 100);
+    if(badge){
+      if(cues.length > 0){
+        badge.style.display = 'block';
+        badge.textContent = `Frase 1/${cues.length} ↻`;
+      }else{
+        badge.style.display = 'none';
+      }
+    }
+    subtitleStatus.textContent = `${file.name}: ${info.valid} texto(s) válido(s), ${info.removed} removido(s) por tempo/sobreposição.`;
+    updateSubtitlePreview();
+    updateLayerPreview();
+    if(cues.length > 0){
+      showToast('Textos Sincronizados', `${info.valid} texto(s) validado(s) de ${file.name}.`, 'success');
+    }
+  }catch(err){
+    console.error('Erro ao processar SRT de textos:', err);
+    subtitleStatus.textContent = `${file.name}: Erro ao ler arquivo SRT (${err.message || err}).`;
+    showToast('Erro no SRT', `Não foi possível ler ${file.name}: ${err.message || err}`, 'error');
+  }
 }
 
 async function refreshCaptionInfo(){
@@ -3991,11 +4025,20 @@ async function refreshCaptionInfo(){
     return;
   }
   const file = state.captions[0];
-  const cues = parseSrtText(await file.text());
-  state.captionInfo = {original: cues.length, valid: cues.length, maxLines: 2};
-  if(captionStatus) captionStatus.textContent = `${file.name}: ${cues.length} legenda(s) pronta(s), sem FX sonoro.`;
-  if(layerPreviewCaption) layerPreviewCaption.textContent = (cues[0]?.text || 'Legenda limpa em até duas linhas').slice(0, 110);
-  updateLayerPreview();
+  try{
+    const cues = parseSrtText(await file.text());
+    state.captionInfo = {original: cues.length, valid: cues.length, maxLines: 2};
+    if(captionStatus) captionStatus.textContent = `${file.name}: ${cues.length} legenda(s) pronta(s), sem FX sonoro.`;
+    if(layerPreviewCaption) layerPreviewCaption.textContent = (cues[0]?.text || 'Legenda limpa em até duas linhas').slice(0, 110);
+    updateLayerPreview();
+    if(cues.length > 0){
+      showToast('Legendas Carregadas', `${cues.length} legenda(s) limpa(s) prontas.`, 'success');
+    }
+  }catch(err){
+    console.error('Erro ao processar SRT de legendas:', err);
+    if(captionStatus) captionStatus.textContent = `${file.name}: Erro ao ler legendas (${err.message || err}).`;
+    showToast('Erro em Legendas', `Não foi possível ler ${file.name}: ${err.message || err}`, 'error');
+  }
 }
 
 async function analyzeScriptGuideFile(file){
@@ -4091,18 +4134,18 @@ function renderScriptGuidePlan(){
 }
 
 function currentSubtitleStyle(){
-  const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.bold_white;
-  const fontPreset = subtitleFontPreset?.value || preset.fontPreset || 'arial_black';
+  const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.documentary;
+  const fontPreset = subtitleFontPreset?.value || preset.fontPreset || 'bahnschrift';
   return {
     preset: subtitlePreset.value,
     fontPreset,
-    font: subtitleFontPresets[fontPreset] || subtitleFontPresets.arial_black,
-    animation: subtitleAnimation?.value || preset.animation || 'mixed',
+    font: subtitleFontPresets[fontPreset] || subtitleFontPresets.bahnschrift,
+    animation: subtitleAnimation?.value || preset.animation || 'fade',
     primary: subtitleColor.value || preset.color,
     outline: subtitleOutline.value || preset.outline,
-    size: Number(subtitleSize.value || 64),
+    size: Number(subtitleSize.value || 32),
     position: Number(subtitlePosition.value || 16),
-    outlineSize: Number(subtitleOutlineSize?.value || preset.outlineSize || 2),
+    outlineSize: Number(subtitleOutlineSize?.value || preset.outlineSize || 0.8),
     shadow: preset.box ? 0 : 1,
     box: preset.box,
     bold: preset.weight >= 800,
@@ -4237,12 +4280,12 @@ function updateSubtitleControlVisuals(){
 }
 
 function applyPresetToControls(){
-  const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.bold_white;
+  const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.documentary;
   subtitleColor.value = preset.color;
   subtitleOutline.value = preset.outline;
-  if(subtitleFontPreset) subtitleFontPreset.value = preset.fontPreset || 'arial_black';
-  if(subtitleAnimation) subtitleAnimation.value = preset.animation || 'mixed';
-  if(subtitleOutlineSize) subtitleOutlineSize.value = String(preset.outlineSize || 2);
+  if(subtitleFontPreset) subtitleFontPreset.value = preset.fontPreset || 'bahnschrift';
+  if(subtitleAnimation) subtitleAnimation.value = preset.animation || 'fade';
+  if(subtitleOutlineSize) subtitleOutlineSize.value = String(preset.outlineSize || 0.8);
   updateSubtitlePreview();
 }
 
@@ -4296,22 +4339,22 @@ function updateIntroPreview({refreshStats = true} = {}){
 }
 
 function updateSubtitlePreview({refreshStats = true} = {}){
-  const preset = subtitlePresets[subtitlePreset.value] || subtitlePresets.bold_white;
+  const preset = subtitlePresets[subtitlePreset?.value] || subtitlePresets.documentary;
   const style = currentSubtitleStyle();
   previewCaption.style.color = style.primary;
-  previewCaption.style.fontSize = `${Math.max(22, Math.round(style.size * 0.58))}px`;
+  previewCaption.style.fontSize = `${Math.max(20, Math.round(style.size * 0.58))}px`;
   previewCaption.style.bottom = `${style.position}%`;
   previewCaption.style.fontFamily = `"${style.font}", Arial, sans-serif`;
   previewCaption.style.fontWeight = String(preset.weight);
-  const outlinePx = Math.max(1, style.outlineSize);
+  const outlinePx = Math.max(0.5, style.outlineSize);
   previewCaption.style.textShadow = `0 ${outlinePx}px 0 ${style.outline}, 0 0 ${Math.round(outlinePx * 8)}px ${style.outline}`;
   previewCaption.classList.toggle('caption-box', Boolean(style.box));
   previewCaption.classList.remove(
     'anim-mixed', 'anim-pop', 'anim-slide', 'anim-zoom', 'anim-fade', 'anim-cinematic', 'anim-pulse', 'anim-glitch', 'anim-typewriter', 'anim-shake',
     'anim-random_text', 'anim-documentary', 'anim-archive', 'anim-digital', 'anim-stamp', 'anim-money', 'anim-warning', 'anim-industrial', 'anim-luxury',
-    'anim-none'
+    'anim-none', 'anim-blur_rise'
   );
-  previewCaption.classList.add(`anim-${style.animation || 'mixed'}`);
+  previewCaption.classList.add(`anim-${style.animation || 'fade'}`);
   updateSubtitleControlVisuals();
   const firstVideo = state.videos[0];
   const thumb = firstVideo ? state.thumbs.get(rel(firstVideo)) : null;
@@ -5403,6 +5446,7 @@ async function startRender(context = {}){
   try{
     setRenderStage('preparing');
     setRenderProgress(0, context.sampleRender ? 'Preflight da amostra' : 'Preflight local', `Render: ${renderLabel}. Validando CTA, áudio, Textos, Legendas, música e políticas antes de copiar arquivos.`);
+    showToast('Render Iniciado', `Processando "${options.outputName || 'vídeo'}" com motor local acelerado.`, 'info');
     await runBackendPreflight(manifest, options);
     const budgetResponse = await fetch('/api/render-estimate', {
       method: 'POST',
@@ -5557,7 +5601,14 @@ async function pollStatus(jobId, context = {}){
         status: j.stage_label || j.stage || '',
       });
       const rawPct = Math.max(0, Math.min(100, j.percent || 0));
-      state.renderMaxPercent = Math.max(state.renderMaxPercent || 0, rawPct);
+      if (j.stage === 'preparing' && (state.renderMaxPercent || 0) > 28) {
+        state.renderMaxPercent = rawPct;
+      } else if (j.stage === 'recovery' || (j.recovery_count || 0) > (state._lastRecoveryCount || 0)) {
+        state._lastRecoveryCount = j.recovery_count || 0;
+        state.renderMaxPercent = rawPct;
+      } else {
+        state.renderMaxPercent = Math.max(state.renderMaxPercent || 0, rawPct);
+      }
       const pct = state.renderMaxPercent;
       progressBar.style.width = pct + '%';
       eyePercent.textContent = Math.round(pct) + '%';
@@ -5657,6 +5708,7 @@ async function pollStatus(jobId, context = {}){
         setRenderActive(false);
         setRenderStage('done');
         renderTitle.textContent = 'Render concluído';
+        showToast('Render Concluído', `"${j.output_name || 'Vídeo'}" finalizado com sucesso!`, 'success');
         const closeBtn = $('#closeModal');
         if(closeBtn) closeBtn.textContent = 'Fechar';
         const delivery = j.delivery_summary || {};
@@ -5710,6 +5762,7 @@ async function pollStatus(jobId, context = {}){
         setRenderStage('cancelled');
         document.title = 'Glide Studio - Render cancelado';
         renderTitle.textContent = 'Render cancelado';
+        showToast('Render Cancelado', 'Processamento interrompido com segurança.', 'warning');
         const closeBtn = $('#closeModal');
         if(closeBtn) closeBtn.textContent = 'Fechar';
         renderMsg.textContent = cleanDisplayText(j.error || 'Render cancelado pelo usuário.');
@@ -5729,6 +5782,7 @@ async function pollStatus(jobId, context = {}){
         setRenderStage('error');
         document.title = 'Glide Studio - Erro no render';
         renderTitle.textContent = 'Erro no render';
+        showToast('Erro no Render', j.error || 'Falha durante o processamento.', 'error');
         const closeBtn = $('#closeModal');
         if(closeBtn) closeBtn.textContent = 'Fechar';
         renderMsg.textContent = j.error || 'Erro desconhecido';
@@ -7282,6 +7336,7 @@ async function renderQueue(config = {}){
       renderTitle.textContent = 'Fila concluída';
       renderMsg.textContent = `${done} projeto(s) concluído(s), ${failed} com erro, ${skipped.length} ignorado(s) sem requisitos. Veja a galeria e os cards da fila.`;
       dockSummary.textContent = `Fila finalizada: ${done} concluído(s), ${failed} erro(s), ${skipped.length} ignorado(s).`;
+      showToast('Fila Concluída', `${done} projeto(s) finalizado(s) no lote.`, done > 0 ? 'success' : 'info');
       if(done > 0) playCompletionSound('queue');
     }
     const batchReport = await saveQueueBatchReport(state.queueBatchId, queueItems, {
@@ -8019,6 +8074,17 @@ let captionPreviewTimer = 0;
   input.addEventListener('input', updateSubtitlePreview);
   input.addEventListener('change', updateSubtitlePreview);
 });
+if(subtitlePreview){
+  subtitlePreview.addEventListener('click', () => {
+    const badge = previewCueBadge || $('#previewCueBadge');
+    if(!state.parsedSubtitleCues?.length) return;
+    state.previewCueIndex = (state.previewCueIndex + 1) % state.parsedSubtitleCues.length;
+    const cue = state.parsedSubtitleCues[state.previewCueIndex];
+    if(previewCaption) previewCaption.textContent = (cue?.text || '').slice(0, 100);
+    if(badge) badge.textContent = `Frase ${state.previewCueIndex + 1}/${state.parsedSubtitleCues.length} ↻`;
+    updateSubtitlePreview({refreshStats: false});
+  });
+}
 if(subtitleAnimation){
   subtitleAnimation.addEventListener('change', () => {
     if(autoSoundFxToggle?.checked) playSfxSequence(subtitleFxByAnimation[subtitleAnimation.value] || []);
@@ -8558,6 +8624,24 @@ if(settingsModal) settingsModal.addEventListener('click', event => {
     settingsModal.setAttribute('aria-hidden', 'true');
   }
 });
+
+const shortcutsBtn = $('#shortcutsBtn');
+const shortcutsModal = $('#shortcutsModal');
+const closeShortcutsModal = $('#closeShortcutsModal');
+if(shortcutsBtn) shortcutsBtn.addEventListener('click', () => {
+  shortcutsModal?.classList.add('show');
+  shortcutsModal?.setAttribute('aria-hidden', 'false');
+});
+if(closeShortcutsModal) closeShortcutsModal.addEventListener('click', () => {
+  shortcutsModal?.classList.remove('show');
+  shortcutsModal?.setAttribute('aria-hidden', 'true');
+});
+if(shortcutsModal) shortcutsModal.addEventListener('click', event => {
+  if(event.target === shortcutsModal){
+    shortcutsModal.classList.remove('show');
+    shortcutsModal.setAttribute('aria-hidden', 'true');
+  }
+});
 syncUiSoundControls();
 if(uiSoundsToggle) uiSoundsToggle.addEventListener('change', () => {
   state.uiSoundsEnabled = uiSoundsToggle.checked;
@@ -8820,6 +8904,7 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     const activeModals = [
       $('#settingsModal'),
+      $('#shortcutsModal'),
       $('#retryModal'),
       $('#reportModal'),
       $('#scriptGuideModal'),
@@ -8842,6 +8927,73 @@ window.addEventListener('keydown', (e) => {
       renderModal.classList.remove('show');
       renderModal.setAttribute('aria-hidden', 'true');
       document.title = 'Glide Studio';
+    }
+    return;
+  }
+
+  const activeEl = document.activeElement;
+  const isInput = activeEl && (
+    activeEl.tagName === 'INPUT' ||
+    activeEl.tagName === 'TEXTAREA' ||
+    activeEl.tagName === 'SELECT' ||
+    activeEl.isContentEditable
+  );
+
+  // F1 or ? (outside input) opens shortcuts modal
+  if (e.key === 'F1' || (e.key === '?' && !isInput)) {
+    e.preventDefault();
+    const modal = $('#shortcutsModal');
+    if(modal) {
+      const isShow = modal.classList.contains('show');
+      modal.classList.toggle('show', !isShow);
+      modal.setAttribute('aria-hidden', isShow ? 'true' : 'false');
+    }
+    return;
+  }
+
+  // Ctrl+Enter or Cmd+Enter: Launch Render
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    e.preventDefault();
+    if(state.renderActive || state.queueRendering) return;
+    if(renderQueueBtn && !renderQueueBtn.disabled) {
+      renderQueueBtn.click();
+    } else if(renderBtn && !renderBtn.disabled) {
+      renderBtn.click();
+    } else {
+      showToast('Render indisponível', 'Adicione vídeos e áudios válidos para liberar a exportação.', 'warning');
+    }
+    return;
+  }
+
+  // Ctrl+N or Cmd+N: New Project
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
+    e.preventDefault();
+    if(newProjectBtn) newProjectBtn.click();
+    return;
+  }
+
+  // Ctrl+D or Cmd+D: Duplicate Active Project
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'd' || e.key === 'D')) {
+    e.preventDefault();
+    if(duplicateProjectBtn) duplicateProjectBtn.click();
+    return;
+  }
+
+  // Ctrl+I or Cmd+I: Quick Import Media
+  if ((e.ctrlKey || e.metaKey) && (e.key === 'i' || e.key === 'I')) {
+    e.preventDefault();
+    const pickBtn = $('#pickVideos') || $('#pickFiles');
+    if(pickBtn) pickBtn.click();
+    return;
+  }
+
+  // Space (outside inputs): Cycle Subtitle / Text Preview
+  if (e.key === ' ' && !isInput) {
+    const subPreview = $('#subtitlePreview');
+    if(subPreview && state.parsedSubtitleCues?.length > 1) {
+      e.preventDefault();
+      subPreview.click();
+      return;
     }
   }
 });
@@ -8873,6 +9025,8 @@ document.querySelectorAll('.nav-item[data-target]').forEach(btn => {
     if(el){
       window.requestAnimationFrame(() => {
         el.scrollIntoView({behavior: 'smooth', block: 'start'});
+        el.classList.add('section-target-highlight');
+        setTimeout(() => el.classList.remove('section-target-highlight'), 1200);
       });
     }
   });

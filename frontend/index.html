@@ -90,6 +90,10 @@
           </span>
           <strong>Aguardando áudio</strong>
         </div>
+        <button type="button" class="btn ghost small" id="shortcutsBtn" title="Atalhos de teclado (F1 ou ?)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><line x1="6" y1="8" x2="6" y2="8"/><line x1="10" y1="8" x2="10" y2="8"/><line x1="14" y1="8" x2="14" y2="8"/><line x1="18" y1="8" x2="18" y2="8"/><line x1="6" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="18" y2="12"/><line x1="8" y1="16" x2="16" y2="16"/></svg>
+          <span>Atalhos</span>
+        </button>
         <button type="button" class="btn ghost small settings-button" id="settingsBtn" title="Configurações e utilitários">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           <span>Config</span>
@@ -306,62 +310,62 @@
 
       <div class="card options-card" id="exportSection">
         <div class="level-switch-container">
-          <div class="production-level-switch" role="tablist" aria-label="Nível de Produção">
-            <button type="button" class="level-tab active" data-level="1" id="levelTab1" title="Modo 1-Click: Produção 100% autônoma para YouTube com inteligência máxima">
-              <span class="level-pill">NÍVEL 1</span>
-              <strong class="level-title">YouTube 1-Click Pro</strong>
-              <small class="level-desc">Autônomo &amp; Retenção Máxima</small>
+          <div class="production-level-switch" role="tablist" aria-label="Modo de Produção">
+            <button type="button" class="level-tab active" data-level="1" id="levelTab1" title="Motor Editorial Adaptativo: Produção autônoma para YouTube 16:9 com qualidade e ritmo máximos">
+              <span class="level-pill">PADRÃO MASTER</span>
+              <strong class="level-title">YouTube Master (16:9)</strong>
+              <small class="level-desc">Motor Editorial Adaptativo</small>
             </button>
-            <button type="button" class="level-tab" data-level="2" id="levelTab2" title="Modo Shorts/Reels: Enquadramento vertical 9:16 com Reframe Inteligente por Saliência">
-              <span class="level-pill">NÍVEL 2</span>
+            <button type="button" class="level-tab" data-level="2" id="levelTab2" title="Modo Shorts/Reels: Enquadramento vertical 9:16 com Reframe Inteligente">
+              <span class="level-pill">VERTICAL</span>
               <strong class="level-title">Shorts &amp; Reels (9:16)</strong>
-              <small class="level-desc">Saliência &amp; Face Tracking</small>
+              <small class="level-desc">Full-Bleed &amp; Saliência</small>
             </button>
-            <button type="button" class="level-tab" data-level="3" id="levelTab3" title="Modo Customizado: Abra a Gaveta Avançada para estilizar legendas, cores, fontes, CTA e efeitos">
-              <span class="level-pill">NÍVEL 3</span>
-              <strong class="level-title">Modo Customizado</strong>
-              <small class="level-desc">Gaveta Avançada &amp; Design</small>
+            <button type="button" class="level-tab" data-level="3" id="levelTab3" title="Ajustes Finos: Abra os seletores manuais de cores, fontes e CTA">
+              <span class="level-pill">AJUSTES</span>
+              <strong class="level-title">Ajustes Manuais</strong>
+              <small class="level-desc">Gaveta Avançada</small>
             </button>
           </div>
         </div>
 
-        <!-- NÍVEL 1: STACK DO MOTOR AUTÔNOMO 1-CLICK PRO -->
+        <!-- STACK DO MOTOR EDITORIAL ADAPTATIVO -->
         <div class="level-view" id="levelView1">
           <div class="autonomous-stack-card">
             <div class="autonomous-stack-head">
               <div class="stack-badge-row">
                 <span class="stack-pulse-dot"></span>
-                <strong>Motor Autônomo 1-Click Pro</strong>
+                <strong>Motor Editorial Adaptativo 8.0</strong>
               </div>
-              <span class="stack-status-badge">100% Ativo</span>
+              <span class="stack-status-badge">100% Ativo • Pacing Documentário</span>
             </div>
             <div class="autonomous-chips">
-              <div class="auto-chip" title="Filtro Anti-Poluição Nativo: elimina textos excessivos, gráficos e apresentadores fixos com salvaguarda dinâmica de duração">
+              <div class="auto-chip" title="Protocolo Sagrado do Gancho: primeiros 15-30s protegidos estritamente com Hero B-rolls de alta qualidade">
                 <span class="chip-dot"></span>
-                <span>Anti-Poluição Nativo</span>
+                <span>Protocolo Sagrado do Gancho</span>
               </div>
-              <div class="auto-chip" title="Auto B-Roll Pacing Slicer: fatia clipes longos em tomadas dinâmicas de 3.5s a 5.0s com Punch-In alternado 1.12x">
+              <div class="auto-chip" title="Anti-Poluição Absoluto: eliminação de telas pretas, slides, marcas d'água, paredes estáticas e glare">
                 <span class="chip-dot"></span>
-                <span>Pacing Slicer (3.5s–5.0s)</span>
+                <span>Anti-Poluição Absoluto</span>
               </div>
-              <div class="auto-chip" title="Sincronia Editorial Magnética de Fala: atrai cortes visuais magneticamente para o término de palavras e pausas">
+              <div class="auto-chip" title="Pacing Documental Dinâmico: média de 3.8s por tomada com cortes secos e variações de escala">
+                <span class="chip-dot"></span>
+                <span>Pacing Documental (3.8s)</span>
+              </div>
+              <div class="auto-chip" title="Sincronia Editorial Magnética de Fala: alinhamento natural com a narração">
                 <span class="chip-dot"></span>
                 <span>Sincronia Magnética (SRT)</span>
               </div>
-              <div class="auto-chip" title="Reuso Cinematográfico Mutante: permutação não-linear coprima, espelhamento seguro e micro-reframing contra Content-ID">
+              <div class="auto-chip" title="Reuso Cinematográfico Variado: até 3x com enquadramento 1.14x, stride de in-point e retiming suave sem reprodução reversa">
                 <span class="chip-dot"></span>
-                <span>Reuso Mutante</span>
+                <span>Reuso com Reframing 1.14x</span>
               </div>
-              <div class="auto-chip" title="Nivelamento profissional de narração vocal e ducking inteligente">
+              <div class="auto-chip" title="Tipografia Neo-Grotesque Documental: pílulas charcoal translúcidas e animações suaves">
                 <span class="chip-dot"></span>
-                <span>Voz Master &amp; Ducking</span>
-              </div>
-              <div class="auto-chip" title="Diretor Visual Inteligente: curadoria e enquadramento das melhores tomadas">
-                <span class="chip-dot"></span>
-                <span>Diretor Visual</span>
+                <span>Tipografia Documental</span>
               </div>
             </div>
-            <p class="autonomous-note">Basta soltar seus arquivos e clicar em Renderizar. Corte, ritmo, pós-produção e proteções rodam automaticamente.</p>
+            <p class="autonomous-note">Motor único, veloz e inteligente. Solte seus arquivos e o estúdio orquestra ritmo, B-rolls, pós-produção e proteções automaticamente.</p>
           </div>
         </div>
 
@@ -376,7 +380,8 @@
             <div class="shorts-controls-grid">
               <label>Enquadramento Vertical
                 <select id="level2DualExportModeSelect">
-                  <option value="smart_crop" selected>Full-Bleed 9:16 (Reframe por Saliência)</option>
+                  <option value="smart_auto" selected>Automático (protege textos e CTA)</option>
+                  <option value="smart_crop">Full-Bleed 9:16 (pode cortar textos e CTA)</option>
                   <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
                   <option value="smart_auto">Automático Adaptativo</option>
                 </select>
@@ -517,7 +522,8 @@
           <label class="toggle" title="Detecta pausas mortas (>1.0s) na narração e compacta suavemente para um respiro natural (~350ms), acelerando o render e aumentando a retenção."><input id="trimSilenceToggle" type="checkbox" checked /> <span>Otimizar silêncios da voz</span></label>
           <label class="toggle" title="Gera automaticamente uma versão vertical 1080x1920 (9:16) para TikTok/Shorts/Reels junto com o master horizontal."><input id="dualExportShortsToggle" type="checkbox" /> <span>Dual Export (Shorts 9:16)</span></label>
           <select id="dualExportModeSelect" class="advanced-only select-inline" title="Modo de enquadramento vertical para Shorts/TikTok 9:16" style="margin: 0 4px; padding: 4px 8px; border-radius: 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); color: inherit;">
-            <option value="smart_crop" selected>Full-Bleed 9:16 (Reframe por Saliência)</option>
+            <option value="smart_auto" selected>Automático (protege textos e CTA)</option>
+                  <option value="smart_crop">Full-Bleed 9:16 (pode cortar textos e CTA)</option>
             <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
             <option value="smart_auto">Automático Adaptativo</option>
           </select>
@@ -655,7 +661,7 @@
         <div>
           <p class="eyebrow">Textos editoriais</p>
           <h3>Textos animados</h3>
-          <p class="engine-note" id="subtitleStatus">Adicione um SRT de Textos para orientar o Águia e criar chamadas animadas.</p>
+          <p class="engine-note" id="subtitleStatus">Adicione um SRT de Textos para orientar a montagem e criar chamadas animadas.</p>
         </div>
         <button type="button" class="btn ghost small" id="clearSubtitleBtn">Remover Textos</button>
       </div>
@@ -663,60 +669,35 @@
         <div class="subtitle-controls">
           <label class="control-field">Preset
             <select id="subtitlePreset">
-              <option value="bold_white">Branco bold</option>
-              <option value="bold_yellow">Amarelo bold</option>
-              <option value="dark_box">Caixa escura</option>
-              <option value="cinema_white">Cinema branco</option>
-              <option value="green_neon">Verde neon</option>
+              <option value="documentary" selected>Documentário Minimalista (Neo-Grotesque)</option>
+              <option value="editorial_card">Editorial Lower-Third Card</option>
+              <option value="cinema_minimal">Cinema Clean 4K</option>
+              <option value="journalistic">Jornalismo Investigativo</option>
+              <option value="dark_box">Caixa Escura Translúcida</option>
+              <option value="cinema_white">Cinema Branco Suave</option>
               <option value="minimal">Minimal</option>
-              <option value="impact_gold">Impacto dourado</option>
-              <option value="documentary">Documentário</option>
-              <option value="blue_glow">Azul glow</option>
-              <option value="red_punch">Vermelho punch</option>
-              <option value="soft_pink">Rosa suave</option>
-              <option value="clean_box">Caixa clean</option>
             </select>
           </label>
           <label class="control-field">Fonte
             <select id="subtitleFontPreset">
-              <option value="arial_black">Arial Black</option>
-              <option value="bahnschrift">Bahnschrift</option>
-              <option value="segoe">Segoe UI</option>
-              <option value="impact">Impact</option>
-              <option value="georgia">Georgia</option>
-              <option value="trebuchet">Trebuchet</option>
-              <option value="verdana">Verdana</option>
-              <option value="arial">Arial</option>
+              <option value="bahnschrift" selected>Bahnschrift / DIN (Neo-Grotesque)</option>
+              <option value="segoe">Segoe UI Clean</option>
+              <option value="arial">Inter / Arial Clean</option>
+              <option value="arial_black">Arial Black Bold</option>
+              <option value="georgia">Georgia Editorial</option>
             </select>
           </label>
           <label class="control-field">Animação
             <select id="subtitleAnimation">
-              <option value="mixed">Auto (Variações Dinâmicas)</option>
-              <option value="random_text">Aleatório por categorias</option>
-              <option value="pop">Pop suave</option>
-              <option value="slide">Slide cinema</option>
-              <option value="zoom">Zoom elegante</option>
-              <option value="fade">Fade limpo</option>
-              <option value="cinematic">Cinemática</option>
-              <option value="pulse">Pulse neon</option>
-              <option value="glitch">Glitch digital</option>
-              <option value="typewriter">Typewriter</option>
-              <option value="shake">Shake impacto</option>
-              <option value="documentary">Luxury documentary</option>
-              <option value="archive">Archive caption</option>
-              <option value="digital">Digital typing</option>
-              <option value="stamp">Rubber stamp</option>
-              <option value="money">Money counter</option>
-              <option value="warning">Warning alert</option>
-              <option value="industrial">Industrial metal</option>
-              <option value="luxury">Luxury reveal</option>
-              <option value="none">Sem animação</option>
+              <option value="fade" selected>Fade Suave (Padrão Documentário)</option>
+              <option value="blur_rise">Subida Suave (Subtle Rise)</option>
+              <option value="none">Instantâneo (Sem animação)</option>
             </select>
             <button type="button" class="btn ghost small fx-preview-btn" id="subtitleFxPreviewBtn">Ouvir FX</button>
           </label>
           <label class="range-field">Tamanho
-            <span class="range-value" id="subtitleSizeValue">64</span>
-            <input id="subtitleSize" type="range" min="36" max="112" value="64" />
+            <span class="range-value" id="subtitleSizeValue">32</span>
+            <input id="subtitleSize" type="range" min="24" max="72" value="32" />
           </label>
           <label class="range-field">Posição vertical
             <span class="range-value" id="subtitlePositionValue">16%</span>
@@ -760,10 +741,11 @@
             </div>
           </div>
         </div>
-        <div class="subtitle-preview" id="subtitlePreview">
+        <div class="subtitle-preview" id="subtitlePreview" title="Clique para alternar entre as frases do SRT">
           <div class="preview-media" id="previewMedia">
             <span>Preview</span>
           </div>
+          <div class="preview-cue-badge" id="previewCueBadge" style="display:none;" title="Clique no preview para alternar frases do SRT">Frase 1/1 ↻</div>
           <div class="preview-caption" id="previewCaption">Seu texto animado aparece assim</div>
         </div>
       </div>
@@ -897,7 +879,11 @@
         </div>
       </div>
       <div class="timeline" id="videoTimeline">
-        <div class="empty">Os clipes aparecem aqui.</div>
+        <div class="empty">
+          <div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"/><line x1="7" y1="2" x2="7" y2="22"/><line x1="17" y1="2" x2="17" y2="22"/><line x1="2" y1="12" x2="22" y2="12"/></svg></div>
+          <strong>Nenhum clipe na timeline</strong>
+          <span>Arraste vídeos e imagens para esta área ou use os botões de envio acima.</span>
+        </div>
       </div>
     </section>
 
@@ -909,7 +895,11 @@
         </div>
       </div>
       <div class="audio-lane" id="audioTimeline">
-        <div class="empty">A narração aparece aqui.</div>
+        <div class="empty">
+          <div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg></div>
+          <strong>Nenhuma narração carregada</strong>
+          <span>Adicione arquivos de áudio para conduzir o ritmo e tempo do vídeo.</span>
+        </div>
       </div>
     </section>
 
@@ -945,7 +935,11 @@
         </div>
       </div>
       <div class="audio-lane music-lane" id="backgroundTimeline">
-        <div class="empty">Músicas de fundo aparecem aqui. Elas não entram como narração.</div>
+        <div class="empty">
+          <div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+          <strong>Trilha sonora automática ativa</strong>
+          <span>A biblioteca local sorteia faixas e aplica ducking suave nas pausas da voz.</span>
+        </div>
       </div>
     </section>
 
@@ -959,7 +953,11 @@
         <button type="button" class="btn ghost small" id="refreshGalleryBtn">Atualizar galeria</button>
       </div>
       <div class="render-gallery" id="renderGallery">
-        <div class="empty">Os renders finalizados aparecem aqui.</div>
+        <div class="empty">
+          <div class="empty-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg></div>
+          <strong>Nenhum vídeo finalizado ainda</strong>
+          <span>Os renders concluídos aparecerão aqui com atalhos de reprodução e acesso rápido.</span>
+        </div>
       </div>
     </section>
 
@@ -977,6 +975,70 @@
       </button>
     </section>
   </main>
+
+  <div class="modal report-modal" id="shortcutsModal" aria-hidden="true">
+    <div class="modal-card report-modal-card shortcuts-modal-card" role="dialog" aria-modal="true" aria-labelledby="shortcutsModalTitle">
+      <div class="report-modal-head">
+        <div>
+          <p class="eyebrow">Produtividade &amp; Ergonomia</p>
+          <h2 id="shortcutsModalTitle">Atalhos de Teclado</h2>
+          <p>Ações rápidas para edição ágil e controle da fila de produção.</p>
+        </div>
+        <button type="button" class="btn ghost small" id="closeShortcutsModal">Fechar</button>
+      </div>
+      <div class="shortcuts-grid">
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Renderizar Fila / Projeto</strong>
+            <small>Dispara o render no motor local acelerado</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>N</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Novo Projeto</strong>
+            <small>Cria um projeto independente na fila</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>D</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Duplicar Projeto</strong>
+            <small>Clona o projeto ativo com mídias e presets</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Ctrl</kbd> + <kbd>I</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Importar Mídia</strong>
+            <small>Abre o seletor de arquivos de vídeo, fotos e áudios</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Espaço</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Alternar Prévia de Textos</strong>
+            <small>Avança dinamicamente entre as frases do SRT</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>Esc</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Fechar Janelas</strong>
+            <small>Fecha modais, relatórios ou painéis suspensos</small>
+          </div>
+        </div>
+        <div class="shortcut-item">
+          <div class="shortcut-keys"><kbd>F1</kbd> ou <kbd>?</kbd></div>
+          <div class="shortcut-desc">
+            <strong>Guia de Atalhos</strong>
+            <small>Exibe esta janela de referência rápida</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <div class="modal settings-modal" id="settingsModal" aria-hidden="true">
     <div class="modal-card settings-card" role="dialog" aria-modal="true" aria-labelledby="settingsModalTitle">
@@ -1005,9 +1067,9 @@
             <option value="light">Claro</option>
           </select>
         </label>
-        <div class="theme-control render-priority-control" title="Motor único de alta performance: 1080p Full HD com aceleração por hardware GPU e máxima fidelidade visual.">
+        <div class="theme-control render-priority-control" title="Motor integrado de renderização do Glide Studio, com composição em uma passagem e aceleração disponível.">
           <span>Motor de Render</span>
-          <strong style="color:var(--accent,#10b981);font-size:0.88rem;">1080p Ultra Performance</strong>
+          <strong style="color:var(--accent,#10b981);font-size:0.88rem;">Render Studio</strong>
         </div>
         <label class="toggle compact" title="Quando ativo, o Glide interrompe renders que passam muito do limite do modo. Desative se preferir concluir renders que ultrapassem um pouco o tempo previsto.">
           <input type="checkbox" id="renderBudgetToggle" checked />
@@ -1157,7 +1219,7 @@
   </div>
 
   <div class="modal render-panel" id="renderModal" aria-hidden="true">
-    <div class="modal-card">
+    <div class="modal-card" role="dialog" aria-labelledby="renderTitle">
       <div class="render-logo">
         <span class="render-eagle" aria-hidden="true"></span>
         <span id="eyePercent">0%</span>
@@ -1201,9 +1263,6 @@
   <script src="/static/app.js?v=1.40.0"></script>
 </body>
 </html>
-
-
-
 
 
 

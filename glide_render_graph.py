@@ -57,6 +57,19 @@ def _copy_or_link(source: Path, destination: Path) -> None:
         shutil.copy2(source, destination)
 
 
+def _publish_directory(source: Path, destination: Path) -> None:
+    # Windows antivirus/indexing can briefly retain a handle after a cache write.
+    # Retry only sharing/access failures, and keep permanent errors visible.
+    for attempt in range(4):
+        try:
+            os.replace(source, destination)
+            return
+        except PermissionError:
+            if attempt == 3:
+                raise
+            time.sleep(0.05 * (attempt + 1))
+
+
 class RenderGraph:
     def __init__(
         self,
@@ -167,7 +180,7 @@ class RenderGraph:
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.rmtree(target, ignore_errors=True)
-        os.replace(temporary, target)
+        _publish_directory(temporary, target)
         size_bytes = _folder_size(target)
         self.db.upsert_render_node(
             cache_key=cache_key,

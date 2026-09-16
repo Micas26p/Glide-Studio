@@ -76,3 +76,28 @@ Glide-Studio/
 - **Memória RAM**: 4 GB (recomendado 8 GB ou mais).
 - **Espaço em Disco**: ~500 MB livres.
 - **Conexão de Internet**: Apenas necessária na primeira execução do `instalar.bat` para baixar os pacotes; após instalado, o sistema opera **100% offline**.
+
+## Verificação e recuperação
+
+A versão web usa o ambiente `.venv` já instalado, sem executar downloads ao abrir.
+Se faltarem dependências, execute `instalar.bat` para reparar. Os iniciadores não
+encerram processos que estejam usando a porta 8787.
+
+Na exportação vertical, **Automático** preserva a composição com fundo desfocado
+quando existem textos ou CTA. **Full-Bleed** mantém o recorte por saliência e pode
+cortar elementos próximos às bordas. Presets já salvos mantêm sua escolha.
+
+Para desenvolvimento e testes de regressão:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+python -m ruff check --select F821,F822,F823,E9 *.py
+```
+
+Os testes unitários usam uma pasta temporária isolada. O cenário de mídia
+`tests/run_media_e2e.py` requer um servidor iniciado com `GLIDE_ULTRA_DATA_ROOT`
+apontando para uma pasta de teste; gera e verifica um vídeo de 24 segundos com
+FFmpeg. Nunca aponte esse cenário para uma sessão com projetos em produção.
+
+Consulte `QA_ETAPA_5.md` para resultados, evidências e limitações da revisão.

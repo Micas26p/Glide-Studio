@@ -82,7 +82,7 @@ def build_render_plan(
             "strong_moment_enhance": bool(options.get("strongMomentEnhance", True)),
             "render_recovery": bool(options.get("renderRecovery", True)),
             "render_priority": options.get("renderPriority", "balanced"),
-            "turbo_policy": options.get("turboPolicy", "production_max") if options.get("renderPriority") == "max" else "disabled",
+            "turbo_policy": options.get("turboPolicy", "studio_render"),
             "auto_director": bool(options.get("autoDirector", True)),
             "semantic_visual_index": bool(options.get("semanticVisualIndex", True)),
             "channel_learning": bool(options.get("channelLearning", True)),

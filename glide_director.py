@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-DIRECTOR_VERSION = "5"
+DIRECTOR_VERSION = "8"
 
 CATEGORY_TERMS: dict[str, tuple[str, ...]] = {
     "people": (
@@ -91,7 +91,7 @@ KEYWORD_STOPWORDS = {
     "ser", "sua", "uma", "the", "and", "for", "from", "into", "that", "this",
     "with", "was", "were", "you", "your", "about", "when", "where", "what", "los",
     "las", "del", "una", "uno", "con", "dans", "avec", "des", "les", "pour", "sur",
-    "der", "die", "das", "und", "mit", "ein", "della", "gli", "che", "nie", "jest",
+    "der", "die", "und", "mit", "ein", "della", "gli", "che", "nie", "jest",
     "dla", "oraz", "это", "как",
 }
 
@@ -299,6 +299,75 @@ def build_energy_map(cues: Iterable[Any], total_duration: float) -> dict[str, An
     return {"version": DIRECTOR_VERSION, "average": round(average, 3), "points": points}
 
 
+TIER_RANKS = {"A": 0, "B": 1, "C": 2, "D": 3, "REJECT": 99}
+
+
+def evaluate_clip_tier(item: dict[str, Any]) -> str:
+    """
+    Classifica cada clipe em tiers rigorosos com dominância absoluta:
+    - Tier A (Heróis/Fortes): alta qualidade, movimento ativo, relevância visual, sem defeitos.
+    - Tier B (Bons/Contextuais): qualidade sólida, contextualizam bem, movimento constante.
+    - Tier C (Neutros/Genéricos): paisagens genéricas, b-roll de suporte estático.
+    - Tier D (Extremo recurso): resolução baixa ou quase descartáveis.
+    - REJECT (Eliminação Hard): slides, logos, cartelas, telas pretas, corrompidos.
+    """
+    if item.get("suspect") or item.get("action") == "hard_reject" or item.get("is_rejected"):
+        return "REJECT"
+    cat = str(item.get("category") or item.get("visual_category") or "").lower()
+    if cat in {
+        "presentation_slide", "corporate_logo_slide", "black_screen", "webcam_pip",
+        "ui_screenshot", "low_quality", "invalid", "no_frames", "text_dominant", "data_dominant",
+    }:
+        return "REJECT"
+
+    quality = float(item.get("quality_score") or 0.70)
+    height = int(item.get("height") or 1080)
+    diff = float(item.get("frame_diff") or 0.0)
+    is_hero = bool(item.get("is_hero"))
+    is_flat = bool(item.get("is_flat_wall"))
+    is_over = bool(item.get("is_overexposed"))
+    media_type = str(item.get("media_type") or "video")
+
+    if height < 480 or quality < 0.40 or (is_flat and is_over):
+        return "D"
+
+    # Tier A: Heróis com resolução >= 720p, qualidade >= 0.78, sem paredes lisas/estouros
+    if (is_hero or (quality >= 0.78 and height >= 720 and (diff >= 3.0 or media_type == "video"))) and not is_flat and not is_over:
+        return "A"
+
+    # Tier B: Bons clipes contextuais técnicos
+    if quality >= 0.62 and height >= 720 and not is_flat:
+        return "B"
+
+    # Tier C: Neutros / suporte genérico
+    if quality >= 0.48:
+        return "C"
+
+    return "D"
+
+
+def dominance_sort_key(
+    item: dict[str, Any],
+    details: dict[int, dict[str, Any]] | None = None,
+    scores: dict[int, float] | None = None,
+) -> tuple[int, float, float]:
+    """
+    Chave de ordenação lexicográfica estrita:
+    1. Tier Rank (A=0, B=1, C=2, D=3, REJECT=99) domina absolutamente.
+    2. Relevância semântica e palavras-chave.
+    3. Pontuação geral da cena.
+    Garante que nenhum clipe de tier inferior vença um clipe de tier superior.
+    """
+    tier = evaluate_clip_tier(item)
+    rank = TIER_RANKS.get(tier, 2)
+    item_id = id(item)
+    parts = (details.get(item_id) if details else None) or item
+    sem = float(parts.get("semantic") or parts.get("semantic_score") or 0.0)
+    kw = float(parts.get("keyword_score") or 0.0)
+    sc = float((scores.get(item_id) if scores else None) or item.get("score") or 0.0)
+    return (rank, -(sem + kw), -sc)
+
+
 def direct_timeline(
     video_items: list[dict[str, Any]],
     blocks: list[dict[str, Any]],
@@ -409,7 +478,7 @@ def direct_timeline(
             repeat_penalty += 1.2
         if fingerprint and any(fingerprint_distance(fingerprint, used) <= 7 for used in used_fingerprints[-3:]):
             repeat_penalty += 2.6
-        suspect_penalty = 1.5 if item.get("suspect") else 0.0
+        suspect_penalty = 8.5 if item.get("suspect") else 0.0
         removal_bias = preference_bias.get("remove_clip", 0.0) * (0.5 if item.get("suspect") else 0.0)
         learned_bias = sum(category_bias.get(category, 0.0) for category in item_categories)
         item_terms = item_keywords(item)
@@ -418,7 +487,51 @@ def direct_timeline(
         role_boost = 0.0
         if role in {"introduction", "conclusion"}:
             role_boost += order_prior * 0.35
-        total = semantic + keyword_score + order_prior + local_stability + role_boost + role_category_boost + learned_bias + image_bias - repeat_penalty - suspect_penalty - removal_bias
+
+        # Qualidade Visual Cinematografica e Protecao Rígida do Gancho
+        quality_score = float(item.get("quality_score") or 0.70)
+        height = int(item.get("height") or 1080)
+        is_hero = bool(item.get("is_hero"))
+        is_flat_wall = bool(item.get("is_flat_wall"))
+        is_overexposed = bool(item.get("is_overexposed"))
+
+        quality_bonus = (quality_score - 0.5) * 3.5
+        res_penalty = 5.0 if height < 720 else 0.0
+        wall_penalty = 6.5 if is_flat_wall else 0.0
+        glare_penalty = 7.0 if is_overexposed else 0.0
+
+        hook_bonus = 0.0
+        is_hook_zone = (role == "introduction" or block_position <= 0.06)
+        if is_hook_zone:
+            if is_flat_wall or is_overexposed:
+                hook_bonus -= 25.0
+            elif height < 720:
+                hook_bonus -= 20.0
+            elif media_type == "image":
+                hook_bonus -= 12.0
+            elif is_hero or (media_type == "video" and quality_score >= 0.80 and height >= 720 and not item.get("suspect")):
+                hook_bonus += 6.5
+            else:
+                hook_bonus -= 4.0
+
+        total = (
+            semantic
+            + keyword_score
+            + order_prior
+            + local_stability
+            + role_boost
+            + role_category_boost
+            + learned_bias
+            + image_bias
+            + quality_bonus
+            + hook_bonus
+            - repeat_penalty
+            - suspect_penalty
+            - removal_bias
+            - res_penalty
+            - wall_penalty
+            - glare_penalty
+        )
         return {
             "score": total,
             "semantic": semantic,
@@ -430,6 +543,11 @@ def direct_timeline(
             "suspect_penalty": suspect_penalty,
             "learned_bias": learned_bias,
             "image_bias": image_bias,
+            "quality_bonus": quality_bonus,
+            "hook_bonus": hook_bonus,
+            "res_penalty": res_penalty,
+            "wall_penalty": wall_penalty,
+            "glare_penalty": glare_penalty,
             "matched_categories": sorted(item_categories & block_categories),
             "matched_keywords": matched_keywords,
             "order_distance": order_distance,
@@ -471,7 +589,7 @@ def direct_timeline(
             ]
             if local_candidates:
                 candidates = local_candidates
-        ranked = sorted(candidates, key=lambda item: scores[id(item)], reverse=True)
+        ranked = sorted(candidates, key=lambda it: dominance_sort_key(it, details=details, scores=scores))
         take = max(1, min(len(ranked), int(max(1.0, (float(block.get("end") or 0) - float(block.get("start") or 0)) / max(1.2, float(block.get("shot_duration") or 4.0))))))
         selected = ranked[:take]
         selected_ids = {id(item) for item in selected}
@@ -479,14 +597,16 @@ def direct_timeline(
             ordered.append(item)
             if item.get("fingerprint"):
                 used_fingerprints.append(str(item["fingerprint"]))
+            item_tier = evaluate_clip_tier(item)
             assignments.append({
                 "block": block.get("index"),
                 "role": block.get("role"),
                 "path": item.get("path"),
+                "tier": item_tier,
                 "categories": item.get("categories") or [],
                 "score": round(scores[id(item)], 3),
                 "confidence": round(max(0.35, min(0.96, 0.52 + max(0.0, scores[id(item)]) / 8.0)), 3),
-                "reason": explain_choice(item, block, details[id(item)]),
+                "reason": f"[{item_tier}] " + explain_choice(item, block, details[id(item)]),
                 "matched_keywords": details[id(item)].get("matched_keywords") or [],
                 "matched_categories": details[id(item)].get("matched_categories") or [],
                 "clip_number": item.get("clip_number"),
@@ -599,7 +719,7 @@ SCRIPT_MOOD_KEYWORDS: dict[str, set[str]] = {
     "warm_gold": {
         "sol", "verao", "praia", "deserto", "areia", "ouro", "riqueza", "dinheiro", "imperio", "luxo", "calor",
         "quente", "sun", "summer", "desert", "sand", "gold", "wealth", "rich", "empire", "luxury", "hot", "warm",
-        "verano", "playa", "desierto", "oro", "riqueza", "dourado", "amarelo", "yellow", "luz", "brilho",
+        "verano", "playa", "desierto", "oro", "dourado", "amarelo", "yellow", "luz", "brilho",
     },
     "nature_green": {
         "floresta", "mata", "selva", "arvore", "arvores", "verde", "planta", "campo", "natureza", "selvagem",
@@ -753,10 +873,9 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "war", "battle", "soldier", "soldiers", "army", "military", "forces", "troops", "missile", "bomb", "tanks",
         "combat", "trench", "conflict", "invasion", "danger", "enemy", "destruction", "ruin", "collapse", "crisis",
         "threat", "blood", "death", "weapons", "weapon", "gun", "guns", "attack", "fighting", "warrior", "offensive",
-        "guerra", "batalla", "soldado", "ejercito", "tropas", "misil", "bomba", "combate", "conflicto", "peligro",
-        "enemigo", "destruccion", "colapso", "amenaza", "violencia",
-        "guerre", "bataille", "soldat", "armee", "troupes", "missile", "bombe", "conflit", "danger", "ennemi",
-        "krieg", "schlacht", "soldat", "armee", "truppen", "rakete", "bombe", "kampf", "feind", "waffen",
+        "batalla", "ejercito", "misil", "conflicto", "peligro",
+        "enemigo", "destruccion", "amenaza", "guerre", "bataille", "soldat", "armee", "troupes", "bombe", "conflit", "ennemi",
+        "krieg", "schlacht", "truppen", "rakete", "kampf", "feind", "waffen",
     },
     "WEALTH_POWER_BUSINESS": {
         "dinheiro", "riqueza", "fortuna", "bilionario", "bilionarios", "milionario", "imperio", "poder", "ouro",
@@ -765,11 +884,10 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "economia", "capital", "heranca", "sucesso", "patrimonio", "riquezas",
         "money", "wealth", "fortune", "billionaire", "billionaires", "millionaire", "empire", "power", "gold", "dollar",
         "dollars", "bank", "banks", "banker", "market", "stocks", "investment", "profit", "profits", "business",
-        "corporate", "corporation", "luxury", "mansion", "rich", "capital", "finance", "finances", "economy", "success",
-        "dinero", "riqueza", "fortuna", "multimillonario", "imperio", "poder", "oro", "banco", "acciones", "inversion",
-        "ganancia", "empresa", "lujo", "mansion", "economia",
-        "argent", "richesse", "fortune", "milliardaire", "empire", "pouvoir", "or", "banque", "bourse", "investissement",
-        "geld", "reichtum", "vermoegen", "milliardaer", "imperium", "macht", "gold", "bank", "aktien", "gewinn",
+        "corporate", "corporation", "luxury", "mansion", "rich", "finance", "finances", "economy", "success",
+        "dinero", "multimillonario", "oro", "acciones", "inversion",
+        "ganancia", "lujo", "argent", "richesse", "milliardaire", "pouvoir", "or", "banque", "bourse", "investissement",
+        "geld", "reichtum", "vermoegen", "milliardaer", "imperium", "macht", "aktien", "gewinn",
     },
     "MYSTERY_INVESTIGATION": {
         "segredo", "segredos", "misterio", "misterios", "oculto", "conspiracao", "verdade", "revelacao", "investigacao",
@@ -778,11 +896,10 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "escandalo", "policia", "fraude", "acusacao", "conspiradores",
         "secret", "secrets", "mystery", "mysteries", "hidden", "conspiracy", "truth", "revelation", "investigation",
         "court", "judge", "trial", "evidence", "proof", "document", "documents", "dossier", "spy", "spies",
-        "espionage", "archive", "archives", "case", "crime", "suspect", "clue", "clues", "witness", "scandal", "police",
+        "espionage", "archive", "archives", "case", "suspect", "clue", "clues", "witness", "scandal", "police",
         "fraud", "detective",
-        "secreto", "misterio", "oculto", "conspiracion", "verdad", "investigacion", "tribunal", "juicio", "evidencia",
-        "archivo", "crimen", "sospechoso", "pista", "escandalo",
-        "secret", "mystere", "cache", "conspiration", "verite", "enquete", "tribunal", "proces", "preuve", "espion",
+        "secreto", "conspiracion", "verdad", "investigacion", "juicio", "evidencia",
+        "archivo", "crimen", "sospechoso", "mystere", "cache", "conspiration", "verite", "enquete", "proces", "preuve", "espion",
         "geheimnis", "mysterium", "verschwoerung", "wahrheit", "ermittlung", "gericht", "beweis", "spion", "archiv",
     },
     "SCIENCE_INNOVATION_TECH": {
@@ -790,15 +907,12 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "inteligencia", "artificial", "maquina", "maquinas", "robo", "robos", "automacao", "futuro", "espaco",
         "satelite", "foguete", "laboratorio", "pesquisa", "dados", "chip", "rede", "internet", "sistema", "sistemas",
         "invencao", "cientista", "cientistas", "energia", "nuclear", "genetica",
-        "technology", "science", "innovation", "computer", "computers", "software", "digital", "algorithm",
-        "intelligence", "artificial", "machine", "machines", "robot", "robots", "automation", "future", "space",
-        "satellite", "rocket", "lab", "laboratory", "research", "data", "chip", "network", "internet", "system",
-        "systems", "invention", "scientist", "scientists", "energy", "nuclear", "ai",
-        "tecnologia", "ciencia", "innovacion", "computadora", "algoritmo", "inteligencia", "maquina", "robot",
-        "futuro", "espacio", "satelite", "laboratorio", "datos", "sistema",
-        "technologie", "science", "innovation", "ordinateur", "algorithme", "intelligence", "machine", "robot",
-        "espace", "satellite", "laboratoire", "donnees",
-        "technologie", "wissenschaft", "innovation", "computer", "algorithmus", "intelligenz", "maschine", "roboter",
+        "technology", "science", "innovation", "computer", "computers", "algorithm",
+        "intelligence", "machine", "machines", "robot", "robots", "automation", "future", "space",
+        "satellite", "rocket", "lab", "laboratory", "research", "data", "network", "system",
+        "systems", "invention", "scientist", "scientists", "energy", "ai",
+        "innovacion", "computadora", "espacio", "datos", "technologie", "ordinateur", "algorithme", "espace", "laboratoire", "donnees",
+        "wissenschaft", "algorithmus", "intelligenz", "maschine", "roboter",
         "weltraum", "satellit", "labor", "daten",
     },
     "NATURE_JOURNEY_EXPLORATION": {
@@ -808,11 +922,9 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "arvores", "paisagem", "selvagem", "vento", "sol",
         "nature", "forest", "jungle", "ocean", "sea", "river", "water", "waters", "mountain", "mountains", "desert",
         "sand", "earth", "horizon", "road", "journey", "travel", "trip", "expedition", "exploration", "planet",
-        "animal", "animals", "wildlife", "storm", "sky", "clouds", "tree", "trees", "landscape", "wild", "wind", "sun",
-        "naturaleza", "bosque", "selva", "oceano", "mar", "rio", "montana", "desierto", "arena", "tierra", "horizonte",
-        "carretera", "viaje", "expedicion", "planeta", "animal", "paisaje",
-        "nature", "foret", "jungle", "ocean", "mer", "riviere", "montagne", "desert", "voyage", "expedition", "animal",
-        "natur", "wald", "dschungel", "ozean", "meer", "fluss", "berg", "berge", "wueste", "reise", "expedition", "tier",
+        "animals", "wildlife", "storm", "sky", "clouds", "tree", "trees", "landscape", "wild", "wind", "sun",
+        "naturaleza", "bosque", "montana", "desierto", "arena", "tierra", "carretera", "viaje", "expedicion", "paisaje",
+        "foret", "mer", "riviere", "montagne", "voyage", "natur", "wald", "dschungel", "ozean", "meer", "fluss", "berg", "berge", "wueste", "reise", "tier",
     },
     "HUMAN_DRAMA_PASSION": {
         "pessoa", "pessoas", "humano", "humanos", "homem", "mulher", "crianca", "familia", "povo", "multidao",
@@ -822,34 +934,29 @@ SEMANTIC_CONCEPT_CLUSTERS: dict[str, set[str]] = {
         "person", "people", "human", "humans", "man", "woman", "child", "family", "society", "crowd", "emotion",
         "emotions", "feeling", "feelings", "love", "hate", "hope", "fear", "tears", "pain", "suffering", "courage",
         "hero", "leader", "leaders", "speech", "destiny", "survival", "life", "soul", "passion", "face", "voice",
-        "persona", "personas", "humano", "hombre", "mujer", "familia", "pueblo", "multitud", "emocion", "amor",
-        "esperanza", "miedo", "lagrimas", "dolor", "coraje", "heroe", "lider", "vida",
-        "personne", "gens", "humain", "homme", "femme", "famille", "foule", "emotion", "amour", "peur", "larmes", "vie",
-        "person", "menschen", "mensch", "mann", "frau", "familie", "volk", "menge", "gefuehl", "liebe", "angst", "leben",
+        "persona", "personas", "hombre", "mujer", "pueblo", "multitud", "emocion", "esperanza", "miedo", "dolor", "coraje", "heroe", "personne", "gens", "humain", "homme", "femme", "famille", "foule", "amour", "peur", "larmes", "vie",
+        "menschen", "mensch", "mann", "frau", "familie", "volk", "menge", "gefuehl", "liebe", "angst", "leben",
     },
     "ANCIENT_HISTORY_TIME": {
         "historia", "historico", "historica", "antigo", "antigos", "seculo", "seculos", "passado", "memoria",
         "ancestral", "imperio", "reino", "rei", "rainha", "dinastia", "piramide", "piramides", "castelo", "ruinas",
         "templo", "arqueologia", "monumento", "civilizacao", "antiguidade", "reliquia", "tradicao", "mito", "lenda",
-        "history", "historical", "ancient", "century", "centuries", "past", "memory", "ancestral", "empire",
+        "history", "historical", "ancient", "century", "centuries", "past", "memory", "empire",
         "kingdom", "king", "queen", "dynasty", "pyramid", "pyramids", "castle", "ruins", "temple", "archaeology",
         "monument", "civilization", "antiquity", "relic", "heritage", "myth", "legend",
-        "historia", "historico", "antiguo", "siglo", "siglos", "pasado", "imperio", "reino", "rey", "dinastia",
-        "piramide", "ruinas", "templo", "arqueologia", "civilizacion",
-        "histoire", "historique", "ancien", "siecle", "siecles", "passe", "empire", "royaume", "pyramide", "ruines",
-        "geschichte", "historisch", "antik", "jahrhundert", "vergangenheit", "imperium", "koenig", "pyramide", "ruinen",
+        "antiguo", "siglo", "siglos", "pasado", "rey", "civilizacion",
+        "histoire", "historique", "ancien", "siecle", "siecles", "passe", "royaume", "pyramide", "ruines",
+        "geschichte", "historisch", "antik", "jahrhundert", "vergangenheit", "imperium", "koenig", "ruinen",
     },
     "URBAN_METROPOLIS": {
         "cidade", "cidades", "metropole", "urbano", "urbana", "predio", "predios", "arranha-ceu", "rua", "ruas",
         "avenida", "trafego", "carros", "concreto", "asfalto", "arquitetura", "centro", "capital", "iluminacao",
         "luzes", "noite", "noturno", "construcao", "viaduto",
         "city", "cities", "metropolis", "urban", "building", "buildings", "skyscraper", "skyscrapers", "street",
-        "streets", "avenue", "traffic", "cars", "concrete", "asphalt", "architecture", "downtown", "capital",
-        "lighting", "lights", "night", "construction",
-        "ciudad", "metropolis", "urbano", "edificio", "edificios", "rascacielos", "calle", "trafico", "concreto",
-        "arquitectura", "luces", "noche",
-        "ville", "metropole", "urbain", "batiment", "gratte-ciel", "rue", "trafic", "architecture", "lumieres", "nuit",
-        "stadt", "metropole", "urban", "gebaeude", "wolkenkratzer", "strasse", "verkehr", "architektur", "lichter", "nacht",
+        "streets", "avenue", "traffic", "cars", "concrete", "asphalt", "architecture", "downtown", "lighting", "lights", "night", "construction",
+        "ciudad", "edificio", "edificios", "rascacielos", "calle", "trafico", "arquitectura", "luces", "noche",
+        "ville", "urbain", "batiment", "gratte-ciel", "rue", "trafic", "lumieres", "nuit",
+        "stadt", "gebaeude", "wolkenkratzer", "strasse", "verkehr", "architektur", "lichter", "nacht",
     },
 }
 

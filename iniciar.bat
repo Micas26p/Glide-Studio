@@ -10,13 +10,6 @@ echo   GLIDE STUDIO - INICIAR
 echo ============================================================
 echo.
 
-set PORT=8787
-
-REM Limpar eventual processo antigo na porta 8787
-for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%PORT%" ^| findstr "LISTENING"') do (
-    taskkill /PID %%a /F >nul 2>nul
-)
-
 REM 1. Se existir o binario compilado Glide Studio.exe, prioriza-lo
 if exist "%~dp0Glide Studio.exe" (
     echo Iniciando Glide Studio [Desktop Executavel]...
