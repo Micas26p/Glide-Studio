@@ -6470,6 +6470,134 @@ function applyAutomatorFilesToProject(project, row){
   return entries;
 }
 
+const AUTOMATOR_DB_NAME = 'glide_studio_automator_db';
+const AUTOMATOR_DB_VERSION = 1;
+const AUTOMATOR_STORE_NAME = 'automator_drafts';
+
+function openAutomatorDraftDB(){
+  return new Promise((resolve) => {
+    if(!window.indexedDB){
+      resolve(null);
+      return;
+    }
+    const req = indexedDB.open(AUTOMATOR_DB_NAME, AUTOMATOR_DB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if(!db.objectStoreNames.contains(AUTOMATOR_STORE_NAME)){
+        db.createObjectStore(AUTOMATOR_STORE_NAME, {keyPath: 'id'});
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+let automatorDraftTimer = null;
+function scheduleSaveAutomatorDraft(){
+  clearTimeout(automatorDraftTimer);
+  automatorDraftTimer = setTimeout(saveAutomatorDraftNow, 400);
+}
+
+async function saveAutomatorDraftNow(){
+  try{
+    const db = await openAutomatorDraftDB();
+    if(!db) return;
+    const srts = state.automator?.srts || [];
+    const audios = state.automator?.audios || [];
+    const scripts = state.automator?.scripts || [];
+    const folders = state.automator?.folders || [];
+    if(!srts.length && !audios.length && !scripts.length && !folders.length){
+      await clearAutomatorDraftNow();
+      return;
+    }
+    const draft = {
+      id: 'current_draft',
+      savedAt: Date.now(),
+      sort: state.automator?.sort || {},
+      srts,
+      audios,
+      scripts,
+      folders,
+    };
+    const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
+    tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
+  }catch(_){}
+}
+
+async function loadAutomatorDraft(){
+  try{
+    const db = await openAutomatorDraftDB();
+    if(!db) return null;
+    return new Promise((resolve) => {
+      const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readonly');
+      const req = tx.objectStore(AUTOMATOR_STORE_NAME).get('current_draft');
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  }catch(_){
+    return null;
+  }
+}
+
+async function clearAutomatorDraftNow(){
+  try{
+    const db = await openAutomatorDraftDB();
+    if(!db) return;
+    const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
+    tx.objectStore(AUTOMATOR_STORE_NAME).delete('current_draft');
+  }catch(_){}
+}
+
+async function checkAndPromptAutomatorDraft(){
+  const draftBanner = document.getElementById('automatorDraftBanner');
+  if(!draftBanner) return;
+  const hasCurrentItems = (state.automator?.srts?.length || 0) + (state.automator?.audios?.length || 0) + (state.automator?.scripts?.length || 0) + (state.automator?.folders?.length || 0) > 0;
+  if(hasCurrentItems){
+    draftBanner.hidden = true;
+    return;
+  }
+  const draft = await loadAutomatorDraft();
+  if(!draft){
+    draftBanner.hidden = true;
+    return;
+  }
+  const srtCount = draft.srts?.length || 0;
+  const audioCount = draft.audios?.length || 0;
+  const scriptCount = draft.scripts?.length || 0;
+  const folderCount = draft.folders?.length || 0;
+  if(srtCount + audioCount + scriptCount + folderCount === 0){
+    draftBanner.hidden = true;
+    return;
+  }
+  const descEl = document.getElementById('automatorDraftDesc');
+  if(descEl){
+    descEl.textContent = `${srtCount} Textos (SRT), ${audioCount} áudios, ${scriptCount} roteiros e ${folderCount} pastas salvas da sessão anterior. Deseja restaurar?`;
+  }
+  draftBanner.hidden = false;
+}
+
+async function restoreAutomatorDraft(){
+  const draft = await loadAutomatorDraft();
+  if(!draft) return;
+  state.automator = {
+    srts: draft.srts || [],
+    audios: draft.audios || [],
+    scripts: draft.scripts || [],
+    folders: draft.folders || [],
+    sort: draft.sort || {},
+  };
+  const draftBanner = document.getElementById('automatorDraftBanner');
+  if(draftBanner) draftBanner.hidden = true;
+  updateAutomatorPreview();
+}
+
+async function discardAutomatorDraft(){
+  await clearAutomatorDraftNow();
+  const draftBanner = document.getElementById('automatorDraftBanner');
+  if(draftBanner) draftBanner.hidden = true;
+  resetAutomator();
+}
+
 function resetAutomator(){
   let savedSort = {};
   try{ savedSort = JSON.parse(localStorage.getItem('glide_auto_sort_preferences') || '{}'); }catch(_){}
@@ -6488,11 +6616,11 @@ function resetAutomator(){
   updateAutomatorPreview();
 }
 
-function openAutomator(){
+async function openAutomator(){
   captureActiveProject();
-  resetAutomator();
   automatorModal?.classList.add('show');
   automatorModal?.setAttribute('aria-hidden', 'false');
+  await checkAndPromptAutomatorDraft();
 }
 
 function closeAutomator(){
@@ -6580,6 +6708,7 @@ function updateAutomatorPreview(){
   const hasAnySelection = state.automator.srts.length || state.automator.audios.length || state.automator.scripts.length || state.automator.folders.length;
   if(!hasAnySelection){
     automatorPreview.innerHTML = '<p class="queue-report-empty">Selecione Textos, áudios, roteiros e pastas para ver a pré-visualização. Você também pode arrastar várias pastas de vídeos para o cartão de pastas.</p>';
+    scheduleSaveAutomatorDraft();
     return;
   }
   const listsHtml = `
@@ -6593,6 +6722,7 @@ function updateAutomatorPreview(){
   `;
   if(!plan.rows.length){
     automatorPreview.innerHTML = listsHtml;
+    scheduleSaveAutomatorDraft();
     return;
   }
   automatorPreview.innerHTML = `
@@ -6604,6 +6734,7 @@ function updateAutomatorPreview(){
       </table>
     </div>
   `;
+  scheduleSaveAutomatorDraft();
 }
 
 async function applyAutomatorDistribution(options = {}){
@@ -6826,13 +6957,34 @@ async function applyAutomatorDistribution(options = {}){
     });
 
     progress(92, 'Confirmando a distribuição de forma atômica...', true);
-    const commitResponse = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/commit`, {
-      method: 'POST',
-      cache: 'no-store',
-      signal: state.automatorAbortController.signal,
-    }, 180000);
-    if(!commitResponse.ok) throw new Error(await commitResponse.text());
-    const committed = await commitResponse.json();
+    let committed = null;
+    try {
+      const commitResponse = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/commit`, {
+        method: 'POST',
+        cache: 'no-store',
+        signal: state.automatorAbortController.signal,
+      }, 600000);
+      if(!commitResponse.ok) throw new Error(await commitResponse.text());
+      committed = await commitResponse.json();
+    } catch(err){
+      if(state.automatorAbortController?.signal?.aborted) throw err;
+      progress(94, 'Verificando confirmação da distribuição no servidor...', true);
+      for(let check = 0; check < 8; check++){
+        await new Promise(r => setTimeout(r, 1200));
+        try {
+          const stResp = await fetch(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/status`, {cache: 'no-store'});
+          if(stResp.ok){
+            const stData = await stResp.json();
+            if(stData.status === 'committed' && stData.result){
+              committed = stData.result;
+              break;
+            }
+          }
+        }catch(_){}
+      }
+      if(!committed) throw err;
+    }
+
     progress(97, 'Verificando projetos persistidos...', true);
     const expectedByProject = new Map(committed.projects.map(item => [item.projectId, item.counts]));
     for(const row of rowsToApply){
@@ -6854,6 +7006,9 @@ async function applyAutomatorDistribution(options = {}){
     updateStats();
     progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`, true);
     state.automatorApplying = false;
+    await clearAutomatorDraftNow();
+    const draftBanner = document.getElementById('automatorDraftBanner');
+    if(draftBanner) draftBanner.hidden = true;
     closeAutomator();
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
   }catch(error){
@@ -6903,6 +7058,83 @@ async function clearProject(){
   }catch(e){
     dockSummary.textContent = `Não foi possível limpar o projeto: ${e.message || e}`;
   }
+}
+
+async function clearProjectLane(lane, laneLabel, confirmMsg){
+  if(state.renderActive || state.queueRendering){
+    if(dockSummary) dockSummary.textContent = 'Aguarde o render terminar antes de modificar as mídias do projeto.';
+    return;
+  }
+  const projectId = state.activeProjectId;
+  if(!projectId) return;
+  if(!window.confirm(confirmMsg)) return;
+
+  if(dockSummary) dockSummary.textContent = `Removendo ${laneLabel} deste projeto...`;
+  try{
+    const r = await fetch(`/api/queue/projects/${encodeURIComponent(projectId)}/clear-lane`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({lane}),
+      cache: 'no-store',
+    });
+    if(!r.ok) throw new Error(await r.text());
+    const j = await r.json();
+
+    if(lane === 'audios'){
+      state.audios.forEach(file => {
+        const rVal = rel(file);
+        state.durations.delete(rVal);
+        state.audioHealth.delete(rVal);
+        for(const [key, registered] of state.registry.entries()){
+          if(registered === file) state.registry.delete(key);
+        }
+      });
+      state.audios = [];
+      state.audioOrderEdited = false;
+    }else if(lane === 'videos'){
+      state.videos.forEach(file => {
+        const rVal = rel(file);
+        state.durations.delete(rVal);
+        state.thumbs.delete(rVal);
+        state.mediaStatus.delete(rVal);
+        for(const [key, registered] of state.registry.entries()){
+          if(registered === file) state.registry.delete(key);
+        }
+      });
+      state.videos = [];
+      state.videoOrderEdited = false;
+      state.videoListSignature = '';
+    }else if(lane === 'texts'){
+      state.subtitles.forEach(file => {
+        for(const [key, registered] of state.registry.entries()){
+          if(registered === file) state.registry.delete(key);
+        }
+      });
+      state.subtitles = [];
+      state.subtitleInfo = null;
+      refreshSubtitleInfo();
+    }
+
+    renderLists();
+    updateStats();
+    captureActiveProject();
+    renderProjectQueue();
+    if(dockSummary) dockSummary.textContent = `${laneLabel} removido(s) com sucesso. ${j.space_recovered || '0 B'} liberado(s).`;
+  }catch(e){
+    if(dockSummary) dockSummary.textContent = `Não foi possível remover ${laneLabel}: ${e.message || e}`;
+  }
+}
+
+function clearProjectAudios(){
+  clearProjectLane('audios', 'áudios e narrações', 'Remover todos os áudios e narrações deste projeto? Os vídeos, Textos e presets serão mantidos.');
+}
+
+function clearProjectVideos(){
+  clearProjectLane('videos', 'vídeos e fotos', 'Remover todos os vídeos e fotos da timeline deste projeto? Os áudios, Textos e presets serão mantidos.');
+}
+
+function clearProjectTexts(){
+  clearProjectLane('texts', 'Textos em SRT', 'Remover os Textos em SRT deste projeto? Os áudios, vídeos e presets serão mantidos.');
 }
 
 async function clearAllProjects(){
@@ -8203,6 +8435,13 @@ $('#sortNumericBtn').addEventListener('click', () => {
   updateStats();
 });
 $('#clearBtn').addEventListener('click', clearProject);
+$('#clearAudiosBtn')?.addEventListener('click', clearProjectAudios);
+$('#clearVideosBtn')?.addEventListener('click', clearProjectVideos);
+$('#panelClearAudiosBtn')?.addEventListener('click', clearProjectAudios);
+$('#panelClearVideosBtn')?.addEventListener('click', clearProjectVideos);
+$('#panelClearTextsBtn')?.addEventListener('click', clearProjectTexts);
+$('#automatorRestoreDraftBtn')?.addEventListener('click', restoreAutomatorDraft);
+$('#automatorDiscardDraftBtn')?.addEventListener('click', discardAutomatorDraft);
 if(clearAllProjectsBtn) clearAllProjectsBtn.addEventListener('click', clearAllProjects);
 $('#clearSubtitleBtn').addEventListener('click', () => {
   state.subtitles.forEach(file => {

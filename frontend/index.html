@@ -203,6 +203,19 @@
           </div>
           <button type="button" class="btn ghost small" id="automatorCloseBtn">Fechar</button>
         </div>
+        <div class="automator-draft-banner" id="automatorDraftBanner" hidden>
+          <div class="draft-info">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            <div>
+              <strong id="automatorDraftTitle">Rascunho de ficheiros recuperado</strong>
+              <span id="automatorDraftDesc">Você tem arquivos de uma sessão anterior. Deseja restaurar a organização?</span>
+            </div>
+          </div>
+          <div class="draft-actions">
+            <button type="button" class="btn primary small" id="automatorRestoreDraftBtn">Restaurar Ficheiros</button>
+            <button type="button" class="btn ghost small queue-danger" id="automatorDiscardDraftBtn">Descartar</button>
+          </div>
+        </div>
         <div class="automation-picker-grid">
           <button type="button" class="automation-picker" id="automatorPickSrt">
             <strong>Selecionar Textos (SRT)</strong>
@@ -300,11 +313,16 @@
           </div>
         </div>
         <div class="clear-project-panel">
-          <div>
-            <strong>Novo projeto</strong>
-            <span>Apaga timeline, uploads temporários e renders antigos, mantendo presets.</span>
+          <div class="clear-panel-info">
+            <strong>Gerenciar e limpar mídias deste projeto</strong>
+            <span>Remova partes específicas sem apagar o restante ou limpe o projeto mantendo os presets intactos.</span>
           </div>
-          <button type="button" class="btn clear-project-btn" id="clearBtn" title="Apaga timeline, uploads temporários e renders antigos, mantendo presets">Limpar projeto</button>
+          <div class="clear-panel-buttons">
+            <button type="button" class="btn ghost small queue-danger" id="panelClearAudiosBtn" title="Remove apenas os áudios e locuções deste projeto">Limpar áudios</button>
+            <button type="button" class="btn ghost small queue-danger" id="panelClearVideosBtn" title="Remove apenas os vídeos e imagens deste projeto">Limpar vídeos</button>
+            <button type="button" class="btn ghost small queue-danger" id="panelClearTextsBtn" title="Remove apenas os Textos em SRT deste projeto">Limpar Textos</button>
+            <button type="button" class="btn clear-project-btn" id="clearBtn" title="Apaga timeline, áudios, Textos e renders antigos, mantendo presets">Limpar tudo</button>
+          </div>
         </div>
       </div>
 
@@ -876,6 +894,7 @@
         </div>
         <div class="actions-inline">
           <button type="button" class="btn ghost small" id="sortNumericBtn">Ordenar por número</button>
+          <button type="button" class="btn ghost small queue-danger" id="clearVideosBtn" title="Remove todos os vídeos e fotos deste projeto">Limpar vídeos</button>
         </div>
       </div>
       <div class="timeline" id="videoTimeline">
@@ -892,6 +911,9 @@
         <div>
           <p class="eyebrow">Narração</p>
           <h3>Áudios em ordem</h3>
+        </div>
+        <div class="actions-inline">
+          <button type="button" class="btn ghost small queue-danger" id="clearAudiosBtn" title="Remove todos os áudios de narração deste projeto">Limpar áudios</button>
         </div>
       </div>
       <div class="audio-lane" id="audioTimeline">

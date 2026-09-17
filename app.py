@@ -15177,6 +15177,43 @@ def upload_automator_session_batch(
     }
 
 
+def _safe_relocate_staging_file(source: Path, target: Path) -> None:
+    """Reloca arquivo de staging com retentativas rápidas no Windows e fallback de segurança."""
+    for attempt in range(6):
+        try:
+            os.replace(source, target)
+            return
+        except (PermissionError, OSError):
+            if attempt < 5:
+                time.sleep(0.035 * (attempt + 1))
+            else:
+                temp_target = target.parent / f".{target.stem}.{uuid.uuid4().hex[:8]}.part"
+                shutil.copy2(source, temp_target)
+                os.replace(temp_target, target)
+                try:
+                    source.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                return
+
+
+@app.get("/api/queue/automator/sessions/{session_id}/status")
+def get_automator_session_status(session_id: str):
+    with AUTOMATOR_SESSION_LOCK:
+        session = AUTOMATOR_SESSIONS.get(session_id)
+        if not session:
+            return {"ok": False, "status": "missing"}
+        return {
+            "ok": True,
+            "sessionId": session_id,
+            "status": session.get("status"),
+            "uploadedFiles": len(session.get("uploads") or {}),
+            "expectedFiles": len(session.get("expected") or {}),
+            "result": session.get("result"),
+            "lastError": session.get("last_error"),
+        }
+
+
 @app.post("/api/queue/automator/sessions/{session_id}/commit")
 def commit_automator_session(session_id: str):
     with AUTOMATOR_SESSION_LOCK:
@@ -15186,13 +15223,25 @@ def commit_automator_session(session_id: str):
         if session.get("status") == "committed":
             return session.get("result") or {"ok": True, "alreadyCommitted": True}
         if session.get("status") == "committing":
-            raise HTTPException(status_code=409, detail="A sessão AUTO já está sendo confirmada.")
-        expected = dict(session.get("expected") or {})
-        uploads = dict(session.get("uploads") or {})
-        missing_slots = [slot for slot in expected if slot not in uploads]
-        if missing_slots:
-            raise HTTPException(status_code=409, detail=f"Faltam {len(missing_slots)} arquivo(s) antes de confirmar.")
-        session["status"] = "committing"
+            # Se já está confirmando, espera alguns instantes para responder com o resultado
+            # evitando falhar com 409 em caso de retry por reconexão da rede.
+            pass
+        else:
+            expected = dict(session.get("expected") or {})
+            uploads = dict(session.get("uploads") or {})
+            missing_slots = [slot for slot in expected if slot not in uploads]
+            if missing_slots:
+                raise HTTPException(status_code=409, detail=f"Faltam {len(missing_slots)} arquivo(s) antes de confirmar.")
+            session["status"] = "committing"
+
+    # Caso outro thread já esteja efetuando o commit desta sessão
+    t_wait_start = time.time()
+    while session.get("status") == "committing" and time.time() - t_wait_start < 40:
+        with AUTOMATOR_SESSION_LOCK:
+            cur_status = session.get("status")
+            if cur_status == "committed":
+                return session.get("result") or {"ok": True, "alreadyCommitted": True}
+        time.sleep(0.35)
 
     created_paths: list[Path] = []
     index_backups: dict[str, dict[str, Any]] = {}
@@ -15219,31 +15268,42 @@ def commit_automator_session(session_id: str):
 
             project_media_indices: dict[str, dict[str, Any]] = {}
             needs_probe: list[tuple[str, str, Path, dict[str, Any]]] = []  # (project_id, rel_key, target, record_ref)
+
+            # Preparação e movimentação paralela ultrarrápida dos arquivos
+            items_to_relocate: list[tuple[Path, Path, str, dict[str, Any]]] = []
             for slot, spec in expected.items():
                 upload = uploads[slot]
                 source = Path(upload["path"])
                 if not source.exists() or source.stat().st_size <= 0:
                     raise RuntimeError(f"Arquivo de staging ausente: {spec.get('name')}")
                 project_id = str(spec["projectId"])
-                kind = str(spec["kind"])
                 rel_key = str(spec["rel"]).replace("\\", "/")
                 folder = _project_media_dir(project_id)
                 folder.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256(rel_key.lower().encode("utf-8", errors="ignore")).hexdigest()[:20]
                 target = folder / f"{digest}_{session_id[:10]}{source.suffix.lower()}"
-                try:
-                    os.replace(source, target)
-                except Exception:
-                    temp_target = folder / f".{digest}.{uuid.uuid4().hex}.part"
-                    shutil.copy2(source, temp_target)
-                    os.replace(temp_target, target)
+                items_to_relocate.append((source, target, slot, spec))
+
+            def _relocate_item(item_tuple: tuple[Path, Path, str, dict[str, Any]]):
+                src, tgt, sl, sp = item_tuple
+                _safe_relocate_staging_file(src, tgt)
+                return tgt, sl, sp
+
+            max_workers = min(8, max(1, len(items_to_relocate)))
+            if max_workers > 1:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    relocated = list(executor.map(_relocate_item, items_to_relocate))
+            else:
+                relocated = [_relocate_item(it) for it in items_to_relocate]
+
+            for target, slot, spec in relocated:
                 created_paths.append(target)
+                project_id = str(spec["projectId"])
+                kind = str(spec["kind"])
+                rel_key = str(spec["rel"]).replace("\\", "/")
                 if project_id not in project_media_indices:
                     project_media_indices[project_id] = _load_project_media_index(project_id)
                 raw_duration = max(0.0, float(spec.get("duration") or 0.0))
-                # Correção de raiz: se o frontend enviou duration=0 para um vídeo (bug do
-                # automatorDuration('folder') que retornava 0 para arquivos individuais),
-                # agendamos probe paralelo para não travar o commit serial.
                 if raw_duration <= 0 and kind in ("video", "image"):
                     if kind == "image":
                         raw_duration = 4.0  # padrão saudável para imagens
@@ -16431,6 +16491,74 @@ def queue_clear_project_media(project_id: str):
             "ok": True,
             "storage": storage,
             "space_recovered": human_bytes(int(storage.get("bytes_recovered") or 0)),
+            "project": _public_queue_project(project),
+        }
+
+
+@app.post("/api/queue/projects/{project_id}/clear-lane")
+def queue_clear_project_lane(project_id: str, payload: dict[str, Any] = Body(default={})):
+    lane = str(payload.get("lane") or "").strip().lower()
+    valid_lanes = {"audios", "videos", "texts", "subtitles", "captions", "script_guides", "background_music"}
+    if lane not in valid_lanes:
+        raise HTTPException(status_code=400, detail=f"Faixa inválida: {lane}")
+    if lane == "subtitles":
+        lane = "texts"
+    with QUEUE_LOCK:
+        project = _find_queue_project(project_id)
+        if not project:
+            raise HTTPException(status_code=404, detail="Projeto da fila não encontrado")
+        job_id = str(project.get("jobId") or "")
+        active_job = JOBS.get(job_id) if job_id else None
+        if active_job and active_job.status in {"uploading", "ready", "running"}:
+            raise HTTPException(status_code=409, detail="Este projeto está renderizando e não pode ser alterado agora")
+
+        media = project.get("media") if isinstance(project.get("media"), dict) else {}
+        current_items = list(media.get(lane) or [])
+        if not current_items:
+            return {"ok": True, "lane": lane, "removed": 0, "space_recovered": "0 B", "project": _public_queue_project(project)}
+
+        media_dir = _project_media_dir(project_id)
+        index = _load_project_media_index(project_id)
+        recovered_bytes = 0
+        removed_count = 0
+
+        for rel_key in current_items:
+            rec = index.pop(rel_key, None)
+            if rec and rec.get("file"):
+                disk_file = media_dir / str(rec["file"])
+                try:
+                    if disk_file.exists() and disk_file.is_file():
+                        recovered_bytes += disk_file.stat().st_size
+                        disk_file.unlink(missing_ok=True)
+                        removed_count += 1
+                except Exception:
+                    pass
+
+        _save_project_media_index(project_id, index)
+        media[lane] = []
+        project["media"] = media
+
+        if lane in ("texts", "subtitles"):
+            project["subtitleInfo"] = None
+        elif lane == "captions":
+            project["captionInfo"] = None
+        elif lane == "script_guides":
+            project["scriptGuideInfo"] = None
+            project["scriptGuidePlan"] = None
+            try:
+                _script_guide_plan_path(project_id).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        project["status"] = "draft" if _queue_project_missing_requirements(project) else "ready"
+        project["updatedAt"] = _now_iso()
+        _save_queue_projects(QUEUE_PROJECTS)
+
+        return {
+            "ok": True,
+            "lane": lane,
+            "removed": removed_count,
+            "space_recovered": human_bytes(recovered_bytes),
             "project": _public_queue_project(project),
         }
 
