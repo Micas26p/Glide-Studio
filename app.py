@@ -4193,7 +4193,12 @@ def render_budget_multiplier(priority: str | None, options: dict[str, Any] | Non
     return max(2.0, min(8.0, float((options or {}).get("renderBudgetTurboMultiplier") or 4.0)))
 
 
-def render_budget_for_duration(duration_seconds: Any, priority: str | None, options: dict[str, Any] | None = None) -> float:
+def render_budget_for_duration(
+    duration_seconds: Any,
+    priority: str | None,
+    options: dict[str, Any] | None = None,
+    media_count: int = 0,
+) -> float:
     if not render_budget_enabled(options):
         return 0.0
     try:
@@ -4201,7 +4206,80 @@ def render_budget_for_duration(duration_seconds: Any, priority: str | None, opti
     except Exception:
         duration = 1.0
     multiplier = render_budget_multiplier(priority, options)
-    return max(240.0, duration * multiplier + 120.0)
+    base_budget = duration * multiplier + 120.0
+    # Tolerância de pré-vôo proporcional ao número de clipes:
+    # Em projetos com 200+ ou 400+ vídeos, o I/O de disco, probes e hashes
+    # consomem minutos adicionais legítimos de pré-processamento.
+    count = int(media_count or len((options or {}).get("videos") or (options or {}).get("videoOrder") or []))
+    media_allowance = min(900.0, max(0.0, count * 0.85)) if count > 15 else 0.0
+    return max(240.0, base_budget + media_allowance)
+
+
+class RenderBudgetWatchdog:
+    """
+    Watchdog ativo em segundo plano que monitora o prazo máximo (render budget deadline)
+    e a integridade/responsividade do job de renderização.
+    Garante que nenhum render fique rodando indefinidamente ('indo até o infinito')
+    mesmo que ocorra travamento silencioso no pré-vôo, checagens de arquivo ou decodificação.
+    """
+    def __init__(self, job: Job, check_interval: float = 2.5):
+        self.job = job
+        self.check_interval = check_interval
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True, name=f"Watchdog-{self.job.id[:8]}")
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+
+    def _run(self) -> None:
+        while not self._stop_event.wait(self.check_interval):
+            if self.job.status not in {"running", "created", "preparing"}:
+                break
+            if not render_budget_enabled(self.job.options):
+                continue
+            deadline = float(self.job.render_deadline_at or 0.0)
+            if not deadline or deadline <= 0:
+                continue
+
+            now = time.time()
+            if now >= deadline:
+                max_allowed_extensions = 1 if self.job.percent < 30.0 else 2
+                if self.job.render_budget_extensions < max_allowed_extensions and self._is_actively_making_progress():
+                    grace = max(180.0, float(self.job.render_budget_seconds or 300.0) * 0.25)
+                    self.job.render_budget_extensions += 1
+                    self.job.render_budget_seconds += grace
+                    self.job.render_deadline_at += grace
+                    self.job.render_budget_state = "extended"
+                    if "budget_auto_extended" not in self.job.render_budget_fallbacks:
+                        self.job.render_budget_fallbacks.append("budget_auto_extended")
+                    _append_log(
+                        self.job,
+                        f"Watchdog: Limite de tempo estendido (+{round(grace)}s) pois o processo está ativo e codificando. "
+                        f"Extensão {self.job.render_budget_extensions}/{max_allowed_extensions}."
+                    )
+                    continue
+
+                _append_log(
+                    self.job,
+                    f"Watchdog: Orçamento limite ({round(self.job.render_budget_seconds)}s) ultrapassado! "
+                    f"Interrompendo render imediatamente para liberar CPU, GPU e memória do sistema."
+                )
+                self.job.render_budget_state = "exceeded"
+                self.job.cancel_requested = True
+                _terminate_job_processes(self.job)
+                break
+
+    def _is_actively_making_progress(self) -> bool:
+        with self.job.process_lock:
+            procs = list(self.job.current_processes)
+        any_alive = any(p and p.poll() is None for p in procs)
+        return any_alive and self.job.stage in {"rendering", "muxing"}
 
 
 def render_hardware_signature(profile: dict[str, Any] | None = None) -> str:
@@ -5337,7 +5415,7 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
 
 
 def _hidden_subprocess_kwargs(cwd: Path | None = None, priority: str | None = None) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"stdin": subprocess.DEVNULL}
     if cwd:
         kwargs["cwd"] = str(cwd)
     if os.name == "nt":
@@ -5880,11 +5958,8 @@ def run_cmd(
                 _terminate_process(proc)
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
-                # O deadline protege contra travamentos reais (>90s sem saída do FFmpeg).
-                # Se o processo continua ativo e emitindo logs/frames, o prazo é ajustado
-                # continuamente para JAMAIS abortar um render legítimo em andamento.
                 is_active = (time.time() - last_output_time < 60.0)
-                if is_active:
+                if is_active and job.render_budget_extensions < 2:
                     grace = max(300.0, float(job.render_budget_seconds or 300.0) * 0.35)
                     job.render_budget_extensions += 1
                     job.render_budget_seconds += grace
@@ -5895,14 +5970,15 @@ def run_cmd(
                     _append_log(
                         job,
                         f"Tempo de render estendido (+{round(grace)}s): "
-                        f"processo ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s)."
+                        f"processo ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s). "
+                        f"Extensão {job.render_budget_extensions}/2."
                     )
-                elif time.time() - last_output_time >= 90.0:
+                elif time.time() - last_output_time >= 90.0 or job.render_budget_extensions >= 2:
                     job.render_budget_state = "exceeded"
                     _terminate_process(proc)
                     raise RenderBudgetExceeded(
                         f"Orçamento de render excedido no modo {render_mode_label(priority)}. "
-                        "O job foi interrompido após inatividade prolongada do processo (>90s)."
+                        "O job foi interrompido para respeitar o limite máximo do modo."
                     )
             try:
                 item = line_queue.get(timeout=0.15)
@@ -18534,45 +18610,78 @@ def visual_clean_candidate_sources(
 
 
 def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> tuple[list[tuple[Path, float]], list[dict[str, Any]]]:
+    total_files = len(video_files)
+    set_stage(
+        job,
+        "preparing",
+        "Validando clipes",
+        f"Validando integridade dos arquivos (0/{total_files})..." if total_files > 1 else "Validando arquivo...",
+        percent=max(job.percent, 19.0),
+    )
+    done_count = 0
+    done_lock = threading.Lock()
+
     def _inspect_one(p: Path) -> tuple[bool, Path, float, dict[str, Any] | None]:
-        if is_image_path(p):
-            try:
-                if p.exists() and p.is_file() and p.stat().st_size > 0:
-                    return True, p, image_duration_default(job.options), None
-                else:
-                    return False, p, 0.0, {
+        nonlocal done_count
+        if job.cancel_requested:
+            return False, p, 0.0, {
+                "name": media_display_name(job, p),
+                "file": p.name,
+                "reason": "cancelado",
+                "duration": 0,
+                "size_mb": 0,
+                "visual_checked": False,
+                "visible_frame": False,
+            }
+        try:
+            if is_image_path(p):
+                try:
+                    if p.exists() and p.is_file() and p.stat().st_size > 0:
+                        res = (True, p, image_duration_default(job.options), None)
+                    else:
+                        res = (False, p, 0.0, {
+                            "name": media_display_name(job, p),
+                            "file": p.name,
+                            "reason": "imagem ausente ou vazia",
+                            "duration": 0,
+                            "size_mb": 0,
+                            "visual_checked": False,
+                            "visible_frame": False,
+                        })
+                except Exception:
+                    res = (False, p, 0.0, {
                         "name": media_display_name(job, p),
                         "file": p.name,
-                        "reason": "imagem ausente ou vazia",
+                        "reason": "imagem invalida",
                         "duration": 0,
                         "size_mb": 0,
                         "visual_checked": False,
                         "visible_frame": False,
-                    }
-            except Exception:
-                return False, p, 0.0, {
-                    "name": media_display_name(job, p),
-                    "file": p.name,
-                    "reason": "imagem invalida",
-                    "duration": 0,
-                    "size_mb": 0,
-                    "visual_checked": False,
-                    "visible_frame": False,
-                }
-        dur = safe_probe_duration(p, cwd=work)
-        health = probe_video_render_health(p, dur, cwd=work, probe_frames=False)
-        if health.get("valid"):
-            return True, p, dur, None
-        else:
-            return False, p, 0.0, {
-                "name": media_display_name(job, p),
-                "file": p.name,
-                "reason": health.get("reason") or "video invalido",
-                "duration": health.get("duration"),
-                "size_mb": health.get("size_mb"),
-                "visual_checked": health.get("visual_checked"),
-                "visible_frame": health.get("visible_frame"),
-            }
+                    })
+            else:
+                dur = safe_probe_duration(p, cwd=work)
+                health = probe_video_render_health(p, dur, cwd=work, probe_frames=False)
+                if health.get("valid"):
+                    res = (True, p, dur, None)
+                else:
+                    res = (False, p, 0.0, {
+                        "name": media_display_name(job, p),
+                        "file": p.name,
+                        "reason": health.get("reason") or "video invalido",
+                        "duration": health.get("duration"),
+                        "size_mb": health.get("size_mb"),
+                        "visual_checked": health.get("visual_checked"),
+                        "visible_frame": health.get("visible_frame"),
+                    })
+        finally:
+            with done_lock:
+                done_count += 1
+                current_done = done_count
+            if total_files > 4 and (current_done % 8 == 0 or current_done == total_files):
+                pct = round(19.0 + (current_done / total_files) * 2.5, 1)
+                job.message = f"Validando integridade dos arquivos ({current_done}/{total_files})..."
+                job.percent = max(job.percent, pct)
+        return res
 
     valid_pairs: list[tuple[Path, float]] = []
     invalid_infos: list[dict[str, Any]] = []
@@ -20541,15 +20650,36 @@ def apply_auto_director(
         return videos
     if visual_clean_enabled(job.options) and len(videos) > 1:
         def _check_clean(p: Path) -> tuple[Path, bool]:
+            if job.cancel_requested:
+                return p, False
             is_img = is_image_path(p)
-            res = probe_visual_clean_health(p, 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
-            rejected = res.get("action") == "hard_reject" or res.get("category") in {
-                "presentation_slide", "text_dominant", "data_dominant", "black_screen",
-                "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
-            }
-            return p, not rejected
+            try:
+                resolved = _resolved_media_path(p, job.work)
+                key_stem = resolved.name.lower()
+                cached_clean = None
+                with VISUAL_CLEAN_CACHE_LOCK:
+                    for ck, cv in VISUAL_CLEAN_CACHE.items():
+                        if key_stem in str(ck).lower() and isinstance(cv, dict):
+                            cached_clean = cv
+                            break
+                if cached_clean:
+                    act = str(cached_clean.get("action") or "")
+                    cat = str(cached_clean.get("category") or "")
+                    rejected = act == "hard_reject" or cat in {
+                        "presentation_slide", "text_dominant", "data_dominant", "black_screen",
+                        "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
+                    }
+                    return p, not rejected
+                # Se não estiver no cache prévio, valida apenas a integridade básica física
+                # para não redecodificar centenas de clipes duas vezes (o filtro oficial
+                # apply_visual_clean_filter executará a checagem profunda completa e exibirá progresso).
+                if is_img:
+                    return p, p.exists() and p.stat().st_size > 0
+                return p, p.exists() and p.stat().st_size > 1024
+            except Exception:
+                return p, False
 
-        max_w = min(4, max(2, int(os.cpu_count() or 4)))
+        max_w = min(8, max(2, int(os.cpu_count() or 4)))
         with ThreadPoolExecutor(max_workers=max_w) as ex:
             results = list(ex.map(_check_clean, videos))
         clean_videos = [p for p, ok in results if ok]
@@ -20557,12 +20687,12 @@ def apply_auto_director(
             videos = clean_videos
     elif visual_clean_enabled(job.options) and len(videos) == 1:
         is_img = is_image_path(videos[0])
-        res = probe_visual_clean_health(videos[0], 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
-        if res.get("action") == "hard_reject" or res.get("category") in {
-            "presentation_slide", "text_dominant", "data_dominant", "black_screen",
-            "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
-        }:
-            clean_videos = []
+        try:
+            sz = videos[0].stat().st_size if videos[0].exists() else 0
+            if sz < (1 if is_img else 1024):
+                videos = []
+        except Exception:
+            videos = []
     auto_enabled, director_state = smart_visual_director_effective(job.options, bool(subtitle_cues))
     if not auto_enabled:
         current_order = [manifest_rel_for_path(job, path) for path in videos]
@@ -21439,6 +21569,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
 def render_worker(job_id: str):
     job = JOBS[job_id]
     graph: RenderGraph | None = None
+    watchdog: RenderBudgetWatchdog | None = None
     try:
         if not FFMPEG or not FFPROBE:
             raise RuntimeError("FFmpeg/ffprobe não encontrado. Instale FFmpeg e adicione ao PATH, ou coloque ffmpeg.exe e ffprobe.exe na pasta do Glide Studio.")
@@ -21461,7 +21592,12 @@ def render_worker(job_id: str):
                 f"({initial_estimate.get('minimum_required_seconds')}s) ajustou o orçamento inicial automaticamente."
             )
         if initial_duration > 0:
-            calc_budget = render_budget_for_duration(initial_duration, render_priority(job), job.options)
+            calc_budget = render_budget_for_duration(
+                initial_duration,
+                render_priority(job),
+                job.options,
+                media_count=len(job.manifest),
+            )
             min_req = float(initial_estimate.get("minimum_required_seconds") or 0.0)
             job.render_budget_seconds = max(calc_budget, min_req * 1.5) if calc_budget > 0 else 0.0
             if job.render_budget_seconds > 0:
@@ -21470,6 +21606,9 @@ def render_worker(job_id: str):
             else:
                 job.render_deadline_at = 0.0
                 job.render_budget_state = "disabled"
+
+        watchdog = RenderBudgetWatchdog(job)
+        watchdog.start()
         performance_start(job, "total")
         job.percent = max(job.percent, 10)
         # Injetar estimativa preliminar imediata para que o frontend exiba tempo restante
@@ -21797,7 +21936,7 @@ def render_worker(job_id: str):
         job.estimated_render_duration = timeline_total
         job.estimated_total_seconds = float(estimate.get("seconds") or 0.0)
         job.estimate_confidence = str(estimate.get("confidence") or "heuristic")
-        calc_budget = render_budget_for_duration(timeline_total, priority, job.options)
+        calc_budget = render_budget_for_duration(timeline_total, priority, job.options, media_count=len(videos))
         min_est = float(estimate.get("minimum_required_seconds") or 0.0)
         job.render_budget_seconds = max(calc_budget, min_est * 1.5) if calc_budget > 0 else 0.0
         if job.render_budget_seconds > 0:
@@ -22193,6 +22332,35 @@ def render_worker(job_id: str):
             pass
         persist_job_summary_to_queue(job)
     except RenderCancelled as exc:
+        if getattr(job, "render_budget_state", "") == "exceeded":
+            if graph:
+                graph.fail_running(str(exc))
+                job.render_graph_run = graph.finish("budget_exceeded")
+            performance_stop(job, "total")
+            job.status = "error"
+            job.render_budget_state = "exceeded"
+            job.error = f"Orçamento de render excedido no modo {render_mode_label(render_priority(job))}."
+            job.finished_at = time.time()
+            record_render_performance(
+                job,
+                max(1.0, float(job.estimated_render_duration or job.options.get("estimatedDurationSeconds") or 0.0)),
+            )
+            set_stage(job, "error", "Orçamento excedido", "Tempo limite do modo atingido. Render interrompido para não travar o computador.")
+            _append_log(job, "BUDGET_EXCEEDED: " + job.error)
+            try:
+                if job.export_dir:
+                    atomic_write_text(job.export_dir / "render_budget_error.json", json.dumps({
+                        "status": "budget_exceeded",
+                        "mode": render_mode_label(render_priority(job)),
+                        "budget_seconds": round(job.render_budget_seconds),
+                        "elapsed_seconds": round(render_budget_elapsed(job)),
+                        "fallbacks": job.render_budget_fallbacks,
+                        "message": job.error,
+                    }, ensure_ascii=False, indent=2))
+            except Exception:
+                pass
+            persist_job_summary_to_queue(job)
+            return
         if graph:
             graph.fail_running(str(exc))
             job.render_graph_run = graph.finish("cancelled")
@@ -22250,6 +22418,11 @@ def render_worker(job_id: str):
             return render_worker(job_id)
         persist_job_summary_to_queue(job)
     finally:
+        if watchdog:
+            try:
+                watchdog.stop()
+            except Exception:
+                pass
         if not any(other_id != job_id and other.status == "running" for other_id, other in JOBS.items()):
             set_system_keep_awake(False, "render_finished")
 
@@ -22571,9 +22744,28 @@ def status(job_id: str):
         if estimated_total <= elapsed:
             pct_val = max(1.0, float(job.percent or 1.0))
             rem_pct = max(1.0, 100.0 - pct_val)
-            remaining_honest = max(5.0, (elapsed / pct_val) * rem_pct)
+            if pct_val < 25.0:
+                # Durante o pré-render / validação, não extrapolamos linearmente o tempo decorrido,
+                # pois o pré-vôo não reflete a velocidade real de codificação (FFmpeg / NVENC).
+                base_est = float((active_estimate or {}).get("seconds") or (active_estimate or {}).get("projected_seconds") or 0.0)
+                remaining_honest = max(30.0, base_est * (rem_pct / 100.0)) if base_est > 0 else max(30.0, elapsed * 1.5)
+            else:
+                remaining_honest = max(5.0, (elapsed / pct_val) * rem_pct)
+
+            # Trava de sanidade do orçamento: o tempo restante estimado NUNCA deve explodir
+            # além do orçamento máximo estabelecido para o modo quando o orçamento está ativo.
+            if job.render_budget_seconds > 0:
+                max_allowed_remaining = max(30.0, (job.render_budget_seconds * 1.25) - elapsed)
+                remaining_honest = min(remaining_honest, max_allowed_remaining)
+
             estimated_total = elapsed + remaining_honest
+
     remaining = max(0.0, estimated_total - elapsed) if job.status == "running" else 0.0
+    if job.render_budget_seconds > 0 and job.status == "running":
+        # Garante que a previsão restante respeita o teto do orçamento
+        budget_ceiling_rem = max(15.0, (job.render_budget_seconds * 1.25) - elapsed)
+        remaining = min(remaining, budget_ceiling_rem)
+        estimated_total = elapsed + remaining
     if job.status != "running":
         eta_confidence = str(job.estimate_confidence or "heuristic")
         eta_state = "complete"

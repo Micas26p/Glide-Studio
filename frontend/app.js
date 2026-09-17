@@ -4764,16 +4764,30 @@ function formatEtaSummary(eta, status = 'running'){
   if(!eta) return 'Tempo restante: calculando...';
   const elapsed = formatTime(eta.elapsed_seconds || 0);
   if(status !== 'running') return `Tempo de render: ${elapsed}`;
-  const limitText = Number(eta.budget_seconds || 0) > 0 ? ` · limite ${formatTime(eta.budget_seconds || 0)}` : '';
+  const budgetSec = Number(eta.budget_seconds || 0);
+  const limitText = budgetSec > 0 ? ` · limite ${formatTime(budgetSec)}` : '';
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
   const reason = String(eta.reason || '').toLowerCase();
   const isPreliminary = reason.includes('preliminar');
   if(stateName === 'warming_up' || stateName === 'unknown'){
     return `Decorrido no render ${elapsed} - calculando tempo restante...${limitText}`;
   }
-  const min = Number(eta.remaining_min_seconds || 0);
-  const max = Number(eta.remaining_max_seconds || 0);
-  const rem = Number(eta.estimated_remaining_seconds || 0);
+  let min = Number(eta.remaining_min_seconds || 0);
+  let max = Number(eta.remaining_max_seconds || 0);
+  let rem = Number(eta.estimated_remaining_seconds || 0);
+
+  // Sanidade visual: quando o orçamento do modo está ativo, os tempos restantes não
+  // devem exibir previsões astronômicas que contradigam o limite do modo configurado.
+  if(budgetSec > 0){
+    const elapsedSec = Number(eta.elapsed_seconds || 0);
+    const budgetRemaining = Math.max(15, (budgetSec * 1.25) - elapsedSec);
+    if(max > budgetRemaining * 1.5){
+      max = Math.round(budgetRemaining);
+      min = Math.round(Math.min(min, max * 0.7));
+      rem = Math.round(Math.min(rem, max));
+    }
+  }
+
   if(stateName === 'variable' || min || max){
     if(min && max && max > min){
       const prefix = isPreliminary ? 'estimativa preliminar' : 'restante estimado variável';
