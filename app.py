@@ -687,7 +687,7 @@ def probe_image_focal_anchor(path: Path | str | None, cwd: Path | None = None) -
 def image_motion_for(path: Path | str, index: int = 0) -> str:
     """Retorna um dos 4 movimentos cinematográficos suaves sem repetições consecutivas."""
     return IMAGE_MOTIONS[index % len(IMAGE_MOTIONS)]
-VISUAL_CLEAN_CACHE_VERSION = 15
+VISUAL_CLEAN_CACHE_VERSION = 16
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -7983,30 +7983,48 @@ def _classify_visual_analysis(
     tr_edges = int(metrics.get("tr_edges") or 0)
     tl_edges = int(metrics.get("tl_edges") or 0)
     is_static_content = bool(is_image or med_diff <= 2.5)
+
     # Detecção Rigorosa de Cartelas Corporativas, Logos em Fundo Plano e Slides (Hard Gate)
     is_corporate_logo_or_plate = (
-        is_static_content and not is_historical and (
-            # 1. Fundo monocromático dominante (> 55%) com logo/texto central (baixa ou média densidade de bordas)
-            (uniform_bg >= 0.55 and (med_edge <= 0.05 or med_rows <= 0.22 or text_lines <= 4))
-            # 2. Fundo stark white (>165) dominante com conteúdo estático
-            or (med_mean >= 165.0 and uniform_bg >= 0.50)
+        not is_historical and (
+            # 1. Fundo monocromático dominante (> 40%) com logo/texto central ou slide (mesmo com leve movimento de vídeo)
+            (uniform_bg >= 0.40 and (med_edge <= 0.08 or med_rows <= 0.25 or text_lines >= 2) and (med_diff <= 8.5 or is_image))
+            # 2. Fundo stark white / claro (>150) dominante com logotipo ou texto
+            or (med_mean >= 150.0 and (uniform_bg >= 0.35 or med_edge <= 0.08 or text_lines >= 2) and (med_diff <= 8.5 or is_image))
             # 3. Fundo preto ou escuro dominante com logo centralizado
-            or (med_mean <= 45.0 and uniform_bg >= 0.55 and med_edge <= 0.06)
+            or (med_mean <= 45.0 and uniform_bg >= 0.45 and (med_edge <= 0.08 or text_lines >= 1) and (med_diff <= 8.5 or is_image))
         )
     )
     is_presentation_slide = (
         is_corporate_logo_or_plate
-        or (is_static_content and not is_historical and (
-            (text_score >= 0.28 and (med_rows >= 0.12 or med_cols >= 0.18))
-            or (data_score >= 0.35)
-            or (med_stdev >= 40.0 and med_edge >= 0.05 and (med_rows >= 0.12 or med_cols >= 0.18))
-            or (uniform_bg >= 0.35 and med_edge >= 0.04)
-            or (text_lines >= 2 and uniform_bg >= 0.45)
+        or (not is_historical and (
+            (text_score >= 0.28 and (med_rows >= 0.12 or med_cols >= 0.18) and (med_diff <= 8.5 or is_image))
+            or (data_score >= 0.35 and (med_diff <= 8.5 or is_image))
+            or (med_stdev >= 40.0 and med_edge >= 0.05 and (med_rows >= 0.12 or med_cols >= 0.18) and (med_diff <= 8.5 or is_image))
+            or (uniform_bg >= 0.35 and med_edge >= 0.04 and (med_diff <= 8.5 or is_image))
+            or (text_lines >= 2 and uniform_bg >= 0.35)
             or (text_lines >= 3)
         ))
-        or (uniform_bg >= 0.45 and med_edge >= 0.05 and med_diff <= 3.0)
-        or (text_lines >= 4 and med_diff <= 3.5)
+        or (uniform_bg >= 0.40 and med_edge >= 0.05 and med_diff <= 6.0)
+        or (text_lines >= 3 and med_diff <= 6.0)
     )
+
+    # Poluição por Banners Inferiores/Superiores (URLs comerciais, contatos, rodapés de sites)
+    has_banner_pollution = bool(
+        bottom_band >= 0.28
+        or (bottom_band >= 0.18 and (text_score >= 0.25 or data_score >= 0.30))
+        or (med_bottom >= 0.45 and (med_cols >= 0.45 or text_lines >= 1))
+    )
+
+    # Gravações de Tela / Player UI (Timecodes como 03:28 / 18:21, barras de player nos cantos)
+    has_player_ui_overlay = bool(
+        (not is_image) and (
+            (tr_edges >= 35 and float(metrics.get("tr_edge_density") or 0.0) >= 0.012 and (med_diff <= 8.0 or med_persistence >= 0.40))
+            or (tl_edges >= 35 and float(metrics.get("tl_edge_density") or 0.0) >= 0.012 and (med_diff <= 8.0 or med_persistence >= 0.40))
+            or (float(metrics.get("ui_top_share") or 0.0) >= 0.14 and med_persistence >= 0.40)
+        )
+    )
+
     is_webcam_pip = bool(
         (yunet_face_ratio > 0.0 and (tr_edges >= 70 or tl_edges >= 70))
         or (is_presentation_slide and (tr_edges >= 80 or tl_edges >= 80))
@@ -8052,11 +8070,37 @@ def _classify_visual_analysis(
             "reason": "avatar de apresentador / webcam embutida no canto",
             "confidence": 0.96,
         })
+    elif has_player_ui_overlay:
+        classified.update({
+            "category": "screen_recording",
+            "action": "hard_reject",
+            "reason": "gravacao de tela com timecode ou interface de player detectada",
+            "confidence": 0.95,
+        })
+    elif has_banner_pollution:
+        clean_roi = calculate_clean_image_roi(metrics) if is_image else None
+        if clean_roi:
+            classified.update({
+                "category": "rescued_clean_roi",
+                "action": "keep",
+                "reason": "imagem resgatada com recorte limpo (eliminou banner de rodapé)",
+                "confidence": 0.88,
+                "clean_roi": clean_roi,
+            })
+            if isinstance(metrics, dict):
+                metrics["clean_roi"] = clean_roi
+        else:
+            classified.update({
+                "category": "polluted_banner",
+                "action": "hard_reject",
+                "reason": "banner persistente no rodape (url, contato, site ou telefone)",
+                "confidence": 0.95,
+            })
     elif is_presentation_slide:
         classified.update({
             "category": "presentation_slide",
             "action": "hard_reject",
-            "reason": "slide de apresentacao / documento com texto estruturado",
+            "reason": "slide de apresentacao / cartela comercial com logo ou contato",
             "confidence": 0.98,
         })
     elif ui_status == "reject_ui_screenshot":
@@ -8109,18 +8153,6 @@ def _classify_visual_analysis(
                 metrics["clean_start_offset"] = video_trim["clean_start"]
                 metrics["clean_end_offset"] = video_trim["clean_end"]
                 metrics["clean_usable_duration"] = video_trim["clean_duration"]
-        elif not is_image and corner_wm.get("worst_corner"):
-            classified.update({
-                "category": "rescued_delogo_video",
-                "action": "keep",
-                "reason": f"video resgatado com delogo cirurgico (neutralizou marca d'agua no canto {c_label})",
-                "confidence": 0.88,
-                "corner_watermark": corner_wm,
-                "delogo_rescued": True,
-            })
-            if isinstance(metrics, dict):
-                metrics["delogo_rescued"] = True
-                metrics["corner_watermark"] = corner_wm
         else:
             classified.update({
                 "category": "watermark_corner",
@@ -9818,6 +9850,7 @@ def apply_visual_clean_filter(
             or category in {
                 "text_dominant", "data_dominant", "presenter", "watermark_corner",
                 "ui_screenshot", "presentation_slide", "webcam_pip",
+                "polluted_banner", "screen_recording",
             }
             or (media_kind == "image" and is_unusable)
         )
@@ -9836,6 +9869,10 @@ def apply_visual_clean_filter(
                 summary["rejected_ui_screenshots"] += 1
             elif category == "watermark_corner":
                 summary["rejected_watermarks"] += 1
+            elif category == "polluted_banner":
+                summary["rejected_banners"] = summary.get("rejected_banners", 0) + 1
+            elif category == "screen_recording":
+                summary["rejected_screen_recordings"] = summary.get("rejected_screen_recordings", 0) + 1
             elif category == "presentation_slide":
                 summary["rejected_presentation_slides"] = summary.get("rejected_presentation_slides", 0) + 1
             elif category == "webcam_pip":
@@ -13474,7 +13511,7 @@ def compose_visual_chunks_parallel(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-    max_workers = max(1, min(2 if is_laptop else 3, len(chunks)))
+    max_workers = max(1, min(2, len(chunks)))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
 
     comp_base = 65.0
@@ -16938,32 +16975,32 @@ def export_bitrate_settings(mode: str, codec: str, options: dict[str, Any]) -> d
 
     defaults = {
         "small_file": {
-            "hevc": (1100 if fast else 1900),
-            "h264": (1700 if fast else 2800),
+            "hevc": (1400 if fast else 2600),
+            "h264": (2000 if fast else 3800),
         },
         "capcut_compact": {
-            "hevc": (1500 if fast else 2500),
-            "h264": (2200 if fast else 3600),
+            "hevc": (2200 if fast else 4200),
+            "h264": (3200 if fast else 6500),
         },
         "youtube_compact": {
-            "hevc": (1800 if fast else 2800),
-            "h264": (2500 if fast else 4000),
+            "hevc": (2400 if fast else 4800),
+            "h264": (3500 if fast else 7200),
         },
         "balanced": {
-            "hevc": (2200 if fast else 3500),
-            "h264": (3000 if fast else 4800),
+            "hevc": (2800 if fast else 5500),
+            "h264": (4000 if fast else 8000),
         },
         "high_quality": {
-            "hevc": (3000 if fast else 5200),
-            "h264": (4200 if fast else 6800),
+            "hevc": (3800 if fast else 7500),
+            "h264": (5500 if fast else 11000),
         },
         "compatibility": {
-            "hevc": (2200 if fast else 3600),
-            "h264": (3200 if fast else 5200),
+            "hevc": (2600 if fast else 4800),
+            "h264": (3800 if fast else 7000),
         },
         "cinematic_4k": {
-            "hevc": (4000 if fast else 7500),
-            "h264": (6000 if fast else 10500),
+            "hevc": (5000 if fast else 9500),
+            "h264": (7500 if fast else 14000),
         },
     }
     key = "hevc" if use_hevc else "h264"
@@ -17012,7 +17049,8 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
             encoder = str(turbo["encoder_effective"])
             if encoder.endswith("_nvenc"):
                 args = [
-                    "-c:v", encoder, "-preset", "p3", "-tune", "ll", "-rc", "vbr",
+                    "-c:v", encoder, "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+                    "-cq", "19", "-spatial-aq", "1", "-temporal-aq", "1",
                     "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
                     "-g", "60", "-keyint_min", "30", "-forced-idr", "1",
                     "-threads", "4",
@@ -17077,10 +17115,12 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
         if hardware_encoder.endswith("_nvenc"):
             args = [
                 "-c:v", hardware_encoder,
-                "-preset", "p3",
-                "-tune", "ll",
+                "-preset", "p4",
+                "-tune", "hq",
                 "-rc", "vbr",
-                "-cq", "20",
+                "-cq", "19",
+                "-spatial-aq", "1",
+                "-temporal-aq", "1",
                 "-b:v", target,
                 "-maxrate", maxrate,
                 "-bufsize", bufsize,
@@ -17226,7 +17266,7 @@ def efficient_segment_worker_count(job: Job, gpu: bool) -> int:
 
 
 def quality_boost_chain() -> str:
-    return "eq=contrast=1.045:saturation=1.055:brightness=0.002"
+    return "eq=contrast=1.045:saturation=1.055:brightness=0.002,unsharp=5:5:0.65:3:3:0.0"
 
 
 def continuity_adjustments(
@@ -17419,25 +17459,27 @@ def build_video_filter(
         # com reflexo ampliado, desfocado e sutilmente escurecido nas laterais.
         vf += (
             f"split=2[bg][fg];"
-            f"[bg]scale=384:216:force_original_aspect_ratio=increase,crop=384:216,"
-            f"boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg_glass];"
-            f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg_sharp];"
+            f"[bg]scale=384:216:force_original_aspect_ratio=increase:flags=bicubic,crop=384:216,"
+            f"boxblur=8:2,scale={w}:{h}:flags=bicubic,eq=brightness=-0.08:saturation=0.85,setsar=1[bg_glass];"
+            f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=bicubic+accurate_rnd,setsar=1,unsharp=5:5:0.60:3:3:0.0[fg_sharp];"
             f"[bg_glass][fg_sharp]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,fps=30,settb=AVTB,setpts=PTS-STARTPTS"
         )
     elif abs(eff_scale - 1.0) > 0.005:
         pw = int(math.ceil(w * eff_scale / 2.0) * 2)
         ph = int(math.ceil(h * eff_scale / 2.0) * 2)
         vf += (
-            f"fps=30,scale={pw}:{ph}:force_original_aspect_ratio=increase,"
+            f"fps=30,scale={pw}:{ph}:force_original_aspect_ratio=increase:flags=bicubic+accurate_rnd,"
             f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
         )
     else:
         vf += (
-            f"fps=30,scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"fps=30,scale={w}:{h}:force_original_aspect_ratio=increase:flags=bicubic+accurate_rnd,"
             f"crop={w}:{h},setsar=1,settb=AVTB,setpts=PTS-STARTPTS"
         )
     if quality_boost:
         vf += f",{quality_boost_chain()}"
+    else:
+        vf += ",unsharp=3:3:0.45:3:3:0.0"
     if filmic_grade:
         vf += f",{filmic_grade}"
     if continuity_filter:
@@ -19184,9 +19226,9 @@ def make_segments_smart(
                 accepted_plans.append(plan)
                 rendered_duration += actual
 
-    target_floor = audio_total - 0.35
+    target_floor = audio_total + 1.2
     if rendered_duration < target_floor:
-        missing = audio_total - rendered_duration
+        missing = target_floor - rendered_duration
         _append_log(job, f"Timeline curta apos render real: faltam {missing:.2f}s. Usando clipes extras/reuso automatico.")
         source_infos = [(idx, src, dur) for idx, (src, dur) in enumerate(zip(video_files, video_durs), start=1)]
         last_first_cycle = max((plan.source_index for plan in plans if plan.cycle == 0), default=0)
@@ -19206,8 +19248,8 @@ def make_segments_smart(
                 if rendered_duration >= target_floor or attempts >= max_attempts:
                     break
                 attempts += 1
-                remaining = audio_total - rendered_duration
-                if remaining <= 0.35:
+                remaining = target_floor - rendered_duration
+                if remaining <= 0.10:
                     break
                 target_limit = 5.2 if not is_image_path(src) else 4.5
                 target = min(max(0.01, dur * summary["setpts_factor"]), remaining + 0.75, target_limit)
