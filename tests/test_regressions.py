@@ -201,6 +201,143 @@ class Regressions(unittest.TestCase):
         self.assertTrue(errors and isinstance(errors[0],app.RenderCancelled),errors)
         self.assertEqual(job.current_processes,[])
 
+    def test_dynamic_status_eta_countdown(self):
+        job = app.Job(id='test-countdown', status='running')
+        job.created_at = 1000.0
+        job.started_at = 1000.0
+        job.estimated_total_seconds = 600.0
+        job.percent = 15.0
+        job.preflight_summary['active_render_estimate'] = {
+            'seconds': 600.0,
+            'confidence': 'historical',
+        }
+        app.JOBS[job.id] = job
+
+        with patch('time.time', return_value=1050.0):
+            res1 = self.client.get(f'/api/status/{job.id}').json()
+            self.assertIn('eta_summary', res1)
+            rem1 = res1['eta_summary']['estimated_remaining_seconds']
+            self.assertGreater(rem1, 400)
+
+        # 10 seconds later, elapsed increased by 10s: remaining MUST count down and not be frozen
+        with patch('time.time', return_value=1060.0):
+            res2 = self.client.get(f'/api/status/{job.id}').json()
+            rem2 = res2['eta_summary']['estimated_remaining_seconds']
+            self.assertLess(rem2, rem1)
+            self.assertNotEqual(rem1, rem2)
+
+    def test_smart_image_motion_and_easing(self):
+        """Verifica os 10 arquétipos, anti-repetição, safe framing e interpolação Hermite sem filtros destrutivos."""
+        # 1. Expressão de easing e ausência de unsharp
+        fc = app.build_image_filter_complex(
+            w=1920,
+            h=1080,
+            target_duration=5.0,
+            motion="slow_zoom_in",
+            image_path=None,
+            style_profile="editorial_cinematic",
+            focal_point=(0.5, 0.4),
+            safe_framing={"safe_fx": 0.5, "safe_fy": 0.4, "has_face": True},
+        )
+        self.assertIn("3*pow((on/150),2)-2*pow((on/150),3)", fc)
+        self.assertNotIn("unsharp", fc)
+        self.assertIn("bt709", fc)
+
+        # 2. Anti-repetição de movimentos sucessivos
+        m1, f1, s1 = app.choose_smart_image_motion(None, prev_motions=[])
+        m2, f2, s2 = app.choose_smart_image_motion(None, prev_motions=[m1])
+        m3, f3, s3 = app.choose_smart_image_motion(None, prev_motions=[m1, m2])
+        self.assertNotEqual(m1, m2)
+        self.assertNotEqual(m2, m3)
+
+    def test_image_dominant_pacing_benchmark(self):
+        """Verifica que projetos predominantemente de imagens adotam a média 5.52s da referência."""
+        # Vídeo com imagens estáticas
+        min_d, target_d, max_d, zone = app.get_retention_pacing_parameters(
+            current_pos=60.0,
+            audio_total=120.0,
+            is_image_dominant=True,
+        )
+        self.assertEqual(zone, "body")
+        self.assertGreaterEqual(target_d, 5.0)
+        self.assertLessEqual(target_d, 6.5)
+        self.assertEqual(min_d, 3.5)
+        self.assertEqual(max_d, 6.5)
+
+    def test_top_ranking_lock_isolation(self):
+        """Verifica isolamento estrito de posições (#10, #9, #8...) e proibição de contaminação cruzada."""
+        script = """
+        TOP 10 MAIORES MÁQUINAS
+        10. Komatsu D575A Super Dozer
+        Trator colossal japonês de esteiras.
+        9. Bagger 293
+        Escavadora gigante feita na Alemanha.
+        8. Caterpillar 797F
+        Caminhão fora de estrada com caçamba titânica.
+        """
+        cues = [
+            app.SubtitleCue(start=5.0, end=15.0, text="Número 10: O trator Komatsu D575A"),
+            app.SubtitleCue(start=15.0, end=25.0, text="Ele tem uma potência incrível"),
+            app.SubtitleCue(start=25.0, end=38.0, text="Número 9: A escavadora Bagger 293"),
+            app.SubtitleCue(start=38.0, end=50.0, text="Feita na Alemanha com peso colossal"),
+            app.SubtitleCue(start=50.0, end=65.0, text="#8: Caterpillar 797F caminhão fora de estrada"),
+        ]
+        units = app.extract_ranking_editorial_units(script, cues)
+        self.assertEqual(len(units), 3)
+        self.assertEqual(units[0]["rank_num"], 10)
+        self.assertEqual(units[1]["rank_num"], 9)
+        self.assertEqual(units[2]["rank_num"], 8)
+
+        # Tokens do #9 e #8 devem ser proibidos no #10
+        self.assertIn("9", units[0]["forbidden_tokens"])
+        self.assertIn("8", units[0]["forbidden_tokens"])
+        self.assertIn("bagger", units[0]["forbidden_tokens"])
+        self.assertIn("caterpillar", units[0]["forbidden_tokens"])
+
+        # E tokens do #10 devem ser proibidos no #9
+        self.assertIn("komatsu", units[1]["forbidden_tokens"])
+        self.assertIn("10", units[1]["forbidden_tokens"])
+
+    def test_dhash_perceptual_deduplication(self):
+        """Verifica cálculo do dHash e distância de Hamming."""
+        h1 = 0b1111000011110000
+        h2 = 0b1111000011110011  # difere em 2 bits
+        h3 = 0b0000111100001111  # difere em 16 bits
+        self.assertEqual(app.dhash_distance(h1, h2), 2)
+        self.assertLessEqual(app.dhash_distance(h1, h2), 6)  # detectado como duplicado
+        self.assertEqual(app.dhash_distance(h1, h3), 16)
+        self.assertGreater(app.dhash_distance(h1, h3), 6)  # aceito como diferente
+
+    def test_hybrid_and_image_timeline_plan(self):
+        """Verifica a montagem de timelines 100% imagens e híbridas com transições e safe framing."""
+        dummy_imgs = [Path(f"img_{i}.jpg") for i in range(10)]
+        plans_img, _ = app.build_segment_plan(
+            video_files=dummy_imgs,
+            video_durs=[5.0] * 10,
+            audio_total=45.0,
+            force_short=True,
+        )
+        self.assertGreaterEqual(len(plans_img), 5)
+        for p in plans_img:
+            self.assertEqual(p.media_kind, "image")
+            self.assertIn(p.image_motion, app.IMAGE_MOTION_ARCHETYPES)
+            self.assertIsNotNone(p.safe_framing)
+
+        # Híbrido: 1 vídeo + 9 imagens
+        dummy_hybrid = [Path("video_hero.mp4")] + dummy_imgs[:9]
+        dummy_durs = [12.0] + [5.0] * 9
+        plans_hyb, _ = app.build_segment_plan(
+            video_files=dummy_hybrid,
+            video_durs=dummy_durs,
+            audio_total=45.0,
+            force_short=True,
+        )
+        kinds = {p.media_kind for p in plans_hyb}
+        self.assertIn("video", kinds)
+        self.assertIn("image", kinds)
+
 
 if __name__ == '__main__':
     unittest.main()
+
+

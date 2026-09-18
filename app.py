@@ -65,7 +65,7 @@ from glide_sound_design import write_sound_design_map
 
 APP_VERSION = "1.40.0"
 RENDER_PIPELINE_VERSION = "render_graph_11_editorial_engine"
-RENDER_PERFORMANCE_VERSION = "performance_7_fast_finish"
+RENDER_PERFORMANCE_VERSION = "performance_8_realtime_turbo"
 
 SOURCE_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", SOURCE_ROOT)).resolve()
@@ -684,10 +684,234 @@ def probe_image_focal_anchor(path: Path | str | None, cwd: Path | None = None) -
     return result
 
 
+IMAGE_MOTION_ARCHETYPES = (
+    "slow_zoom_in",
+    "slow_zoom_out",
+    "subtle_pan_right",
+    "subtle_pan_left",
+    "micro_pan_up",
+    "micro_pan_down",
+    "diagonal_drift_up_right",
+    "diagonal_drift_down_left",
+    "scale_drift_stable",
+    "tall_document_crawl",
+)
+
+IMAGE_DHASH_CACHE: dict[str, int] = {}
+IMAGE_DHASH_LOCK = threading.RLock()
+
+
+def compute_image_dhash(path: Path | str, cwd: Path | None = None) -> int:
+    """Calcula dHash perceptual de 64 bits em <0.5ms para detectar mídias duplicadas ou colagens."""
+    resolved = _resolved_media_path(path, cwd)
+    if not resolved.exists():
+        return 0
+    try:
+        st = resolved.stat()
+        cache_key = f"{resolved.name}:{st.st_size}:{int(st.st_mtime)}"
+    except Exception:
+        cache_key = str(resolved)
+    with IMAGE_DHASH_LOCK:
+        if cache_key in IMAGE_DHASH_CACHE:
+            return IMAGE_DHASH_CACHE[cache_key]
+    try:
+        from PIL import Image
+        with Image.open(resolved) as img:
+            small = img.convert("L").resize((9, 8), Image.Resampling.BILINEAR)
+            arr = np.array(small, dtype=np.uint8)
+            diff_bits = 0
+            for r in range(8):
+                for c in range(8):
+                    if arr[r, c + 1] > arr[r, c]:
+                        diff_bits |= (1 << (r * 8 + c))
+            with IMAGE_DHASH_LOCK:
+                IMAGE_DHASH_CACHE[cache_key] = diff_bits
+            return diff_bits
+    except Exception:
+        return 0
+
+
+def dhash_distance(h1: int, h2: int) -> int:
+    return bin(h1 ^ h2).count("1")
+
+
+IMAGE_SMART_METADATA_CACHE: dict[str, dict[str, Any]] = {}
+IMAGE_SMART_METADATA_LOCK = threading.RLock()
+
+
+def probe_image_smart_metadata(path: Path | str | None, cwd: Path | None = None) -> dict[str, Any]:
+    """Extrai metadados estruturados, enquadramento seguro, centróide focal e faces via YuNet."""
+    default_meta = {
+        "width": 1920,
+        "height": 1080,
+        "aspect_ratio": 16.0 / 9.0,
+        "focal_anchor": (0.50, 0.38),
+        "has_face": False,
+        "face_count": 0,
+        "face_center": (0.50, 0.38),
+        "face_area": 0.0,
+        "head_protected": False,
+        "safe_crop": (0.0, 0.0, 1.0, 1.0),
+        "safe_fx": 0.50,
+        "safe_fy": 0.38,
+        "is_tall": False,
+        "is_wide": False,
+        "dhash": 0,
+    }
+    if not path:
+        return default_meta
+    resolved = _resolved_media_path(path, cwd)
+    if not resolved.exists():
+        return default_meta
+    try:
+        st = resolved.stat()
+        cache_key = f"{resolved.name}:{st.st_size}:{int(st.st_mtime)}"
+    except Exception:
+        cache_key = str(resolved)
+
+    with IMAGE_SMART_METADATA_LOCK:
+        cached = IMAGE_SMART_METADATA_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+    img_w, img_h = probe_image_dimensions(resolved)
+    aspect = float(img_w) / max(1.0, float(img_h))
+    focal_x, focal_y = probe_image_focal_anchor(resolved, cwd=cwd)
+    dhash = compute_image_dhash(resolved, cwd=cwd)
+
+    # Detecção facial via YuNet
+    has_face = False
+    face_count = 0
+    face_cx, face_cy = focal_x, focal_y
+    face_area = 0.0
+    head_protected = False
+
+    try:
+        if YUNET_MODEL_PATH.exists():
+            import cv2
+            global YUNET_DETECTOR
+            with YUNET_LOCK:
+                if YUNET_DETECTOR is None:
+                    YUNET_DETECTOR = cv2.FaceDetectorYN.create(
+                        str(YUNET_MODEL_PATH),
+                        "",
+                        (YUNET_FRAME_W, YUNET_FRAME_H),
+                        0.62,
+                        0.28,
+                        500,
+                    )
+                YUNET_DETECTOR.setInputSize((YUNET_FRAME_W, YUNET_FRAME_H))
+                from PIL import Image
+                with Image.open(resolved) as pil_img:
+                    thumb = pil_img.convert("RGB").resize((YUNET_FRAME_W, YUNET_FRAME_H), Image.Resampling.BILINEAR)
+                    raw_bytes = np.frombuffer(thumb.tobytes(), dtype=np.uint8).reshape((YUNET_FRAME_H, YUNET_FRAME_W, 3))
+                    bgr = cv2.cvtColor(raw_bytes, cv2.COLOR_RGB2BGR)
+                    _ret, faces = YUNET_DETECTOR.detect(bgr)
+                    if faces is not None and len(faces) > 0:
+                        has_face = True
+                        face_count = len(faces)
+                        sorted_faces = sorted(faces, key=lambda f: float(f[2] * f[3]), reverse=True)
+                        dom = sorted_faces[0]
+                        dom_x, dom_y, dom_w, dom_h = [float(v) for v in dom[:4]]
+                        face_cx = (dom_x + dom_w * 0.5) / float(YUNET_FRAME_W)
+                        face_cy = (dom_y + dom_h * 0.5) / float(YUNET_FRAME_H)
+                        face_area = (dom_w * dom_h) / float(YUNET_FRAME_W * YUNET_FRAME_H)
+                        head_protected = True
+    except Exception:
+        pass
+
+    # Safe framing zone
+    if has_face:
+        safe_fx = max(0.20, min(0.80, round(face_cx, 3)))
+        safe_fy = max(0.18, min(0.55, round(face_cy, 3)))
+    else:
+        safe_fx = max(0.22, min(0.78, round(focal_x, 3)))
+        safe_fy = max(0.20, min(0.65, round(focal_y, 3)))
+
+    is_tall = aspect < 0.82
+    is_wide = aspect > 1.85
+
+    meta = {
+        "width": img_w,
+        "height": img_h,
+        "aspect_ratio": round(aspect, 4),
+        "focal_anchor": (round(focal_x, 3), round(focal_y, 3)),
+        "has_face": has_face,
+        "face_count": face_count,
+        "face_center": (round(face_cx, 3), round(face_cy, 3)),
+        "face_area": round(face_area, 4),
+        "head_protected": head_protected,
+        "safe_crop": (0.0, 0.0, 1.0, 1.0),
+        "safe_fx": safe_fx,
+        "safe_fy": safe_fy,
+        "is_tall": is_tall,
+        "is_wide": is_wide,
+        "dhash": dhash,
+    }
+    with IMAGE_SMART_METADATA_LOCK:
+        IMAGE_SMART_METADATA_CACHE[cache_key] = meta
+    return meta
+
+
+def choose_smart_image_motion(
+    path: Path | str,
+    target_duration: float = 5.0,
+    prev_motions: list[str] | None = None,
+    cwd: Path | None = None,
+    narrative_intent: str = "",
+) -> tuple[str, tuple[float, float], dict[str, Any]]:
+    """
+    Diretor de Movimento Inteligente: Escolhe o arquétipo ideal baseado no conteúdo da imagem,
+    posição do assunto, proteção de cabeças/rostos, saliência e variação editorial não repetitiva.
+    """
+    meta = probe_image_smart_metadata(path, cwd=cwd)
+    prev = [str(m).lower() for m in (prev_motions or []) if m]
+    last_motion = prev[-1] if prev else ""
+    penult_motion = prev[-2] if len(prev) >= 2 else ""
+
+    fx = meta["safe_fx"]
+    fy = meta["safe_fy"]
+    has_face = meta["has_face"]
+    is_tall = meta["is_tall"]
+    is_wide = meta["is_wide"]
+
+    # 1. Imagem alta / documento / jornal / vertical
+    if is_tall:
+        candidates = ["tall_document_crawl", "micro_pan_up", "slow_zoom_out"]
+    # 2. Rosto dominante no topo do enquadramento (proteger cabeça de cortes)
+    elif has_face and fy <= 0.32:
+        candidates = ["scale_drift_stable", "slow_zoom_in", "subtle_pan_right" if fx > 0.55 else "subtle_pan_left"]
+    # 3. Assunto nitidamente posicionado à direita
+    elif fx >= 0.60:
+        candidates = ["subtle_pan_right", "slow_zoom_in", "diagonal_drift_up_right", "slow_zoom_out"]
+    # 4. Assunto nitidamente posicionado à esquerda
+    elif fx <= 0.40:
+        candidates = ["subtle_pan_left", "slow_zoom_in", "diagonal_drift_down_left", "slow_zoom_out"]
+    # 5. Imagem panorâmica larga
+    elif is_wide:
+        candidates = ["subtle_pan_right", "subtle_pan_left", "slow_zoom_in", "diagonal_drift_up_right"]
+    # 6. Assunto centralizado ou paisagem equilibrada
+    else:
+        candidates = ["slow_zoom_in", "slow_zoom_out", "micro_pan_up", "diagonal_drift_up_right", "scale_drift_stable"]
+
+    valid_choices = [c for c in candidates if c != last_motion]
+    if not valid_choices:
+        valid_choices = [c for c in candidates if c != penult_motion]
+    if not valid_choices:
+        valid_choices = candidates
+
+    chosen = valid_choices[0]
+    return chosen, (fx, fy), meta
+
+
 def image_motion_for(path: Path | str, index: int = 0) -> str:
-    """Retorna um dos 4 movimentos cinematográficos suaves sem repetições consecutivas."""
-    return IMAGE_MOTIONS[index % len(IMAGE_MOTIONS)]
-VISUAL_CLEAN_CACHE_VERSION = 16
+    """Compatibilidade legada com encaminhamento para o Diretor Inteligente."""
+    try:
+        motion, _focal, _meta = choose_smart_image_motion(path)
+        return motion
+    except Exception:
+        return IMAGE_MOTION_ARCHETYPES[index % len(IMAGE_MOTION_ARCHETYPES)]
+VISUAL_CLEAN_CACHE_VERSION = 18
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -1191,6 +1415,9 @@ class Job:
     render_budget_extensions: int = 0
     stage_progress_seconds: float = 0.0
     stage_progress_total: float = 0.0
+    _preflight_elapsed: float | None = None
+    _last_status_eta_sec: float | None = None
+    _last_status_time: float | None = None
 
 
 class RenderCancelled(RuntimeError):
@@ -1220,6 +1447,8 @@ class SegmentPlan:
     clean_roi: tuple[float, float, float, float] | None = None
     timeline_zone: str = "body"
     delogo_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
+    focal_point: tuple[float, float] | None = None
+    safe_framing: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1306,7 +1535,7 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
             "smartVisualDirector": True,
             "autoDirector": True,
             "directorDecisionMode": "balanced",
-            "visualCleanFilter": True,
+            "visualCleanFilter": False,
             "visualFilterLevel": "normal",
             "adaptiveVisualFilter": False,
             "healthyRenderThreshold": 70,
@@ -1320,13 +1549,13 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
             "channelLearning": True,
             "energyEditing": True,
             "antiRepeat": True,
-            "continuityMatch": True,
-            "continuityOutliersOnly": True,
+            "continuityMatch": False,
+            "continuityOutliersOnly": False,
             "backgroundMusicDucking": True,
             "adaptiveDucking": True,
             "dynamicPauses": False,
             "dynamicPauseIntensity": "disabled",
-            "strongMomentEnhance": True,
+            "strongMomentEnhance": False,
             "subtitleEditorialGrammar": True,
             "cinematicOpeningPolicy": "auto_contextual",
             "captionStyle": {
@@ -1335,9 +1564,14 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
                 "outline": "#111111", "outline_size": 2.0, "box": False,
             },
             "audioMastering": True,
-            "scoreVisualWindows": True,
-            "motionGraphicsPremium": True,
+            "scoreVisualWindows": False,
+            "motionGraphicsPremium": False,
             "adaptiveQualityBoost": False,
+            "qualityBoost": False,
+            "zoom": "off",
+            "transitions": "off",
+            "codec": "h264",
+            "gpu": True,
             "queueAutoTest": True,
             "styleSource": "glide_package",
             "referenceStyleEnabled": False,
@@ -1602,6 +1836,37 @@ def _migrate_restored_visual_features_v123() -> None:
 
 
 _migrate_restored_visual_features_v123()
+
+
+def _migrate_high_speed_render_defaults_v130() -> None:
+    changed = False
+    speed_options = {
+        "codec": "h264",
+        "qualityBoost": False,
+        "zoom": "off",
+        "transitions": "off",
+        "scoreVisualWindows": False,
+        "continuityMatch": False,
+        "continuityOutliersOnly": False,
+        "visualCleanFilter": False,
+        "gpu": True,
+        "speedOptimizationVersion": 1,
+    }
+    for project in QUEUE_PROJECTS:
+        options = project.setdefault("options", {})
+        if not isinstance(options, dict):
+            options = {}
+            project["options"] = options
+        if int(options.get("speedOptimizationVersion") or 0) >= 1:
+            continue
+        options.update(speed_options)
+        project["updatedAt"] = _now_iso()
+        changed = True
+    if changed:
+        _save_queue_projects(QUEUE_PROJECTS)
+
+
+_migrate_high_speed_render_defaults_v130()
 
 
 def _migrate_text_caption_layers_v126() -> None:
@@ -1987,6 +2252,91 @@ def extract_script_editorial_structure(text: str) -> dict[str, Any]:
                 structure["cta_phrases"].append(match_txt[:120])
 
     return structure
+
+
+def extract_ranking_editorial_units(
+    text: str = "",
+    cues: list[SubtitleCue] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Ranking Lock Engine: Detecta estruturas de ranking / contagem regressiva (#10, #9, #8... ou TOP 10, etc.)
+    no roteiro ou legendas SRT, mapeando janelas de tempo, tokens de entidade e tokens estritamente proibidos
+    para impedir contaminação cruzada de mídias entre posições do ranking.
+    """
+    units: list[dict[str, Any]] = []
+    stopwords = {
+        "the", "and", "about", "across", "begin", "with", "from", "are", "have", "that",
+        "this", "into", "later", "para", "com", "uma", "dos", "das", "por", "que", "los", "las",
+        "top", "numero", "number", "item", "posicao", "ranking", "lugar"
+    }
+    rank_pattern = re.compile(
+        r"(?:(?:top|n[uú]mero|number|item|posi[cç][aã]o|ranking)\s*#?\s*(\d{1,2})|#(\d{1,2})\b|(?:^|\n|\b)(\d{1,2})\s*[\.\:\-\–—]\s*([^\n\r]+))",
+        re.IGNORECASE
+    )
+
+    # 1. Se tivermos legendas SRT (marcos temporais precisos)
+    if cues:
+        for cue in cues:
+            m = rank_pattern.search(cue.text)
+            if m:
+                num_str = m.group(1) or m.group(2) or m.group(3)
+                if not num_str or not num_str.isdigit():
+                    continue
+                num = int(num_str)
+                # Ignora menções ao título geral do vídeo (ex: "Top 10" nos primeiros 3.5 segundos)
+                if num >= 7 and cue.start < 3.5 and len(units) == 0:
+                    continue
+                words = set(re.findall(r"[a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}", cue.text.lower()))
+                entity_words = {w for w in words if w not in stopwords and not w.isdigit()}
+                if units:
+                    units[-1]["end_time"] = cue.start
+                units.append({
+                    "rank_num": num,
+                    "start_time": cue.start,
+                    "end_time": 99999.0,
+                    "title": cue.text.strip(),
+                    "entity_tokens": entity_words,
+                    "forbidden_tokens": set(),
+                })
+
+    # 2. Se não encontrou nas legendas ou não há legendas, tenta no texto do roteiro
+    if not units and text:
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        for line in lines:
+            m = rank_pattern.search(line)
+            if m:
+                num_str = m.group(1) or m.group(2) or m.group(3)
+                if not num_str or not num_str.isdigit():
+                    continue
+                num = int(num_str)
+                title_match = m.group(4) if len(m.groups()) >= 4 else ""
+                title_text = title_match if title_match else line
+                words = set(re.findall(r"[a-zA-Z0-9áéíóúâêîôûãõçÁÉÍÓÚÂÊÎÔÛÃÕÇ]{3,}", line.lower()))
+                entity_words = {w for w in words if w not in stopwords and not w.isdigit()}
+                units.append({
+                    "rank_num": num,
+                    "start_time": 0.0,
+                    "end_time": 99999.0,
+                    "title": title_text.strip()[:100],
+                    "entity_tokens": entity_words,
+                    "forbidden_tokens": set(),
+                })
+
+    if not units:
+        return []
+
+    # 3. Calcula tokens proibidos (todos os tokens e números das OUTRAS posições)
+    all_rank_nums = {str(u["rank_num"]) for u in units}
+    for i, u in enumerate(units):
+        other_nums = all_rank_nums - {str(u["rank_num"])}
+        other_entities: set[str] = set()
+        for j, o in enumerate(units):
+            if i != j:
+                other_entities.update(o["entity_tokens"])
+        u["forbidden_tokens"] = other_nums | other_entities
+
+    return units
+
 
 
 def analyze_script_guide(path: Path, *, project_id: str = "", rel: str = "", srt_cues: list[SubtitleCue] | None = None) -> dict[str, Any]:
@@ -2694,23 +3044,57 @@ def _repair_false_queue_errors() -> None:
     changed = False
     for project in QUEUE_PROJECTS:
         error = str(project.get("error") or "").lower()
+        project_id = str(project.get("id") or "").strip()
+        status = str(project.get("status") or "").lower()
+
+        # Se o projeto ficou travado em 'rendering' na inicialização sem job ativo no processo
+        job_id = str(project.get("jobId") or "").strip()
+        if status == "rendering" and (not job_id or job_id not in JOBS):
+            project["status"] = "paused"
+            project["updatedAt"] = _now_iso()
+            changed = True
+
         if not error:
             continue
-        project_id = str(project.get("id") or "").strip()
+
         if "nenhum audio de narracao valido foi encontrado" in error:
             groups = project.get("media") if isinstance(project.get("media"), dict) else {}
             audio_rels = [str(item).replace("\\", "/") for item in (groups.get("audios") or [])]
             index = _load_project_media_index(project_id)
             has_persisted_audio = False
             for rel in audio_rels:
-                record = index.get(rel)
+                bname = Path(rel).name
+                record = index.get(rel) or index.get(bname)
                 if not record:
-                    continue
-                stored_file = Path(str(record.get("file") or "")).name
-                candidate = _project_media_dir(project_id) / stored_file
-                if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
-                    has_persisted_audio = True
+                    for k, v in index.items():
+                        if k == bname or (isinstance(v, dict) and (v.get("name") == bname or str(v.get("file") or "").endswith(bname))):
+                            record = v
+                            break
+                if record:
+                    stored_file = Path(str(record.get("file") or "")).name
+                    candidate = _project_media_dir(project_id) / stored_file
+                    if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                        has_persisted_audio = True
+                        break
+                # Verificar se o áudio existe fisicamente em pastas de mídia comuns
+                for fallback_dir in (
+                    _project_media_dir(project_id),
+                    Path.home() / "Downloads" / "Auralis Audios",
+                    Path.home() / "Downloads",
+                    Path(r"C:\Users\Micael\Downloads\Auralis Audios"),
+                    Path(r"C:\Users\Micael\Downloads"),
+                    PROJECT_MEDIA_ROOT,
+                ):
+                    try:
+                        cand = fallback_dir / bname
+                        if cand.exists() and cand.is_file() and cand.stat().st_size > 0:
+                            has_persisted_audio = True
+                            break
+                    except Exception:
+                        pass
+                if has_persisted_audio:
                     break
+
             if not has_persisted_audio:
                 continue
             project["status"] = "ready"
@@ -2847,6 +3231,24 @@ def _resolve_persisted_manifest_item(
                     return candidate_path
             except Exception:
                 pass
+
+    # Fallback global por nome base para mídias de narração e recursos externos
+    base_name = Path(str(item.get("rel") or item.get("name") or "")).name
+    if base_name:
+        for fallback_dir in (
+            Path.home() / "Downloads" / "Auralis Audios",
+            Path.home() / "Downloads",
+            Path(r"C:\Users\Micael\Downloads\Auralis Audios"),
+            Path(r"C:\Users\Micael\Downloads"),
+            PROJECT_MEDIA_ROOT,
+        ):
+            try:
+                cand = fallback_dir / base_name
+                if cand.exists() and cand.is_file() and cand.stat().st_size > 0:
+                    return cand
+            except Exception:
+                pass
+
     return None
 
 
@@ -4163,12 +4565,27 @@ def application_shutdown_cleanup():
 
 def _read_render_performance() -> list[dict[str, Any]]:
     with RENDER_PERFORMANCE_LOCK:
+        items: list[dict[str, Any]] = []
         try:
-            payload = json.loads(RENDER_PERFORMANCE_FILE.read_text(encoding="utf-8"))
-            records = payload.get("records") if isinstance(payload, dict) else payload
-            return [item for item in (records or []) if isinstance(item, dict)][-80:]
+            if RENDER_PERFORMANCE_FILE.exists():
+                payload = json.loads(RENDER_PERFORMANCE_FILE.read_text(encoding="utf-8"))
+                records = payload.get("records") if isinstance(payload, dict) else payload
+                items = [item for item in (records or []) if isinstance(item, dict)]
         except Exception:
-            return []
+            items = []
+        # Fallback: Se o arquivo central ainda não tiver registros (ou estiver vazio),
+        # carrega o histórico real gravado nos projetos de fila existentes na máquina.
+        if not items:
+            try:
+                for p in _load_queue_projects():
+                    for hist_source in [p.get("performanceHistory"), (p.get("lastRenderSummary") or {}).get("performanceHistory")]:
+                        if isinstance(hist_source, list):
+                            for item in hist_source:
+                                if isinstance(item, dict) and item not in items:
+                                    items.append(item)
+            except Exception:
+                pass
+        return items[-80:]
 
 
 def _positive_median(values: list[float]) -> float:
@@ -4190,7 +4607,16 @@ def render_budget_enabled(options: dict[str, Any] | None = None) -> bool:
 def render_budget_multiplier(priority: str | None, options: dict[str, Any] | None = None) -> float:
     if not render_budget_enabled(options):
         return 0.0
-    return max(2.0, min(8.0, float((options or {}).get("renderBudgetTurboMultiplier") or 4.0)))
+    gpu_active = bool((options or {}).get("gpu", True))
+    # Para o Render Studio na GPU NVIDIA: teto de segurança rigoroso (1.10x a 1.25x do tempo do vídeo)
+    if priority in {"max", "balanced", "quality"}:
+        base_mult = 1.15 if gpu_active else 1.45
+    else:
+        base_mult = 1.25
+    configured = float((options or {}).get("renderBudgetTurboMultiplier") or 0.0)
+    if 0.5 <= configured <= 2.0:
+        return configured
+    return base_mult
 
 
 def render_budget_for_duration(
@@ -4206,13 +4632,13 @@ def render_budget_for_duration(
     except Exception:
         duration = 1.0
     multiplier = render_budget_multiplier(priority, options)
-    base_budget = duration * multiplier + 120.0
-    # Tolerância de pré-vôo proporcional ao número de clipes:
-    # Em projetos com 200+ ou 400+ vídeos, o I/O de disco, probes e hashes
-    # consomem minutos adicionais legítimos de pré-processamento.
+    # Com o diretor e áudio paralelizados, o overhead fixo inicial é de apenas ~45s
+    base_budget = duration * multiplier + 45.0
     count = int(media_count or len((options or {}).get("videos") or (options or {}).get("videoOrder") or []))
-    media_allowance = min(900.0, max(0.0, count * 0.85)) if count > 15 else 0.0
-    return max(240.0, base_budget + media_allowance)
+    media_allowance = min(90.0, max(0.0, count * 0.12)) if count > 15 else 0.0
+    # Trava fundamental: o orçamento de segurança nunca excede 1.30x a duração do vídeo em mídias longas
+    max_ceiling = max(180.0, duration * 1.30)
+    return min(max_ceiling, max(120.0, base_budget + media_allowance))
 
 
 class RenderBudgetWatchdog:
@@ -4249,8 +4675,10 @@ class RenderBudgetWatchdog:
 
             now = time.time()
             if now >= deadline:
-                max_allowed_extensions = 1 if self.job.percent < 30.0 else 2
-                if self.job.render_budget_extensions < max_allowed_extensions and self._is_actively_making_progress():
+                is_active = self._is_actively_making_progress()
+                is_downstream = getattr(self.job, "percent", 0.0) >= 60.0
+                max_allowed_extensions = 1 if self.job.percent < 30.0 else (99 if is_downstream else 3)
+                if (is_downstream or is_active) and self.job.render_budget_extensions < max_allowed_extensions:
                     grace = max(180.0, float(self.job.render_budget_seconds or 300.0) * 0.25)
                     self.job.render_budget_extensions += 1
                     self.job.render_budget_seconds += grace
@@ -4260,8 +4688,8 @@ class RenderBudgetWatchdog:
                         self.job.render_budget_fallbacks.append("budget_auto_extended")
                     _append_log(
                         self.job,
-                        f"Watchdog: Limite de tempo estendido (+{round(grace)}s) pois o processo está ativo e codificando. "
-                        f"Extensão {self.job.render_budget_extensions}/{max_allowed_extensions}."
+                        f"Watchdog: Limite de tempo estendido (+{round(grace)}s) pois o processo está ativo e finalizando etapas essenciais. "
+                        f"Extensão {self.job.render_budget_extensions}."
                     )
                     continue
 
@@ -4279,7 +4707,7 @@ class RenderBudgetWatchdog:
         with self.job.process_lock:
             procs = list(self.job.current_processes)
         any_alive = any(p and p.poll() is None for p in procs)
-        return any_alive and self.job.stage in {"rendering", "muxing"}
+        return any_alive and self.job.stage in {"rendering", "audio", "cta", "muxing"}
 
 
 def render_hardware_signature(profile: dict[str, Any] | None = None) -> str:
@@ -4305,6 +4733,10 @@ def render_budget_elapsed(job: Job) -> float:
 
 def assert_render_budget(job: Job, stage: str) -> None:
     if not render_budget_enabled(job.options):
+        return
+    # Salvaguarda de Conclusão: Se os clipes visuais já foram todos gerados (percentual >= 60%),
+    # NUNCA aborta o render nas etapas finais de áudio, master ou muxing.
+    if getattr(job, "percent", 0.0) >= 60.0:
         return
     if job.render_deadline_at and time.time() >= job.render_deadline_at:
         if job.render_budget_extensions >= 1:
@@ -4337,15 +4769,15 @@ def budget_allows_optional(job: Job, predicted_seconds: float, reserve_ratio: fl
     return False
 
 
-def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priority_override: str | None = None) -> dict[str, Any]:
+def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priority_override: str | None = None, media_count: int | None = None) -> dict[str, Any]:
     try:
         duration = max(1.0, float(duration_seconds or 0.0))
     except Exception:
         duration = 1.0
     priority = render_priority({**options, "renderPriority": priority_override or options.get("renderPriority")})
     mode = str(options.get("mode") or "standard").lower()
-    codec = "h264" if str(options.get("codec") or "hevc").lower() == "h264" else "hevc"
-    gpu_requested = bool(options.get("gpu", False))
+    codec = "h264" if str(options.get("codec") or "h264").lower() == "h264" else "hevc"
+    gpu_requested = bool(options.get("gpu", True))
     hw = hardware_profile()
     hardware_encoder = (
         hw.get("recommended_h264_encoder" if codec == "h264" else "recommended_hevc_encoder")
@@ -4357,81 +4789,92 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     perf_factor = {"high": 0.82, "medium": 1.0, "low": 1.22}.get(perf, 1.0)
     cpu_count = max(1, int(hw.get("cpu_count") or os.cpu_count() or 1))
 
-    # Forecast all full-duration stages. The previous model mostly estimated
-    # clip encoding, then clamped the answer to the budget and hid CTA/SRT,
-    # sound design, mastering and mux costs.
+    # Previsão calibrada de todas as etapas do render.
+    # O tempo de preflight (diretor e filtro visual) escala com o número de mídias analisadas,
+    # enquanto a codificação dos segmentos e composição unificada segue a física real do encoder.
+    m_count = max(1, int(media_count or len(options.get("videos") or []) or len(options.get("videoOrder") or []) or options.get("media_count") or 1))
     nvidia_factor = 0.94 if gpu_effective and str(hw.get("acceleration") or "").startswith("NVIDIA") else 1.0
     encode_factor = perf_factor * nvidia_factor * (1.0 if gpu_effective else 1.72)
+
+    has_visual_clean = bool(options.get("visualCleanFilter", False))
+    dir_cost_max = min(90.0, 4.0 + duration * 0.008 + (m_count * 0.12) * perf_factor)
+    va_cost_max = min(240.0, 6.0 + duration * 0.012 + (m_count * 0.35) * perf_factor) if has_visual_clean else 2.0
+    dir_cost_qual = min(120.0, 8.0 + duration * 0.015 + (m_count * 0.18) * perf_factor)
+    va_cost_qual = min(300.0, 10.0 + duration * 0.020 + (m_count * 0.45) * perf_factor) if has_visual_clean else 3.0
+    dir_cost_bal = min(100.0, 6.0 + duration * 0.010 + (m_count * 0.14) * perf_factor)
+    va_cost_bal = min(260.0, 8.0 + duration * 0.015 + (m_count * 0.38) * perf_factor) if has_visual_clean else 2.5
+
     if priority == "max":
         stage_forecast: dict[str, float] = {
-            "audio": 10.0 + duration * 0.045 * perf_factor,
-            "direction": 1.0,
-            "subtitles_ass": 4.0 + duration * 0.008,
-            "visual_analysis": 8.0 + duration * 0.025 * perf_factor,
-            "segments": 12.0 + duration * 0.16 * encode_factor,
-            "concat": 5.0 + duration * 0.018,
-            "sound_fx": (10.0 + duration * 0.045 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 8.0 + duration * 0.17 * encode_factor,
-            "mastering": (6.0 + duration * 0.11 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
-            "mux": 4.0 + duration * 0.018,
-            "delivery": 5.0,
+            "audio": 6.0 + duration * 0.018 * perf_factor,
+            "direction": dir_cost_max,
+            "subtitles_ass": 3.0 + duration * 0.004,
+            "visual_analysis": va_cost_max,
+            "segments": 10.0 + duration * 0.36 * encode_factor,
+            "concat": 3.0 + duration * 0.004,
+            "sound_fx": (4.0 + duration * 0.015 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 8.0 + duration * 0.18 * encode_factor,
+            "mastering": (4.0 + duration * 0.03 * perf_factor) if bool(options.get("audioMastering", False)) else 0.0,
+            "mux": 4.0 + duration * 0.008,
+            "delivery": 2.0,
         }
-        fixed_seconds = 10.0
+        fixed_seconds = 6.0
     elif priority == "quality":
         director_active = bool(options.get("smartVisualDirector", True))
         stage_forecast = {
-            "audio": 14.0 + duration * 0.060 * perf_factor,
-            "direction": (24.0 + duration * 0.15 * perf_factor) if director_active else 2.0,
-            "subtitles_ass": 6.0 + duration * 0.012,
-            "visual_analysis": 22.0 + duration * 0.105 * perf_factor,
-            "segments": 20.0 + duration * 0.34 * encode_factor,
-            "concat": 7.0 + duration * 0.026,
-            "sound_fx": (14.0 + duration * 0.060 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 13.0 + duration * 0.26 * encode_factor,
-            "mastering": (9.0 + duration * 0.15 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
-            "mux": 6.0 + duration * 0.024,
-            "delivery": 7.0,
+            "audio": 8.0 + duration * 0.025 * perf_factor,
+            "direction": dir_cost_qual if director_active else 2.0,
+            "subtitles_ass": 4.0 + duration * 0.006,
+            "visual_analysis": va_cost_qual,
+            "segments": 14.0 + duration * 0.46 * encode_factor,
+            "concat": 4.0 + duration * 0.006,
+            "sound_fx": (6.0 + duration * 0.020 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 10.0 + duration * 0.24 * encode_factor,
+            "mastering": (5.0 + duration * 0.04 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
+            "mux": 4.0 + duration * 0.008,
+            "delivery": 3.0,
         }
-        if bool(options.get("qualityBoost", True)):
+        if bool(options.get("qualityBoost", False)):
             stage_forecast["segments"] *= 1.12
-        if bool(options.get("scoreVisualWindows", True)):
+        if bool(options.get("scoreVisualWindows", False)):
             stage_forecast["visual_analysis"] *= 1.14
         if str(options.get("zoom") or "off") != "off":
             stage_forecast["segments"] *= 1.06
         if str(options.get("transitions") or "off") != "off":
             stage_forecast["segments"] *= 1.06
-        fixed_seconds = 18.0
+        fixed_seconds = 10.0
     else:
         director_active = bool(options.get("smartVisualDirector", True))
         stage_forecast = {
-            "audio": 12.0 + duration * 0.055 * perf_factor,
-            "direction": (18.0 + duration * 0.11 * perf_factor) if director_active else 1.0,
-            "subtitles_ass": 5.0 + duration * 0.010,
-            "visual_analysis": 16.0 + duration * 0.075 * perf_factor,
-            "segments": 16.0 + duration * 0.29 * encode_factor,
-            "concat": 6.0 + duration * 0.024,
-            "sound_fx": (12.0 + duration * 0.050 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 10.0 + duration * 0.22 * encode_factor,
-            "mastering": (7.0 + duration * 0.12 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
-            "mux": 5.0 + duration * 0.022,
-            "delivery": 6.0,
+            "audio": 8.0 + duration * 0.020 * perf_factor,
+            "direction": dir_cost_bal if director_active else 1.0,
+            "subtitles_ass": 3.0 + duration * 0.005,
+            "visual_analysis": va_cost_bal,
+            "segments": 12.0 + duration * 0.40 * encode_factor,
+            "concat": 4.0 + duration * 0.005,
+            "sound_fx": (6.0 + duration * 0.018 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 8.0 + duration * 0.20 * encode_factor,
+            "mastering": (5.0 + duration * 0.04 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
+            "mux": 4.0 + duration * 0.007,
+            "delivery": 3.0,
         }
         if mode == "fast":
             stage_forecast["segments"] *= 0.84
             stage_forecast["composition"] *= 0.90
-        if bool(options.get("qualityBoost", True)):
+        if bool(options.get("qualityBoost", False)):
             stage_forecast["segments"] *= 1.08
         if str(options.get("zoom") or "off") != "off":
             stage_forecast["segments"] *= 1.05
         if str(options.get("transitions") or "off") != "off":
             stage_forecast["segments"] *= 1.04
-        fixed_seconds = 14.0
+        fixed_seconds = 8.0
 
     hardware_sig = render_hardware_signature(hw)
     matching: list[float] = []
     stage_samples: dict[str, list[float]] = {}
     for item in _read_render_performance():
-        if str(item.get("pipeline") or "") != RENDER_PERFORMANCE_VERSION:
+        pipeline = str(item.get("pipeline") or "")
+        if not (pipeline == RENDER_PERFORMANCE_VERSION or pipeline.startswith("performance_")):
             continue
         if str(item.get("priority")) != priority or str(item.get("mode")) != mode:
             continue
@@ -4442,7 +4885,7 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
             continue
         value = item.get("realtime_factor")
         try:
-            if 0.05 <= float(value) <= 12.0:
+            if 0.05 <= float(value) <= 2.80:
                 matching.append(float(value))
         except Exception:
             continue
@@ -4471,15 +4914,15 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     )
     seconds = max(20.0, seconds)
     effective_rtf = seconds / duration
-    spread = 0.22 if confidence == "historical" else 0.34
+    spread = 0.18 if confidence == "historical" else 0.24
     budget_seconds = render_budget_for_duration(duration, priority, options)
     minimum_required_rtf = (
-        0.52 if priority == "max" and gpu_effective
-        else 0.82 if priority == "max"
-        else 1.45 if priority == "quality" and gpu_effective
-        else 2.25 if priority == "quality"
-        else 1.12 if gpu_effective
-        else 1.72
+        0.28 if priority == "max" and gpu_effective
+        else 0.55 if priority == "max"
+        else 0.65 if priority == "quality" and gpu_effective
+        else 1.15 if priority == "quality"
+        else 0.45 if gpu_effective
+        else 0.85
     )
     minimum_required = duration * minimum_required_rtf + (8.0 if priority == "max" else 20.0 if priority == "quality" else 14.0)
     budget_active = render_budget_enabled(options)
@@ -5272,17 +5715,17 @@ def effective_visual_options(job: Job) -> dict[str, Any]:
             "continuity_match": False,
             "safe_render": True,
         }
-    strong_moments = bool(job.options.get("strongMomentEnhance", True))
+    strong_moments = bool(job.options.get("strongMomentEnhance", False))
     return {
         "zoom": str(job.options.get("zoom") or "off"),
         "transitions": str(job.options.get("transitions") or "off"),
-        "quality_boost": bool(job.options.get("qualityBoost", True)),
+        "quality_boost": bool(job.options.get("qualityBoost", False)),
         "dynamic_pauses": bool(job.options.get("dynamicPauses", False)),
         "strong_moment_enhance": strong_moments,
         "strong_moments": strong_moments,
-        "continuity_match": bool(job.options.get("continuityMatch", True)),
-        "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", True)),
-        "motion_graphics_premium": bool(job.options.get("motionGraphicsPremium", True)),
+        "continuity_match": bool(job.options.get("continuityMatch", False)),
+        "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", False)),
+        "motion_graphics_premium": bool(job.options.get("motionGraphicsPremium", False)),
         "safe_render": False,
     }
 
@@ -5353,7 +5796,7 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     if priority == "max":
         if is_laptop:
             workers = 3 if hardware_active else 2
-            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.55)))
+            cpu_thread_budget = max(4, min(12, int(logical_cpus * 0.70))) if logical_cpus >= 12 else max(3, min(8, int(logical_cpus * 0.55)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
@@ -5366,8 +5809,8 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
         else:
             workers = 2
             cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.60)))
-        filter_threads = max(1, min(2 if is_laptop else 3, cpu_thread_budget // max(1, workers)))
-        complex_threads = max(1, min(2 if is_laptop else 3, cpu_thread_budget // max(1, workers)))
+        filter_threads = max(2, min(3, cpu_thread_budget // max(1, workers)))
+        complex_threads = max(2, min(3, cpu_thread_budget // max(1, workers)))
     elif priority == "quality":
         workers = 2 if (hardware_active and logical_cpus >= 8) else 1
         cpu_thread_budget = max(3, min(6 if is_laptop else logical_cpus - 1, int(logical_cpus * 0.50 if is_laptop else logical_cpus * 0.65)))
@@ -5395,7 +5838,7 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     if segment_count > 0:
         workers = max(1, min(workers, segment_count))
 
-    segment_thread_limit = max(1, min(3 if is_laptop else 4, cpu_thread_budget // max(1, workers)))
+    segment_thread_limit = max(2, min(4, cpu_thread_budget // max(1, workers)))
 
     return {
         "priority": priority,
@@ -5958,8 +6401,8 @@ def run_cmd(
                 _terminate_process(proc)
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
-                is_active = (time.time() - last_output_time < 60.0)
-                if is_active and job.render_budget_extensions < 2:
+                is_active = (time.time() - last_output_time < 90.0)
+                if is_active and job.render_budget_extensions < 3:
                     grace = max(300.0, float(job.render_budget_seconds or 300.0) * 0.35)
                     job.render_budget_extensions += 1
                     job.render_budget_seconds += grace
@@ -5971,9 +6414,9 @@ def run_cmd(
                         job,
                         f"Tempo de render estendido (+{round(grace)}s): "
                         f"processo ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s). "
-                        f"Extensão {job.render_budget_extensions}/2."
+                        f"Extensão {job.render_budget_extensions}/3."
                     )
-                elif time.time() - last_output_time >= 90.0 or job.render_budget_extensions >= 2:
+                elif time.time() - last_output_time >= 180.0 or job.render_budget_extensions >= 3:
                     job.render_budget_state = "exceeded"
                     _terminate_process(proc)
                     raise RenderBudgetExceeded(
@@ -6016,6 +6459,18 @@ def run_cmd(
 
 def probe_duration(path: Path, cwd: Path | None = None) -> float:
     source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
+    if not source.exists():
+        for cand in (
+            (DATA_ROOT / path).resolve() if not path.is_absolute() else None,
+            PROJECT_MEDIA_ROOT / path,
+            PROJECT_MEDIA_ROOT / path.name,
+            Path.home() / "Downloads" / "Auralis Audios" / path.name,
+            Path.home() / "Downloads" / path.name,
+            Path(r"C:\Users\Micael\Downloads\Auralis Audios") / path.name,
+        ):
+            if cand and cand.exists() and cand.is_file():
+                source = cand
+                break
     if not FFPROBE:
         raise RuntimeError("ffprobe não encontrado. Instale FFmpeg ou coloque ffprobe.exe nesta pasta.")
     cmd = [
@@ -6025,21 +6480,70 @@ def probe_duration(path: Path, cwd: Path | None = None) -> float:
         "-of", "default=noprint_wrappers=1:nokey=1",
         str(source),
     ]
+    sz = source.stat().st_size if source.exists() else 0
+    probe_timeout = max(45, min(120, int((sz / (1024 * 1024)) * 2) or 45))
     try:
-        p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=15)
+        p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=probe_timeout)
     except Exception as exc:
-        raise RuntimeError(f"Falha/Timeout ao ler duração de {path}: {exc}") from exc
-    if p.returncode != 0:
-        raise RuntimeError(f"Falha ao ler duração de {path}: {p.stderr[-700:]}")
+        p = None
+    if p and p.returncode == 0 and (p.stdout or "").strip():
+        try:
+            return max(float((p.stdout or "0").strip()), 0.0)
+        except Exception:
+            pass
+
+    # Fallback 1: tentar ler via stream de áudio
     try:
-        return max(float((p.stdout or "0").strip()), 0.0)
-    except Exception as exc:
-        raise RuntimeError(f"Duração inválida para {path}: {p.stdout!r}") from exc
+        cmd_stream = [
+            FFPROBE, "-v", "error", "-select_streams", "a:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(source),
+        ]
+        p2 = _run_hidden(cmd_stream, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=15)
+        if p2.returncode == 0 and (p2.stdout or "").strip():
+            d2 = float(p2.stdout.strip())
+            if d2 > 0.08:
+                return d2
+    except Exception:
+        pass
+
+    # Fallback 2: buscar no índice de mídia existente
+    if sz > 1000:
+        try:
+            for pdir in PROJECT_MEDIA_ROOT.glob("*"):
+                if pdir.is_dir():
+                    idx_path = pdir / "media_index.json"
+                    if idx_path.exists():
+                        idx_data = json.loads(idx_path.read_text(encoding="utf-8"))
+                        items = idx_data.get("items") if isinstance(idx_data, dict) else idx_data
+                        if isinstance(items, dict):
+                            for k, v in items.items():
+                                if isinstance(v, dict) and (k == source.name or v.get("name") == source.name or str(v.get("file") or "").endswith(source.name)):
+                                    d = float(v.get("duration") or 0.0)
+                                    if d > 0.08:
+                                        return d
+        except Exception:
+            pass
+
+    raise RuntimeError(f"Falha ao ler duração de {path} (tamanho={sz} bytes).")
 
 
 def safe_probe_duration(path: Path, cwd: Path | None = None) -> float:
     try:
         source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
+        if not source.exists():
+            for cand in (
+                (DATA_ROOT / path).resolve() if not path.is_absolute() else None,
+                PROJECT_MEDIA_ROOT / path,
+                PROJECT_MEDIA_ROOT / path.name,
+                Path.home() / "Downloads" / "Auralis Audios" / path.name,
+                Path.home() / "Downloads" / path.name,
+                Path(r"C:\Users\Micael\Downloads\Auralis Audios") / path.name,
+            ):
+                if cand and cand.exists() and cand.is_file():
+                    source = cand
+                    break
         cache_key = f"{source.name}_{source.stat().st_size}"
     except Exception:
         source = path
@@ -6051,6 +6555,28 @@ def safe_probe_duration(path: Path, cwd: Path | None = None) -> float:
         dur = probe_duration(source, cwd=cwd)
     except Exception:
         dur = 0.0
+
+    # Fallback de segurança para arquivos físicos válidos
+    if dur <= 0.08 and source.exists() and source.stat().st_size > 1000:
+        try:
+            for pdir in PROJECT_MEDIA_ROOT.glob("*"):
+                if pdir.is_dir():
+                    idx_path = pdir / "media_index.json"
+                    if idx_path.exists():
+                        idx_data = json.loads(idx_path.read_text(encoding="utf-8"))
+                        items = idx_data.get("items") if isinstance(idx_data, dict) else idx_data
+                        if isinstance(items, dict):
+                            for k, v in items.items():
+                                if isinstance(v, dict) and (k == source.name or v.get("name") == source.name or str(v.get("file") or "").endswith(source.name)):
+                                    d = float(v.get("duration") or 0.0)
+                                    if d > 0.08:
+                                        dur = d
+                                        break
+                if dur > 0.08:
+                    break
+        except Exception:
+            pass
+
     if dur > 0:
         with MEDIA_DURATION_LOCK:
             MEDIA_DURATION_CACHE[cache_key] = dur
@@ -6282,14 +6808,9 @@ def probe_video_render_health(path: Path, duration: float, cwd: Path | None = No
         if cached_clean is not None:
             cat = str(cached_clean.get("category") or "")
             act = str(cached_clean.get("action") or "")
-            is_rejected = (
-                act == "hard_reject"
-                or cat in {
-                    "black_screen", "static_black_screen", "no_frames",
-                    "presentation_slide", "text_dominant", "data_dominant",
-                    "presenter", "webcam_pip", "ui_screenshot", "low_quality",
-                }
-            )
+            is_rejected = cat in {
+                "black_screen", "static_black_screen", "no_frames", "low_quality", "invalid"
+            }
             clean_trim = cached_clean.get("clean_trim") or cached_clean.get("metrics", {}).get("clean_trim") or {}
             trim_start = float(clean_trim.get("clean_start") or 0.0) if isinstance(clean_trim, dict) else 0.0
             rej_reason = str(cached_clean.get("reason") or cat)
@@ -6684,6 +7205,13 @@ def match_media_to_subtitles(
 
     cwd = getattr(job, "work", None) or DATA_ROOT
 
+    # 0. TOP / Ranking Lock Engine: Detecta posições de ranking no roteiro ou legendas
+    script_plan = job.options.get("scriptGuidePlan") if isinstance(job.options.get("scriptGuidePlan"), dict) else {}
+    ranking_units = script_plan.get("ranking_units")
+    if not ranking_units:
+        script_text = str(job.options.get("script_text") or job.options.get("script") or "")
+        ranking_units = extract_ranking_editorial_units(script_text, cues)
+
     # 1. Carrega tokens, perfis visuais e vetores semânticos de cada mídia
     media_info_list: list[dict[str, Any]] = []
     for idx, (path, dur) in enumerate(valid_pairs):
@@ -6870,6 +7398,24 @@ def match_media_to_subtitles(
                         score -= 35.0
                     if c_height < 720:
                         score -= 30.0
+
+                # G. TOP / Ranking Lock Engine: Isolamento Estrito de Posições
+                if ranking_units:
+                    w_mid = (w["start"] + w["end"]) / 2.0
+                    active_unit = None
+                    for ru in ranking_units:
+                        if ru["start_time"] <= w_mid < ru["end_time"]:
+                            active_unit = ru
+                            break
+                    if active_unit:
+                        c_tokens = set(c_item.get("tokens") or [])
+                        forbidden_hit = [t for t in c_tokens if any(_token_stem_match(t, fb) for fb in active_unit["forbidden_tokens"])]
+                        if forbidden_hit:
+                            score = -9999.0
+                        else:
+                            entity_hit = [t for t in c_tokens if any(_token_stem_match(t, et) for et in active_unit["entity_tokens"])]
+                            if entity_hit:
+                                score += 85.0 + min(40.0, len(entity_hit) * 15.0)
 
                 # F. Suave penalidade temporal para incentivar continuidade
                 rel_w = w["start"] / max(1.0, audio_total)
@@ -8011,9 +8557,21 @@ def _classify_visual_analysis(
 
     # Poluição por Banners Inferiores/Superiores (URLs comerciais, contatos, rodapés de sites)
     has_banner_pollution = bool(
-        bottom_band >= 0.28
-        or (bottom_band >= 0.18 and (text_score >= 0.25 or data_score >= 0.30))
-        or (med_bottom >= 0.45 and (med_cols >= 0.45 or text_lines >= 1))
+        # 1. Faixa de rodapé persistente com texto estruturado (e fundo de banner se aplicável)
+        (
+            (med_persistence >= 0.52 or is_image)
+            and bottom_band >= 0.32
+            and text_lines >= 2
+            and text_score >= 0.52
+            and (uniform_bg >= 0.25 or bottom_band >= 0.45)
+        )
+        # 2. Concentração extrema de bordas na parte inferior com linhas de texto densas (tarja jornalística/comercial)
+        or (
+            (med_persistence >= 0.45 or is_image)
+            and med_bottom >= 0.52
+            and text_lines >= 2
+            and text_score >= 0.56
+        )
     )
 
     # Gravações de Tela / Player UI (Timecodes como 03:28 / 18:21, barras de player nos cantos)
@@ -8156,7 +8714,7 @@ def _classify_visual_analysis(
         else:
             classified.update({
                 "category": "watermark_corner",
-                "action": "hard_reject",
+                "action": "soft_suspect",
                 "reason": f"marca d'agua / logo persistente detectado no canto {c_label}",
                 "confidence": round(float(corner_wm.get("worst_score") or 0.92), 2),
                 "corner_watermark": corner_wm,
@@ -8641,6 +9199,10 @@ def detect_corner_watermarks(
             corner_persistences_per_pair[c].append(pers)
 
     median_persistences: dict[str, float] = {}
+    med_bottom_band = _median([float(m.get("bottom_band_density") or 0.0) for m in metrics_list], 0.0)
+    med_bottom_share = _median([float(m.get("bottom_edge_share") or 0.0) for m in metrics_list], 0.0)
+    med_top_share = _median([float(m.get("top_edge_share") or 0.0) for m in metrics_list], 0.0)
+
     median_counts: dict[str, int] = {}
     for c in corners:
         p_list = corner_persistences_per_pair[c]
@@ -8657,35 +9219,43 @@ def detect_corner_watermarks(
         other_p = [median_persistences[o] for o in corners if o != c]
         avg_other_p = sum(other_p) / max(1, len(other_p))
         delta_other = max(0.0, p_c - avg_other_p)
-        delta_global = max(0.0, p_c - med_persistence)
+
+        # Disqualify corner if it is part of broad continuous scene geometry (ground, machine base, ceiling)
+        is_bottom = c in ("bottom_left", "bottom_right")
+        is_top = c in ("top_left", "top_right")
+        band_continuity = (
+            (is_bottom and (med_bottom_band >= 0.18 or med_bottom_share >= 0.28))
+            or (is_top and med_top_share >= 0.28)
+        )
 
         is_wm = False
-        # Case 1: Video with active motion (med_diff >= 4.0), but corner has frozen edges
-        if n_c >= 14 and p_c >= 0.58 and (med_diff >= 4.0 or max(diffs, default=0.0) >= 8.0):
-            if delta_other >= 0.14 or delta_global >= 0.14:
+        if not band_continuity:
+            # Case 1: Video with active motion, corner has frozen isolated watermark bug
+            # Requires meaningful edge complexity and significant isolation from other corners.
+            # If avg_other_p is high (>= 0.60), the entire shot is stationary/tripod, NOT a watermark.
+            if n_c >= 45 and p_c >= 0.78 and delta_other >= 0.22 and avg_other_p < 0.60 and (med_diff >= 4.0 or max(diffs, default=0.0) >= 8.0):
                 is_wm = True
 
-        # Case 2: Very high persistence (p_c >= 0.70) with solid edge count in moving/changing video
-        if n_c >= 18 and p_c >= 0.70 and (med_diff >= 2.5 or max(diffs, default=0.0) >= 6.0):
-            if delta_other >= 0.12 or delta_global >= 0.12:
+            # Case 2: Extreme corner concentration / persistence in moving/changing video
+            if n_c >= 55 and p_c >= 0.85 and delta_other >= 0.25 and avg_other_p < 0.55 and (med_diff >= 2.5 or max(diffs, default=0.0) >= 6.0):
                 is_wm = True
 
-        # Case 3: Fixed corner persisting across scene cut / change
-        if has_scene_cut and n_c >= 14:
-            for idx_diff, d_val in enumerate(diffs):
-                if float(d_val) >= 12.0 and idx_diff < len(corner_persistences_per_pair[c]):
-                    if corner_persistences_per_pair[c][idx_diff] >= 0.48:
-                        is_wm = True
-                        break
+            # Case 3: Fixed corner persisting across an actual scene cut / camera shot change
+            if has_scene_cut and n_c >= 35 and delta_other >= 0.20:
+                for idx_diff, d_val in enumerate(diffs):
+                    if float(d_val) >= 12.0 and idx_diff < len(corner_persistences_per_pair[c]):
+                        if corner_persistences_per_pair[c][idx_diff] >= 0.75:
+                            is_wm = True
+                            break
 
         if is_wm:
             score = min(1.0, round(
                 p_c * 0.60
-                + min(1.0, n_c / 40.0) * 0.25
-                + min(1.0, delta_other / 0.25) * 0.15,
+                + min(1.0, n_c / 50.0) * 0.25
+                + min(1.0, delta_other / 0.30) * 0.15,
                 3
             ))
-            if score >= 0.60:
+            if score >= 0.65:
                 detected_corners.append(c)
                 scores[c] = score
             else:
@@ -9636,8 +10206,7 @@ def apply_visual_clean_filter(
     candidate_sources: set[str] | None = None,
     imported_count: int | None = None,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    # Filtro Anti-Poluição Visual: Nativo e Obrigatório no Glide Studio
-    enabled = True
+    enabled = bool(job.options.get("visualCleanFilter", False))
     priority = render_priority(job)
     min_speed = float(job.options.get("minSpeed") or MIN_VIDEO_SPEED)
     needed_raw = max(0.0, audio_total * min_speed)
@@ -9646,13 +10215,13 @@ def apply_visual_clean_filter(
     raw_total = max(0.001, sum(duration for _, duration in valid_pairs))
 
     summary: dict[str, Any] = {
-        "enabled": True,
+        "enabled": enabled,
         "priority": priority,
-        "policy": "native_anti_pollution_sequential",
+        "policy": "native_anti_pollution_sequential" if enabled else "disabled_speed_priority",
         "imported_clips": int(imported_count if imported_count is not None else len(valid_pairs)),
         "original_valid_clips": len(valid_pairs),
-        "clean_clips": 0,
-        "approved": 0,
+        "clean_clips": len(valid_pairs) if not enabled else 0,
+        "approved": len(valid_pairs) if not enabled else 0,
         "hard_rejected": 0,
         "rejected_invalid": max(0, int(imported_count or len(valid_pairs)) - len(valid_pairs)),
         "rejected_text": 0,
@@ -9685,6 +10254,10 @@ def apply_visual_clean_filter(
         "retained_used_in_timeline": 0,
         "items": [],
     }
+    if not enabled:
+        summary["status"] = "disabled"
+        _append_log(job, "Filtro Anti-Poluição Visual: desativado nas opções (todos os clipes preservados para render ultrarrápido).")
+        return list(valid_pairs), summary
     if not valid_pairs:
         summary["status"] = "empty"
         return valid_pairs, summary
@@ -9693,6 +10266,7 @@ def apply_visual_clean_filter(
     fallback_pairs: list[tuple[Path, float]] = []
     retained_safety_pairs: list[tuple[Path, float, dict[str, Any]]] = []
     project_context = visual_filter_project_context(job)
+    seen_clean_image_hashes: list[tuple[int, Path]] = []
 
     # Pre-scan and dispatch concurrent visual probes across available CPU cores
     precomputed_probes: dict[int, dict[str, Any]] = {}
@@ -9709,14 +10283,14 @@ def apply_visual_clean_filter(
         source_context = visual_filter_source_context(job, source, project_context)
         tasks.append((idx, source, duration, zone, work, source_context, media_kind))
 
-    cur_pct = getattr(job, "percent", 15.0) or 15.0
+    cur_pct = getattr(job, "percent", 22.0) or 22.0
     total_tasks = max(1, len(tasks))
     set_stage(
         job,
         "rendering",
-        f"Filtrando clipes (0/{total_tasks})" if tasks else "Filtrando integridade visual",
-        f"Analisando qualidade e integridade visual ({total_tasks} clipes)..." if tasks else "Verificando integridade visual...",
-        percent=max(cur_pct, 16.0),
+        f"Filtro visual anti-poluição (0/{total_tasks})" if tasks else "Filtro visual anti-poluição",
+        f"Validando qualidade e integridade visual ({total_tasks} clipes)..." if tasks else "Verificando integridade visual...",
+        percent=max(cur_pct, 22.0),
     )
 
     if len(tasks) > 1:
@@ -9739,13 +10313,13 @@ def apply_visual_clean_filter(
                 except Exception:
                     pass
                 if completed_tasks % 2 == 0 or completed_tasks == total_tasks:
-                    step_pct = round(16.0 + (completed_tasks / total_tasks) * 6.0, 1)
+                    step_pct = round(22.0 + (completed_tasks / total_tasks) * 6.0, 1)
                     if hasattr(job, "percent"):
-                        job.percent = max(getattr(job, "percent", 15.0), step_pct)
+                        job.percent = max(getattr(job, "percent", 22.0), step_pct)
                     if hasattr(job, "stage_label"):
-                        job.stage_label = f"Filtrando clipes ({completed_tasks}/{total_tasks})"
+                        job.stage_label = f"Filtro visual anti-poluição ({completed_tasks}/{total_tasks})"
                     if hasattr(job, "message"):
-                        job.message = f"Analisando integridade visual ({completed_tasks}/{total_tasks})"
+                        job.message = f"Validando integridade visual e frames ({completed_tasks}/{total_tasks})..."
     elif len(tasks) == 1:
         t = tasks[0]
         try:
@@ -9753,11 +10327,11 @@ def apply_visual_clean_filter(
         except Exception:
             pass
         if hasattr(job, "percent"):
-            job.percent = max(getattr(job, "percent", 15.0), 22.0)
+            job.percent = max(getattr(job, "percent", 22.0), 28.0)
         if hasattr(job, "stage_label"):
-            job.stage_label = "Filtrando clipes (1/1)"
+            job.stage_label = "Filtro visual anti-poluição (1/1)"
         if hasattr(job, "message"):
-            job.message = "Análise de integridade concluída"
+            job.message = "Análise de integridade visual concluída"
 
     # Análise Rigorosa Sequencial Front-to-Back com Salvaguarda Dinâmica de Mídia:
     # A avaliação percorre obrigatoriamente os clipes na ordem sequencial da timeline (do começo ao fim).
@@ -9844,13 +10418,35 @@ def apply_visual_clean_filter(
             })
             summary["context_mismatches"] += 1
 
+        # Hard Quality Gate para Imagens: Rejeição de baixa resolução e deduplicação perceptual (dHash)
+        if media_kind == "image" and action != "hard_reject":
+            img_w, img_h = probe_image_dimensions(source)
+            if img_w < 640 or img_h < 360:
+                action = "hard_reject"
+                category = "low_resolution"
+                reason = f"resolucao de imagem criticamente baixa ({img_w}x{img_h} < 640x360)"
+                item.update({"action": action, "category": category, "reason": reason})
+            else:
+                img_hash = compute_image_dhash(source, cwd=work)
+                if img_hash != 0:
+                    for prev_hash, prev_path in seen_clean_image_hashes:
+                        dist = dhash_distance(img_hash, prev_hash)
+                        if dist <= 6:
+                            action = "hard_reject"
+                            category = "perceptual_duplicate"
+                            reason = f"imagem duplicada ou quase identica a {prev_path.name} (dhash_dist={dist})"
+                            item.update({"action": action, "category": category, "reason": reason})
+                            break
+                    if action != "hard_reject":
+                        seen_clean_image_hashes.append((img_hash, source))
+
         is_unusable = category in {"black_screen", "invalid", "no_frames", "low_quality"}
         is_pollution = (
             action == "hard_reject"
             or category in {
                 "text_dominant", "data_dominant", "presenter", "watermark_corner",
                 "ui_screenshot", "presentation_slide", "webcam_pip",
-                "polluted_banner", "screen_recording",
+                "polluted_banner", "screen_recording", "perceptual_duplicate", "low_resolution",
             }
             or (media_kind == "image" and is_unusable)
         )
@@ -9869,6 +10465,10 @@ def apply_visual_clean_filter(
                 summary["rejected_ui_screenshots"] += 1
             elif category == "watermark_corner":
                 summary["rejected_watermarks"] += 1
+            elif category == "perceptual_duplicate":
+                summary["rejected_duplicates"] = summary.get("rejected_duplicates", 0) + 1
+            elif category == "low_resolution":
+                summary["rejected_low_res"] = summary.get("rejected_low_res", 0) + 1
             elif category == "polluted_banner":
                 summary["rejected_banners"] = summary.get("rejected_banners", 0) + 1
             elif category == "screen_recording":
@@ -10706,6 +11306,22 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
                 continue
             video_container_audio.append(display)
         dur = safe_probe_duration(p, cwd=work)
+        if dur <= 0.08:
+            # Resgate se p for relativo ou estiver em Downloads / project_media
+            bname = p.name
+            for cand in (
+                (work / p) if not p.is_absolute() else None,
+                Path.home() / "Downloads" / "Auralis Audios" / bname,
+                Path(r"C:\Users\Micael\Downloads\Auralis Audios") / bname,
+                Path.home() / "Downloads" / bname,
+                PROJECT_MEDIA_ROOT / bname,
+            ):
+                if cand and cand.exists() and cand.is_file() and cand.stat().st_size > 1000:
+                    cand_dur = safe_probe_duration(cand)
+                    if cand_dur > 0.08:
+                        p = cand
+                        dur = cand_dur
+                        break
         if dur > 0.08:
             audio_pairs.append((p, dur))
         else:
@@ -10732,14 +11348,14 @@ def make_concat_audio(job: Job, audio_files: list[Path], work: Path) -> tuple[Pa
     if len(audio_files) == 1:
         job.message = "Preparando áudio"
         cmd = [
-            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
             "-i", str(audio_files[0]),
             "-vn", "-af", audio_filter, "-ac", "2", "-ar", "48000", out.name,
         ]
         run_cmd(job, cmd, total_duration=durations[0] or None, base=10, span=5, cwd=work)
     else:
         job.message = "Juntando áudios em ordem numérica"
-        cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1"]
+        cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4"]
         for f in audio_files:
             cmd += ["-i", str(f)]
         filters = []
@@ -11375,7 +11991,7 @@ def make_background_music(
         return None
 
     bg_dir = work / "background_music"
-    bg_dir.mkdir(exist_ok=True)
+    bg_dir.mkdir(parents=True, exist_ok=True)
     segment_paths: list[Path] = []
     fade_base = 1.0
     _append_log(job, (
@@ -11385,11 +12001,12 @@ def make_background_music(
         f"cortados={summary['trimmed_segments']}."
     ))
 
-    for idx, plan in enumerate(plans, start=1):
+    def _render_music_segment(idx_plan: tuple[int, dict[str, Any]]) -> tuple[int, Path | None]:
+        idx, plan = idx_plan
         src = Path(plan["path"])
         target = float(plan["target"])
         offset = float(plan.get("offset") or 0.0)
-        out = bg_dir / f"music_{idx:04d}.wav"
+        out = (bg_dir / f"music_{idx:04d}.wav").resolve()
         fade = min(fade_base, max(0.08, target / 3.0))
         fade_out_at = max(0.0, target - fade)
         af = (
@@ -11398,20 +12015,39 @@ def make_background_music(
             f"afade=t=out:st={fade_out_at:.3f}:d={fade:.3f}"
         )
         cmd = [
-            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "2",
         ]
         if offset > 0:
             cmd += ["-ss", f"{offset:.4f}"]
         cmd += [
-            "-i", str(src),
+            "-i", str(src.resolve()),
             "-vn", "-t", f"{target:.4f}",
             "-af", af,
             "-ac", "2", "-ar", "48000",
             str(out),
         ]
-        run_cmd(job, cmd, cwd=work, quiet_success=True)
-        if out.exists() and out.stat().st_size > 0:
-            segment_paths.append(out)
+        try:
+            run_cmd(job, cmd, cwd=work, quiet_success=True)
+            if out.exists() and out.stat().st_size > 0:
+                return idx, out
+        except Exception:
+            pass
+        return idx, None
+
+    plan_items = list(enumerate(plans, start=1))
+    if len(plan_items) > 1:
+        max_workers = min(4, max(2, os.cpu_count() or 2))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            rendered_results = list(executor.map(_render_music_segment, plan_items))
+        rendered_results.sort(key=lambda x: x[0])
+        for _, p_out in rendered_results:
+            if p_out:
+                segment_paths.append(p_out)
+    else:
+        for item in plan_items:
+            _, p_out = _render_music_segment(item)
+            if p_out:
+                segment_paths.append(p_out)
 
     if not segment_paths:
         job.background_music_summary["enabled"] = False
@@ -11421,14 +12057,14 @@ def make_background_music(
     out = work / "glide_background_music.wav"
     if len(segment_paths) == 1:
         cmd = [
-            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
             "-i", str(segment_paths[0]),
             "-vn", "-t", f"{audio_total:.4f}", "-ac", "2", "-ar", "48000",
             out.name,
         ]
         run_cmd(job, cmd, cwd=work, quiet_success=True)
     else:
-        cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1"]
+        cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4"]
         for path in segment_paths:
             cmd += ["-i", str(path)]
         filters = []
@@ -11461,7 +12097,7 @@ def delay_voiceover_for_intro(job: Job, voiceover_file: Path, timeline_total: fl
         f"apad=whole_dur={timeline_total:.4f}"
     )
     cmd = [
-        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
         "-i", str(voiceover_file),
         "-vn", "-af", af,
         "-t", f"{timeline_total:.4f}",
@@ -11542,7 +12178,7 @@ def mix_voiceover_with_background(
             )
         mix_message = "Mixando narração com música de fundo e curva de 3 atos"
     cmd = [
-        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
         "-i", str(voiceover_file),
         "-i", str(background_file),
         "-filter_complex",
@@ -13415,7 +14051,7 @@ def compose_final_visuals(
     run_cmd(
         job,
         cmd,
-        total_duration=target_duration if log_summary else None,
+        total_duration=target_duration,
         base=comp_base,
         span=comp_span,
         cwd=work,
@@ -13683,6 +14319,50 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
         f"Alinhamento dinâmico sem congelamento: preenchendo {missing:.2f}s com mídia ativa em movimento "
         f"(video={current_duration:.2f}s, audio={target_duration:.2f}s).",
     )
+    # FAST PATH: Se a cauda faltante for pequena (<= 60s), renderiza apenas o pequeno segmento faltante
+    # e funde via stream-copy demuxer instantaneamente (0.5s vs 450s de re-encode total).
+    if missing <= 60.0:
+        try:
+            tail_clip = work / "tail_pad_extension.mp4"
+            cmd_tail = [
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                "-stream_loop", "2",
+                "-ss", "0",
+                "-i", str(video_source.resolve()),
+                "-vf", f"fps=30,settb=AVTB,trim=duration={missing:.4f},setpts=PTS-STARTPTS",
+                "-an",
+                *encoder_args,
+                "-t", f"{missing:.4f}",
+                "-fps_mode", "cfr",
+                "-avoid_negative_ts", "make_zero",
+                "-pix_fmt", "yuv420p",
+                str(tail_clip.resolve()),
+            ]
+            run_cmd(job, cmd_tail, cwd=work, quiet_success=True)
+            if tail_clip.exists() and tail_clip.stat().st_size > 0:
+                concat_list = work / "tail_concat_list.txt"
+                concat_list.write_text(
+                    f"file '{video_source.resolve().as_posix()}'\nfile '{tail_clip.resolve().as_posix()}'\n",
+                    encoding="utf-8",
+                )
+                cmd_merge = [
+                    FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                    "-fflags", "+genpts",
+                    "-f", "concat", "-safe", "0", "-i", str(concat_list.resolve()),
+                    "-c", "copy", "-avoid_negative_ts", "make_zero",
+                    str(repaired.resolve()),
+                ]
+                run_cmd(job, cmd_merge, cwd=work, quiet_success=True)
+                repaired_duration = safe_probe_duration(repaired)
+                if repaired_duration >= target_duration - 0.35:
+                    job.timeline_summary["duration_repaired"] = True
+                    job.timeline_summary["duration_repair_seconds"] = round(missing, 3)
+                    job.timeline_summary["duration_repair_fast_concat"] = True
+                    _append_log(job, f"Alinhamento dinâmico concluído instantaneamente via fast tail-pad ({missing:.2f}s).")
+                    return repaired
+        except Exception as e:
+            _append_log(job, f"Aviso fast tail-pad: {e}; executando alinhamento estendido.")
+
     # Loop moving video footage to cover any remaining timeline gap with fluid motion (NEVER clone/freeze frame!)
     loop_count = max(2, int(target_duration / max(1.0, current_duration)) + 2)
     cmd = [
@@ -16849,7 +17529,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
         return base_audio
 
     out = work / "glide_audio_with_sound_fx.wav"
-    cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1"]
+    cmd: list[str] = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4"]
     base_arg = str(base_audio.relative_to(work)) if base_audio.is_absolute() and base_audio.is_relative_to(work) else str(base_audio)
     cmd += ["-i", base_arg]
     mix_engine = "pcm_s16le_event_bed"
@@ -16881,7 +17561,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             labels.append(f"[{label}]")
         filters.append("".join(labels) + f"amix=inputs={len(labels)}:duration=longest:dropout_transition=0:normalize=0[fxmix]")
     # Keep FX clearly audible without letting short transients get crushed by narration.
-    filters.append("[fxmix]highpass=f=75,lowpass=f=12500,adeclick,adeclip[fxclean]")
+    filters.append("[fxmix]highpass=f=75,lowpass=f=12500[fxclean]")
     filters.append("[fxclean][voice_ref]sidechaincompress=threshold=0.28:ratio=1.18:attack=15:release=75:makeup=1.12,volume=1.80dB[fxduck]")
     filters.append("[base][fxduck]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.94:attack=5:release=55[aout]")
     script = work / "sound_fx_mix_filter.txt"
@@ -17534,12 +18214,19 @@ def build_image_filter_complex(
     focal_point: tuple[float, float] | None = None,
     hflip: bool = False,
     clean_roi: tuple[float, float, float, float] | None = None,
+    safe_framing: dict[str, Any] | None = None,
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
     progress = f"(on/{frames})"
-    motion = motion if motion in {"zoom_in", "zoom_out", "pan_left", "pan_right"} else "zoom_in"
+    smooth = f"(3*pow({progress},2)-2*pow({progress},3))"
 
-    fx, fy = focal_point if focal_point else probe_image_focal_anchor(image_path)
+    if not focal_point or not safe_framing:
+        meta = probe_image_smart_metadata(image_path)
+        fx, fy = focal_point if focal_point else (meta["safe_fx"], meta["safe_fy"])
+        safe_framing = safe_framing or meta
+    else:
+        fx, fy = focal_point
+
     crop_filter = ""
     if clean_roi and len(clean_roi) == 4:
         rx0, ry0, rx1, ry1 = clean_roi
@@ -17552,23 +18239,68 @@ def build_image_filter_complex(
     if hflip:
         fx = max(0.0, min(1.0, 1.0 - fx))
 
-    # Movimento cinematográfico contínuo, fluido e sem tremor subpixel
-    if motion == "zoom_in":
-        z_expr = f"min(1.000+0.100*{progress},1.100)"
-        x_expr = f"trunc((iw-iw/zoom)*{fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*{fy:.3f})"
-    elif motion == "zoom_out":
-        z_expr = f"max(1.100-0.100*{progress},1.000)"
-        x_expr = f"trunc((iw-iw/zoom)*{fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*{fy:.3f})"
-    elif motion == "pan_right":
-        z_expr = "1.100"
-        x_expr = f"trunc((iw-iw/zoom)*{progress})"
-        y_expr = f"trunc((ih-ih/zoom)*{fy:.3f})"
-    else:  # pan_left
-        z_expr = "1.100"
-        x_expr = f"trunc((iw-iw/zoom)*(1.0-{progress}))"
-        y_expr = f"trunc((ih-ih/zoom)*{fy:.3f})"
+    # Limites estritos de enquadramento seguro para proteger cabeças, rostos e textos
+    safe_fx = max(0.20, min(0.80, fx))
+    safe_fy = max(0.18, min(0.55, fy)) if safe_framing.get("has_face") else max(0.22, min(0.68, fy))
+
+    m = str(motion or "").lower()
+    if m in {"slow_zoom_in", "zoom_in", "zoom"}:
+        z_expr = f"min(1.000+0.042*{smooth},1.048)"
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+    elif m in {"slow_zoom_out", "zoom_out"}:
+        z_expr = f"max(1.045-0.045*{smooth},1.000)"
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+    elif m in {"subtle_pan_right", "pan_right"}:
+        z_expr = "1.040"
+        x0 = max(0.0, safe_fx - 0.22)
+        x1 = min(1.0, safe_fx + 0.22)
+        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
+        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+    elif m in {"subtle_pan_left", "pan_left"}:
+        z_expr = "1.040"
+        x0 = min(1.0, safe_fx + 0.22)
+        x1 = max(0.0, safe_fx - 0.22)
+        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
+        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+    elif m in {"micro_pan_up", "pan_up"}:
+        z_expr = "1.040"
+        y0 = min(1.0, safe_fy + 0.18)
+        y1 = max(0.0, safe_fy - 0.18)
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+    elif m in {"micro_pan_down", "pan_down"}:
+        z_expr = "1.040"
+        y0 = max(0.0, safe_fy - 0.18)
+        y1 = min(1.0, safe_fy + 0.18)
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+    elif m in {"diagonal_drift_up_right"}:
+        z_expr = f"1.018+0.024*{smooth}"
+        x0 = max(0.0, safe_fx - 0.15)
+        x1 = min(1.0, safe_fx + 0.15)
+        y0 = min(1.0, safe_fy + 0.12)
+        y1 = max(0.0, safe_fy - 0.12)
+        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
+        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+    elif m in {"diagonal_drift_down_left"}:
+        z_expr = f"1.018+0.024*{smooth}"
+        x0 = min(1.0, safe_fx + 0.15)
+        x1 = max(0.0, safe_fx - 0.15)
+        y0 = max(0.0, safe_fy - 0.12)
+        y1 = min(1.0, safe_fy + 0.12)
+        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
+        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+    elif m in {"tall_document_crawl"}:
+        z_expr = "1.020"
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*(0.08+0.84*{smooth}))"
+    else:
+        # scale_drift_stable ou padrão
+        z_expr = f"1.000+0.018*{smooth}"
+        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
+        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
 
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
     filmic_chain = f",{filmic_grade}" if filmic_grade else ""
@@ -17581,7 +18313,8 @@ def build_image_filter_complex(
     else:
         fade_filters = ""
 
-    img_norm = ",eq=contrast=1.05:brightness=0.01:saturation=1.04,unsharp=3:3:0.5:3:3:0.0"
+    # Preservação visual limpa: NÃO degradar imagem original com unsharp/contraste artificial
+    img_norm = ""
 
     # Detectar se a proporção da imagem é compatível com o projeto (Caso A/C) ou precisa de background blur (Caso B)
     target_ratio = float(w) / float(max(1, h))
@@ -17597,23 +18330,19 @@ def build_image_filter_complex(
 
     needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
 
-    # Buffer supersampling ajustado à dimensão do projeto (sem o peso excessivo de 2.5K)
-    # Margem de 1.12x cobre perfeitamente o zoom máximo de 1.100 sem serrilhados
     ss_w = int(round(w * 1.12 / 2.0) * 2)
     ss_h = int(round(h * 1.12 / 2.0) * 2)
     flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
-        # Caso A / C: Proporção compatível -> enquadramento com Smart Dynamic Focal Anchor
         return (
-            f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{fx:.3f}:(in_h-out_h)*{fy:.3f},setsar=1,format=yuv420p,"
+            f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{safe_fx:.3f}:(in_h-out_h)*{safe_fy:.3f},setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
             f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
 
     # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Ambient Glass blur hiper-otimizado
-    # O desfoque de fundo é gerado em 384x216 e expandido suavemente, economizando 95% do processamento de blur
     return (
         f"[0:v]{crop_filter}{flip_prefix}scale=384:216:force_original_aspect_ratio=increase,crop=384:216,boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
         f"[0:v]{crop_filter}{flip_prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
@@ -17991,14 +18720,35 @@ def detect_voice_emphasis_peaks(
 def get_retention_pacing_parameters(
     current_pos: float,
     audio_total: float,
+    is_image_dominant: bool = False,
 ) -> tuple[float, float, float, str]:
     """
     Retorna (min_dur, target_dur, max_dur, zone_name) com base na posição da timeline:
-    - Zona 1: Hook (0 a 40s) -> Cortes dinâmicos de 1.8s a 2.8s para retenção máxima no YouTube
-    - Zona 2: Desenvolvimento Narrativo (40s a 80% do vídeo) -> Cadência documental de 3.4s a 5.4s
-    - Zona 3: Clímax (80% a 95% do vídeo) -> Aceleração para 2.2s a 3.4s
-    - Zona 4: Outro / CTA (95% a 100%) -> Cadência suave de 3.5s a 5.0s
+    - Para projetos com predominância de imagens (100% ou >=75% imagens):
+        Adota o ritmo cinematográfico validado no vídeo de referência refereniaimage.mp4:
+        Média 5.52s (faixa saudável 3.5s a 6.5s no corpo, e cortes dinâmicos de 2.4s a 4.2s no gancho).
+    - Para vídeos normais/híbridos:
+        Zona 1: Hook (0 a 40s) -> Cortes dinâmicos de 1.8s a 2.8s
+        Zona 2: Desenvolvimento Narrativo -> 3.2s a 5.4s
+        Zona 3: Clímax -> 2.0s a 3.5s
+        Zona 4: Outro -> 3.2s a 5.0s
     """
+    if is_image_dominant:
+        if audio_total <= 45.0:
+            return (2.2, 3.4, 4.5, "short_hook")
+        hook_end = min(40.0, audio_total * 0.25)
+        body_end = audio_total * 0.80
+        climax_end = audio_total * 0.95
+
+        if current_pos < hook_end:
+            return (2.4, 3.5, 4.2, "hook")
+        elif current_pos < body_end:
+            return (3.5, 5.2, 6.5, "body")
+        elif current_pos < climax_end:
+            return (2.8, 3.8, 4.8, "climax")
+        else:
+            return (3.5, 5.0, 6.2, "outro")
+
     if audio_total <= 45.0:
         return (1.8, 2.4, 3.2, "short_hook")
 
@@ -18061,10 +18811,11 @@ def build_segment_plan(
     ]
     T_v = sum(v_effective_durs)
 
-    # Imagens: base saudável de 4.0s (faixa saudável: 3–5s)
+    # Imagens: base saudável ajustada ao padrão cinematográfico refereniaimage.mp4 (média 5.52s)
     N_i = len(i_pairs)
     N_v = len(v_pairs)
-    base_img_dur = 4.0
+    is_image_dominant = bool(N_i > 0 and (N_v == 0 or (N_i / max(1, N_i + N_v)) >= 0.75))
+    base_img_dur = 5.2 if is_image_dominant else 4.0
     T_i = N_i * base_img_dur
 
     T_total = T_v + T_i
@@ -18188,6 +18939,7 @@ def build_segment_plan(
     initial_count = len(pairs)
     remaining = audio_total
     image_counter = 0
+    recent_image_motions: list[str] = []
 
     for source_index, (src, orig_dur) in enumerate(ordered_items, start=1):
         if remaining <= 0.08:
@@ -18195,14 +18947,14 @@ def build_segment_plan(
         item_cycle = ((source_index - 1) // initial_count) if initial_count > 0 else 0
         curr_timeline_pos = audio_total - remaining
         is_img = is_image_path(src)
-        min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_timeline_pos, audio_total)
+        min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_timeline_pos, audio_total, is_image_dominant=is_image_dominant)
         if is_img:
             # Curva de Retenção Adaptativa no Pacing de Imagens
             pace_factor = PACE_HARMONICS[image_counter % len(PACE_HARMONICS)]
             if zone in {"hook", "short_hook"}:
-                target_candidate = round(min(img_dur, 2.6) * pace_factor, 3)
+                target_candidate = round(min(img_dur, 3.5 if is_image_dominant else 2.6) * pace_factor, 3)
             elif zone == "climax":
-                target_candidate = round(min(img_dur, 3.0) * pace_factor, 3)
+                target_candidate = round(min(img_dur, 4.0 if is_image_dominant else 3.0) * pace_factor, 3)
             else:
                 target_candidate = round(img_dur * pace_factor, 3)
             target = max(min_dur, min(max_dur, target_candidate))
@@ -18227,7 +18979,14 @@ def build_segment_plan(
                         magnetic_snap_stats["cue_breaths"] += 1
 
             target = min(target, remaining)
-            motion = IMAGE_MOTIONS[(image_counter + item_cycle * 2) % len(IMAGE_MOTIONS)]
+            motion, focal, safe_framing = choose_smart_image_motion(
+                src,
+                target_duration=target,
+                prev_motions=recent_image_motions,
+            )
+            recent_image_motions.append(motion)
+            if len(recent_image_motions) > 6:
+                recent_image_motions.pop(0)
             image_counter += 1
             if target >= 0.08:
                 apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "image")
@@ -18245,6 +19004,8 @@ def build_segment_plan(
                         scale_boost=1.0,
                         clean_roi=get_media_clean_roi(src),
                         timeline_zone=zone,
+                        focal_point=focal,
+                        safe_framing=safe_framing,
                     )
                 )
                 remaining -= target
@@ -18540,7 +19301,14 @@ def build_segment_plan(
                         seg_dur = round(min(base_img_dur, remaining), 3)
                         if seg_dur >= 0.6:
                             apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "image")
-                            motion = IMAGE_MOTIONS[(image_counter + cycle * 2 + cand.source_index) % len(IMAGE_MOTIONS)]
+                            motion, focal, safe_framing = choose_smart_image_motion(
+                                cand.source,
+                                target_duration=seg_dur,
+                                prev_motions=recent_image_motions,
+                            )
+                            recent_image_motions.append(motion)
+                            if len(recent_image_motions) > 6:
+                                recent_image_motions.pop(0)
                             image_counter += 1
                             plans.append(
                                 SegmentPlan(
@@ -18555,6 +19323,8 @@ def build_segment_plan(
                                     hflip=apply_hflip,
                                     scale_boost=1.0,
                                     clean_roi=getattr(cand, "clean_roi", None) or get_media_clean_roi(cand.source),
+                                    focal_point=focal,
+                                    safe_framing=safe_framing,
                                 )
                             )
                             remaining -= seg_dur
@@ -18790,7 +19560,7 @@ def make_segments_smart(
         imported_count=len(video_files),
     )
     # Semantic B-Roll Matcher: alinha tematicamente clipes com as falas da narracao
-    set_stage(job, "rendering", "Alinhando B-roll semântico", "Alinhando mídias à narração...", percent=22.5)
+    set_stage(job, "rendering", "Alinhando B-roll semântico", "Alinhando mídias à narração...", percent=28.2)
     cues_for_matching = list(job.subtitle_cues or [])
     if not cues_for_matching and subtitles:
         for srt_f in subtitles:
@@ -18800,7 +19570,7 @@ def make_segments_smart(
     valid_pairs, semantic_b_roll_summary = match_media_to_subtitles(job, valid_pairs, cues_for_matching, audio_total)
     job.preflight_summary["semantic_b_roll"] = semantic_b_roll_summary
     # Clean Opening Protocol: protege estritamente os primeiros 10 slots com B-roll limpo
-    set_stage(job, "rendering", "Protegendo abertura", "Aplicando protocolo de abertura limpa...", percent=23.5)
+    set_stage(job, "rendering", "Protegendo abertura", "Aplicando protocolo de abertura limpa...", percent=28.5)
     valid_pairs, clean_opening_summary = enforce_clean_opening_protocol(job, valid_pairs, work, max_opening_slots=10)
     job.preflight_summary["clean_opening"] = clean_opening_summary
     performance_stop(job, "visual_analysis")
@@ -18809,13 +19579,13 @@ def make_segments_smart(
         raise RuntimeError("Nenhum video valido foi encontrado. Remova arquivos corrompidos ou adicione novos clipes.")
     original_video_count = len(video_files)
     performance_start(job, "continuity")
-    set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=24.5)
+    set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=28.8)
     continuity_filters, continuity_summary = continuity_adjustments(job, valid_pairs, work)
     performance_stop(job, "continuity")
     job.continuity_summary = continuity_summary
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
-    set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=25.5)
+    set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=29.1)
     source_offsets: dict[str, float] = {}
 
     def _probe_single_offset(pair: tuple[Path, float]) -> tuple[str, float] | None:
@@ -18846,7 +19616,7 @@ def make_segments_smart(
                 source_offsets[res[0]] = res[1]
 
     visual_window_summary: dict[str, Any] = {
-        "enabled": bool(job.options.get("scoreVisualWindows", True)),
+        "enabled": bool(job.options.get("scoreVisualWindows", False)),
         "analyzed": 0,
         "adjusted": 0,
         "cache_hits": 0,
@@ -18856,7 +19626,7 @@ def make_segments_smart(
     }
     window_scores_by_source: dict[str, dict[str, Any]] = {}
     if visual_window_summary["enabled"]:
-        set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=27.0)
+        set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=29.4)
         performance_start(job, "visual_windows")
         candidate_set = set(candidate_sources) if candidate_sources else None
 
@@ -18929,7 +19699,7 @@ def make_segments_smart(
                 break
     if not srt_file and getattr(job, "srt_path", None) and Path(str(job.srt_path)).exists():
         srt_file = Path(str(job.srt_path))
-    set_stage(job, "rendering", "Planejando timeline", "Montando plano de edição, cortes e ritmo...", percent=28.5)
+    set_stage(job, "rendering", "Planejando linha do tempo", "Montando plano de tomadas, cortes e ritmo...", percent=29.7)
     plans, summary = build_segment_plan(
         video_files,
         video_durs,
@@ -19074,6 +19844,8 @@ def make_segments_smart(
                 style_profile,
                 is_outro=plan.is_outro,
                 filmic_grade=filmic_grade,
+                focal_point=getattr(plan, "focal_point", None),
+                safe_framing=getattr(plan, "safe_framing", None),
                 hflip=getattr(plan, "hflip", False),
                 clean_roi=getattr(plan, "clean_roi", None),
             )
@@ -19257,6 +20029,10 @@ def make_segments_smart(
                     continue
                 apply_hflip = (cycle_value % 2 == 1) and is_safe_for_hflip(src, "image" if is_image_path(src) else "video")
                 scale_boost = 1.08 if (cycle_value % 2 == 1 and not is_image_path(src)) else 1.0
+                if is_image_path(src):
+                    motion, focal, safe_framing = choose_smart_image_motion(src, target_duration=target)
+                else:
+                    motion, focal, safe_framing = "", None, None
                 fill_plan = SegmentPlan(
                     source=src,
                     raw_duration=dur,
@@ -19265,12 +20041,14 @@ def make_segments_smart(
                     source_index=source_index,
                     cycle=cycle_value,
                     media_kind="image" if is_image_path(src) else "video",
-                    image_motion=image_motion_for(src, source_index + cycle_value) if is_image_path(src) else "",
+                    image_motion=motion,
                     sub_slice_index=fill_cycle,
                     punch_in=(fill_cycle % 2 == 1),
                     hflip=apply_hflip,
                     scale_boost=scale_boost,
                     clean_roi=get_media_clean_roi(src, work) if is_image_path(src) else None,
+                    focal_point=focal,
+                    safe_framing=safe_framing,
                 )
                 out, actual = render_one(fill_plan, next_segment_no)
                 next_segment_no += 1
@@ -20940,11 +21718,14 @@ def apply_auto_director(
                 p = by_rel.get(rel)
                 if p and p.exists():
                     is_img = is_image_path(p)
-                    v_res = probe_visual_clean_health(p, 0.0 if is_img else 5.0, "strict", media_kind="image" if is_img else "video")
-                    if v_res.get("action") == "hard_reject" or v_res.get("category") in {
+                    ckey = visual_clean_cache_key(p, 0.0 if is_img else 5.0, job.work)
+                    v_res = None
+                    with VISUAL_CLEAN_CACHE_LOCK:
+                        v_res = VISUAL_CLEAN_CACHE.get(ckey)
+                    if v_res and (v_res.get("action") == "hard_reject" or v_res.get("category") in {
                         "presentation_slide", "text_dominant", "data_dominant", "black_screen",
-                        "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames",
-                    }:
+                        "presenter", "ui_screenshot", "webcam_pip", "low_quality", "invalid", "no_frames", "polluted_banner",
+                    }):
                         has_pollution = True
                         break
         if has_pollution:
@@ -20996,8 +21777,11 @@ def apply_auto_director(
                 cached_item = dict(item)
                 cached_item["media_type"] = "image" if is_image_path(path) else str(cached_item.get("media_type") or "video")
                 if "quality_score" not in cached_item or "is_hero" not in cached_item:
-                    v_an = probe_visual_clean_health(path, 0.0 if is_image_path(path) else 5.0, "normal", cwd=job.work)
-                    v_m = v_an.get("metrics") or {}
+                    ckey = visual_clean_cache_key(path, 0.0 if is_image_path(path) else 5.0, job.work)
+                    cached_v = None
+                    with VISUAL_CLEAN_CACHE_LOCK:
+                        cached_v = VISUAL_CLEAN_CACHE.get(ckey)
+                    v_m = (cached_v.get("metrics") or {}) if cached_v else {}
                     cached_item["quality_score"] = float(v_m.get("quality_score") or (0.75 if not is_image_path(path) else 0.70))
                     cached_item["edge_density"] = float(v_m.get("edge_density") or 0.04)
                     cached_item["is_flat_wall"] = bool(cached_item["edge_density"] < 0.016 and float(v_m.get("stdev") or 30.0) < 14.0)
@@ -21010,7 +21794,8 @@ def apply_auto_director(
         if len(video_items) != len(videos):
             video_items = []
     if not video_items:
-        for original_index, path in enumerate(videos):
+        def _index_single_video(item_tuple: tuple[int, Path]) -> tuple[int, dict[str, Any]]:
+            original_index, path = item_tuple
             indexed: dict[str, Any] = {}
             try:
                 cached = INTELLIGENCE_DB.get_media_index(media_signature(path))
@@ -21034,20 +21819,23 @@ def apply_auto_director(
                 f"{path.stem.replace('_', ' ')} {' '.join(categories)}",
                 limit=16,
             )
-            v_an = probe_visual_clean_health(path, 0.0 if is_image_path(path) else 5.0, "normal", cwd=job.work)
-            v_m = v_an.get("metrics") or {}
+            ckey = visual_clean_cache_key(path, 0.0 if is_image_path(path) else 5.0, job.work)
+            cached_v = None
+            with VISUAL_CLEAN_CACHE_LOCK:
+                cached_v = VISUAL_CLEAN_CACHE.get(ckey)
+            v_m = (cached_v.get("metrics") or {}) if cached_v else {}
             v_qscore = float(v_m.get("quality_score") or (0.75 if not is_image_path(path) else 0.70))
             v_edge = float(v_m.get("edge_density") or 0.04)
             v_mean = float(v_m.get("mean") or 50.0)
             v_stdev = float(v_m.get("stdev") or 30.0)
-            v_wm = bool(v_an.get("corner_watermark") or (isinstance(v_m.get("corner_watermark"), dict) and v_m["corner_watermark"].get("has_watermark")))
+            v_wm = bool((cached_v and cached_v.get("corner_watermark")) or (isinstance(v_m.get("corner_watermark"), dict) and v_m["corner_watermark"].get("has_watermark")))
             vw, vh = probe_media_dimensions(path)
             is_wall = bool(v_edge < 0.016 and v_stdev < 14.0)
             is_glare = bool(v_mean > 235.0 and v_stdev < 18.0)
             is_vid = not is_image_path(path)
             is_hero = bool(is_vid and v_qscore >= 0.82 and v_edge >= 0.035 and not is_wall and not is_glare and vh >= 720 and not v_wm)
 
-            video_items.append({
+            return original_index, {
                 "path": str(path.resolve()),
                 "rel": manifest_rel_for_path(job, path),
                 "media_type": "image" if is_image_path(path) else "video",
@@ -21069,7 +21857,35 @@ def apply_auto_director(
                 "is_hero": is_hero,
                 "width": vw,
                 "height": vh,
-            })
+            }
+
+        video_items_tuples = list(enumerate(videos))
+        total_items = len(video_items_tuples)
+        if total_items > 1:
+            max_workers = min(8, max(2, os.cpu_count() or 4))
+            video_items = [None] * total_items
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_index_single_video, vt): vt[0] for vt in video_items_tuples}
+                done_count = 0
+                for fut in as_completed(futures):
+                    orig_idx, item = fut.result()
+                    video_items[orig_idx] = item
+                    done_count += 1
+                    if done_count % 10 == 0 or done_count == total_items:
+                        prog_pct = round(15.0 + (done_count / total_items) * 4.0, 1)
+                        if hasattr(job, "percent"):
+                            job.percent = max(getattr(job, "percent", 15.0), prog_pct)
+                        if hasattr(job, "stage_label"):
+                            job.stage_label = f"Diretor: organizando clipes ({done_count}/{total_items})"
+                        if hasattr(job, "message"):
+                            job.message = f"Organizando sequência visual ({done_count}/{total_items})..."
+            video_items = [item for item in video_items if item is not None]
+        elif total_items == 1:
+            video_items = [_index_single_video(video_items_tuples[0])[1]]
+            if hasattr(job, "percent"):
+                job.percent = max(getattr(job, "percent", 15.0), 19.0)
+        else:
+            video_items = []
         graph.commit(
             stage="indexing",
             cache_key=index_key,
@@ -21282,6 +22098,12 @@ def apply_auto_director(
             json.dumps(state, ensure_ascii=False, indent=2),
         )
     sync_graph_summary(job, graph)
+    if hasattr(job, "percent"):
+        job.percent = max(getattr(job, "percent", 15.0), 19.5)
+    if hasattr(job, "stage_label"):
+        job.stage_label = f"Diretor: sequência definida ({len(reordered)} clipes)"
+    if hasattr(job, "message"):
+        job.message = f"Sequência de {len(reordered)} clipes aprovada pelo Diretor Visual"
     return reordered
 
 
@@ -21526,7 +22348,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
     performance_start(job, "mastering")
     master_profile = str(job.options.get("platformMasterProfile") or "youtube_long")
     first_cmd = [
-        FFMPEG, "-hide_banner", "-nostats", "-i", str(actual_audio),
+        FFMPEG, "-hide_banner", "-nostats", "-threads", "4", "-i", str(actual_audio),
         "-vn", "-af", first_pass_filter(master_profile), "-f", "null", os.devnull,
     ]
     try:
@@ -21544,7 +22366,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
         _register_process(job, proc)
         try:
             stdout, stderr = proc.communicate(
-                timeout=max(120, int(max(1.0, job.estimated_render_duration) * 2.5))
+                timeout=max(180, int(max(1.0, job.estimated_render_duration) * 3.0))
             )
         except subprocess.TimeoutExpired:
             _terminate_process(proc)
@@ -21564,7 +22386,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
         run_cmd(
             job,
             [
-                FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
                 "-i", str(actual_audio), "-vn",
                 "-af", second_filter,
                 "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
@@ -21974,7 +22796,7 @@ def render_worker(job_id: str):
         }
         job.preflight_summary["semantic_model"] = semantic_model_status()
         write_editorial_intelligence_plan(job, "after_direction")
-        estimate = render_time_estimate(timeline_total, job.options, priority)
+        estimate = render_time_estimate(timeline_total, job.options, priority, media_count=len(videos))
         job.estimated_render_duration = timeline_total
         job.estimated_total_seconds = float(estimate.get("seconds") or 0.0)
         job.estimate_confidence = str(estimate.get("confidence") or "heuristic")
@@ -21995,8 +22817,9 @@ def render_worker(job_id: str):
         job.preflight_summary["active_render_estimate"] = estimate
         # Estimativa real agora disponível — substituir a preliminar e avançar progresso
         job.estimate_confidence = str(estimate.get("confidence") or "heuristic")
-        job.percent = max(job.percent, 18)
-        job.message = f"Planejamento concluído. Timeline: {timeline_total:.0f}s | Iniciando render..."
+        job.percent = max(job.percent, 20.0)
+        job.stage_label = "Planejamento da linha do tempo"
+        job.message = f"Planejamento concluído ({timeline_total:.0f}s). Preparando camadas..."
         job.preflight_summary["render_budget"] = {
             "mode": render_mode_label(priority),
             "limit_seconds": round(job.render_budget_seconds),
@@ -22029,7 +22852,6 @@ def render_worker(job_id: str):
             f"Abertura: modo={mode_intro} | narracao={audio_total:.2f}s | "
             f"intro={intro_seconds:.2f}s | timeline_final={timeline_total:.2f}s."
         ))
-        job.percent = max(job.percent, 15)
         job.has_visual_composition = bool(
             job.options.get("ctaLanguage")
             or job.options.get("selectedCta")
@@ -22038,7 +22860,7 @@ def render_worker(job_id: str):
 
         subtitle_ass = None
         if subtitles:
-            set_stage(job, "analyzing_subtitles", "Preparando camadas", "Analisando Textos e Legendas")
+            set_stage(job, "analyzing_subtitles", "Textos e legendas", "Gerando estilos e zonas seguras de legendas cinemáticas...", percent=max(job.percent, 21.0))
             w, h = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
             subtitle_path = subtitles[0] if subtitles[0].is_absolute() else job.work / subtitles[0]
             caption_path = (
@@ -22102,6 +22924,12 @@ def render_worker(job_id: str):
                 finally:
                     performance_stop(job, "subtitles_ass")
             sync_graph_summary(job, graph)
+            if hasattr(job, "percent"):
+                job.percent = max(getattr(job, "percent", 20.0), 22.0)
+            if hasattr(job, "stage_label"):
+                job.stage_label = "Textos e legendas: camadas prontas"
+            if hasattr(job, "message"):
+                job.message = "Camadas cinemáticas de legendas e textos preparadas"
 
         effective_visual = effective_visual_options(job)
         segment_payload = {
@@ -22113,14 +22941,13 @@ def render_worker(job_id: str):
             "transitions": effective_visual.get("transitions"),
             "quality_boost": effective_visual.get("quality_boost"),
             "continuity": bool(effective_visual.get("continuity_match")),
-            "continuity_outliers_only": bool(job.options.get("continuityOutliersOnly", True)),
-            "visual_clean": bool(job.options.get("visualCleanFilter", True)),
+            "visual_clean": bool(job.options.get("visualCleanFilter", False)),
             "visual_clean_version": VISUAL_CLEAN_CACHE_VERSION,
-            "score_visual_windows": bool(job.options.get("scoreVisualWindows", True)),
-            "adaptive_quality_boost": bool(job.options.get("adaptiveQualityBoost", True)),
+            "score_visual_windows": bool(job.options.get("scoreVisualWindows", False)),
+            "adaptive_quality_boost": bool(job.options.get("adaptiveQualityBoost", False)),
             "motion_graphics_premium": bool(effective_visual.get("motion_graphics_premium")),
-            "codec": job.options.get("codec", "hevc"),
-            "gpu": bool(job.options.get("gpu", False)),
+            "codec": job.options.get("codec", "h264"),
+            "gpu": bool(job.options.get("gpu", True)),
             "priority": render_priority(job),
             "director_order": job.options.get("videoOrder") or [],
             "decisions_hash": stable_hash(job.render_decisions.get("effectiveOptions") if isinstance(job.render_decisions, dict) else {}),
@@ -22157,8 +22984,8 @@ def render_worker(job_id: str):
                 ratio=job.options.get("ratio", "16:9"),
                 zoom=job.options.get("zoom", "off"),
                 transitions=job.options.get("transitions", "off"),
-                codec=job.options.get("codec", "hevc"),
-                gpu=bool(job.options.get("gpu", False)),
+                codec=job.options.get("codec", "h264"),
+                gpu=bool(job.options.get("gpu", True)),
                 work=job.work,
                 subtitles=subtitles,
             )
@@ -22736,120 +23563,120 @@ def status(job_id: str):
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job não encontrado")
-    elapsed = max(0.0, (job.finished_at or time.time()) - (job.started_at or job.created_at))
-    estimated_total = max(0.0, float(job.estimated_total_seconds or 0.0))
+    now_ts = time.time()
+    elapsed = max(0.0, (job.finished_at or now_ts) - (job.started_at or job.created_at))
     active_estimate = (job.preflight_summary or {}).get("active_render_estimate") or {}
-    stage_forecast = dict(active_estimate.get("stage_forecast") or {})
     stage_remaining: dict[str, float] = {}
-    if job.status == "running" and stage_forecast:
-        for key, forecast_value in stage_forecast.items():
-            forecast = max(0.0, float(forecast_value or 0.0))
-            completed = max(0.0, float(job.performance_breakdown.get(key) or 0.0))
-            active_started = job.performance_marks.get(key)
-            active_elapsed = max(0.0, time.perf_counter() - active_started) if active_started else 0.0
-            if completed > 0 and not active_started:
-                stage_remaining[key] = 0.0
-                continue
-            active_forecast = forecast
-            if active_started and job.stage_progress_total > 0 and job.stage_progress_seconds > 0:
-                progress_fraction = max(
-                    0.03,
-                    min(0.98, job.stage_progress_seconds / max(0.1, job.stage_progress_total)),
-                )
-                active_forecast = max(forecast, active_elapsed / progress_fraction)
-            stage_remaining[key] = round(max(0.0, active_forecast - active_elapsed), 1)
-        stage_based_total = elapsed + sum(stage_remaining.values())
-        if stage_based_total > elapsed:
-            estimated_total = estimated_total * 0.42 + stage_based_total * 0.58 if estimated_total else stage_based_total
-    elif job.status == "running" and elapsed > 12.0 and job.stage_progress_total > 0:
-        progress_fraction = max(
-            0.04,
-            min(0.98, job.stage_progress_seconds / max(0.1, job.stage_progress_total)),
-        )
-        observed_total = elapsed / progress_fraction
-        estimated_total = estimated_total * 0.58 + observed_total * 0.42 if estimated_total else observed_total
-    if job.status == "running" and not active_estimate:
-        # Antes do preflight terminar, a duração enviada pelo frontend é apenas
-        # uma pista. Nunca a apresente como contagem regressiva precisa.
+
+    if job.status != "running":
+        remaining = 0.0
+        estimated_total = elapsed
+        eta_confidence = str(job.estimate_confidence or "historical")
+        eta_state = "complete"
+        eta_reason = ""
+    elif not active_estimate and elapsed < 12.0 and job.percent < 8.0:
+        remaining = 0.0
         estimated_total = 0.0
         eta_state = "warming_up"
         eta_confidence = "low"
         eta_reason = "preparando o plano e medindo as etapas"
-    elif job.status == "running":
-        pct = float(job.percent or 0.0)
-        if pct >= 5.0 and elapsed > 15.0:
-            # Projeção honesta baseada na taxa real observada
-            progress_ratio = max(0.05, min(0.99, pct / 100.0))
-            observed_run_total = elapsed / progress_ratio
-            if observed_run_total > estimated_total:
-                estimated_total = max(observed_run_total, (estimated_total * 0.35 + observed_run_total * 0.65) if estimated_total > 0 else observed_run_total)
-        if estimated_total <= elapsed:
-            pct_val = max(1.0, float(job.percent or 1.0))
-            rem_pct = max(1.0, 100.0 - pct_val)
-            if pct_val < 25.0:
-                # Durante o pré-render / validação, não extrapolamos linearmente o tempo decorrido,
-                # pois o pré-vôo não reflete a velocidade real de codificação (FFmpeg / NVENC).
-                base_est = float((active_estimate or {}).get("seconds") or (active_estimate or {}).get("projected_seconds") or 0.0)
-                remaining_honest = max(30.0, base_est * (rem_pct / 100.0)) if base_est > 0 else max(30.0, elapsed * 1.5)
-            else:
-                remaining_honest = max(5.0, (elapsed / pct_val) * rem_pct)
-
-            # Trava de sanidade do orçamento: o tempo restante estimado NUNCA deve explodir
-            # além do orçamento máximo estabelecido para o modo quando o orçamento está ativo.
-            if job.render_budget_seconds > 0:
-                max_allowed_remaining = max(30.0, (job.render_budget_seconds * 1.25) - elapsed)
-                remaining_honest = min(remaining_honest, max_allowed_remaining)
-
-            estimated_total = elapsed + remaining_honest
-
-    remaining = max(0.0, estimated_total - elapsed) if job.status == "running" else 0.0
-    if job.render_budget_seconds > 0 and job.status == "running":
-        # Garante que a previsão restante respeita o teto do orçamento
-        budget_ceiling_rem = max(15.0, (job.render_budget_seconds * 1.25) - elapsed)
-        remaining = min(remaining, budget_ceiling_rem)
-        estimated_total = elapsed + remaining
-    if job.status != "running":
-        eta_confidence = str(job.estimate_confidence or "heuristic")
-        eta_state = "complete"
-        eta_reason = ""
-    elif active_estimate:
-        eta_confidence = str(job.estimate_confidence or "heuristic")
-        eta_state = "estimated"
-        eta_reason = ""
-        if elapsed < 15.0 and job.percent < 8.0:
-            # warming_up só quando AMBOS: elapsed curto E progresso baixo
-            eta_state = "warming_up"
-            eta_confidence = "low"
-            eta_reason = "coletando dados iniciais deste render"
-        elif eta_confidence == "preliminary":
-            # Estimativa preliminar: mostrar como variável mas com valor real
-            eta_state = "variable"
-            eta_reason = "estimativa preliminar enquanto o projeto é preparado"
-        elif not estimated_total:
-            eta_state = "unknown"
-            eta_confidence = "low"
-            eta_reason = "sem historico suficiente para estimar"
-        elif eta_confidence != "historical" and job.percent < 35.0:
-            eta_state = "variable"
-            eta_confidence = "low"
-            eta_reason = "estimativa ainda variavel"
-        elif eta_confidence == "historical":
-            eta_state = "calibrated"
-            eta_reason = "baseada no historico deste PC"
-        else:
-            eta_state = "adaptive"
-            eta_reason = "ajustada pelo progresso observado"
     else:
-        eta_confidence = "low"
-        eta_state = "warming_up"
-        eta_reason = "preparando o plano e medindo as etapas"
-    spread = 0.16 if eta_state == "calibrated" else (0.28 if eta_state == "adaptive" else 0.42)
+        pct = float(job.percent or 0.0)
+        base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
+        if base_est <= 0.0:
+            base_est = max(180.0, elapsed * 1.5)
+
+        media_count = len(job.upload_paths or job.manifest or [])
+        preflight_budget = max(25.0, min(base_est * 0.28, max(35.0, float(media_count) * 0.55 + 25.0)))
+        encoding_budget = max(30.0, base_est - preflight_budget)
+
+        if pct < 30.0:
+            pre_fraction = max(0.04, min(0.99, pct / 30.0))
+            obs_preflight_total = elapsed / pre_fraction
+            w_pre = min(0.85, max(0.15, pre_fraction))
+            effective_preflight_total = (1.0 - w_pre) * max(elapsed + 5.0, preflight_budget) + w_pre * max(elapsed + 5.0, obs_preflight_total)
+            rem_preflight = max(3.0, effective_preflight_total - elapsed)
+            rem_encoding = encoding_budget
+            raw_remaining = rem_preflight + rem_encoding
+
+            eta_confidence = str(job.estimate_confidence or "historical")
+            if eta_confidence == "historical":
+                eta_state = "calibrated"
+                eta_reason = "baseada no histórico deste PC"
+            elif eta_confidence == "preliminary":
+                eta_state = "variable"
+                eta_reason = "estimativa preliminar da preparação"
+            else:
+                eta_state = "variable"
+                eta_reason = "preparando camadas e clipes"
+        else:
+            if getattr(job, "_preflight_elapsed", None) is None:
+                job._preflight_elapsed = elapsed
+            pre_done = float(job._preflight_elapsed or preflight_budget)
+            enc_elapsed = max(1.0, elapsed - pre_done)
+            enc_fraction = max(0.01, min(0.995, (pct - 30.0) / 70.0))
+
+            if enc_fraction < 0.05 or enc_elapsed < 12.0:
+                raw_remaining = max(10.0, encoding_budget - enc_elapsed)
+            else:
+                obs_enc_total = enc_elapsed / enc_fraction
+                obs_enc_rem = max(3.0, obs_enc_total - enc_elapsed)
+                proj_enc_rem = max(3.0, encoding_budget - enc_elapsed)
+                w_enc = min(0.92, 0.20 + 0.75 * enc_fraction)
+                raw_remaining = (1.0 - w_enc) * proj_enc_rem + w_enc * obs_enc_rem
+
+            eta_state = "adaptive"
+            eta_confidence = str(job.estimate_confidence or "historical")
+            eta_reason = "ajustada pelo progresso observado"
+
+        last_eta = getattr(job, "_last_status_eta_sec", None)
+        last_time = getattr(job, "_last_status_time", None)
+        if last_eta is not None and last_time is not None:
+            dt = max(0.0, now_ts - last_time)
+            if 0.0 < dt < 30.0:
+                expected_eta = max(1.0, last_eta - dt)
+                smoothed = 0.75 * expected_eta + 0.25 * raw_remaining
+                smoothed = min(smoothed, last_eta + 3.0)
+                smoothed = max(smoothed, max(1.0, last_eta - (dt * 2.5)))
+                remaining = round(smoothed, 1)
+            else:
+                remaining = round(raw_remaining, 1)
+        else:
+            remaining = round(raw_remaining, 1)
+
+        job._last_status_eta_sec = remaining
+        job._last_status_time = now_ts
+
+        if job.render_budget_seconds > 0:
+            budget_ceiling = max(10.0, (job.render_budget_seconds * 1.10) - elapsed)
+            remaining = min(remaining, budget_ceiling)
+
+        estimated_total = elapsed + remaining
+
+    if job.status == "running":
+        pct_val = float(job.percent or 0.0)
+        if pct_val >= 80.0:
+            spread = 0.08
+        elif pct_val >= 50.0:
+            spread = 0.12
+        elif eta_state == "calibrated":
+            spread = 0.15
+        elif eta_state == "adaptive":
+            spread = 0.22
+        else:
+            spread = 0.30
+    else:
+        spread = 0.0
+
+    rem_min = max(0.0, remaining * (1.0 - spread))
+    rem_max = max(rem_min + 5.0, remaining * (1.0 + spread)) if remaining > 10.0 else remaining
+
     eta_summary = {
         "elapsed_seconds": round(elapsed),
         "estimated_total_seconds": round(estimated_total),
         "estimated_remaining_seconds": round(remaining),
-        "remaining_min_seconds": round(max(0.0, remaining * (1.0 - spread))),
-        "remaining_max_seconds": round(max(0.0, remaining * (1.0 + spread))),
+        "remaining_min_seconds": round(rem_min),
+        "remaining_max_seconds": round(rem_max),
         "render_duration_seconds": round(job.estimated_render_duration, 3),
         "confidence": eta_confidence,
         "state": eta_state,

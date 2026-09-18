@@ -1,5 +1,5 @@
 const state = {
-  version: '1.31.0',
+  version: '1.40.0',
   mode: 'fast',
   projects: [],
   activeProjectId: null,
@@ -217,6 +217,7 @@ const ctaOffsetY = $('#ctaOffsetY');
 const ctaOffsetXValue = $('#ctaOffsetXValue');
 const ctaOffsetYValue = $('#ctaOffsetYValue');
 const qualityBoostToggle = $('#qualityBoostToggle');
+const visualCleanFilterToggle = $('#visualCleanFilterToggle');
 const smartVisualDirectorToggle = $('#smartVisualDirectorToggle');
 const referenceStyleEnabledToggle = $('#referenceStyleEnabledToggle');
 const referenceStyleStatus = $('#referenceStyleStatus');
@@ -472,24 +473,24 @@ const transitionFxByMode = {
 };
 const workflowPresets = {
   youtube_doc: {
-    ratio: '16:9', mode: 'standard', exportProfile: 'youtube_compact', codec: 'hevc',
-    transition: 'random_documentary', zoom: 'light', intro: 'standard', subtitle: 'documentary', cta: 'top_right',
+    ratio: '16:9', mode: 'standard', exportProfile: 'youtube_compact', codec: 'h264',
+    transition: 'off', zoom: 'off', intro: 'standard', subtitle: 'documentary', cta: 'top_right',
   },
   shorts: {
-    ratio: '9:16', mode: 'fast', exportProfile: 'capcut_compact', codec: 'hevc',
-    transition: 'random_fast', zoom: 'light', intro: 'standard', subtitle: 'bold_yellow', cta: 'top_center',
+    ratio: '9:16', mode: 'fast', exportProfile: 'capcut_compact', codec: 'h264',
+    transition: 'off', zoom: 'off', intro: 'standard', subtitle: 'bold_yellow', cta: 'top_center',
   },
   cinematic_story: {
-    ratio: '16:9', mode: 'standard', exportProfile: 'balanced', codec: 'hevc',
-    transition: 'random_cinematic', zoom: 'light', intro: 'cinematic', subtitle: 'cinema_white', cta: 'top_right',
+    ratio: '16:9', mode: 'standard', exportProfile: 'balanced', codec: 'h264',
+    transition: 'off', zoom: 'off', intro: 'cinematic', subtitle: 'cinema_white', cta: 'top_right',
   },
   light_upload: {
-    ratio: '16:9', mode: 'fast', exportProfile: 'small_file', codec: 'hevc',
-    transition: 'fade', zoom: 'off', intro: 'standard', subtitle: 'minimal', cta: 'top_right',
+    ratio: '16:9', mode: 'fast', exportProfile: 'small_file', codec: 'h264',
+    transition: 'off', zoom: 'off', intro: 'standard', subtitle: 'minimal', cta: 'top_right',
   },
   high_quality: {
-    ratio: '16:9', mode: 'standard', exportProfile: 'high_quality', codec: 'hevc',
-    transition: 'random', zoom: 'light', intro: 'standard', subtitle: 'bold_white', cta: 'top_right',
+    ratio: '16:9', mode: 'standard', exportProfile: 'high_quality', codec: 'h264',
+    transition: 'off', zoom: 'off', intro: 'standard', subtitle: 'bold_white', cta: 'top_right',
   },
 };
 const projectTemplates = {
@@ -532,9 +533,9 @@ function normalizeWorkflowPreset(key, preset = {}){
     ratio: preset.ratio || current.ratio || '16:9',
     mode: preset.mode || current.mode || 'standard',
     exportProfile: preset.exportProfile || preset.export_profile || current.exportProfile || 'capcut_compact',
-    codec: preset.codec || current.codec || 'hevc',
-    transition: preset.transition || preset.transitions || current.transition || 'random',
-    zoom: preset.zoom || current.zoom || 'light',
+    codec: preset.codec || current.codec || 'h264',
+    transition: preset.transition || preset.transitions || current.transition || 'off',
+    zoom: preset.zoom || current.zoom || 'off',
     intro: preset.intro || preset.introMode || current.intro || 'standard',
     subtitle: preset.subtitle || current.subtitle || 'bold_white',
     cta: preset.cta || preset.ctaPositionPreset || current.cta || 'top_right',
@@ -956,12 +957,12 @@ function captureControlSnapshot(includeSubtitle = true){
     exportProfile: exportProfileSelect?.value || 'capcut_compact',
     videoBitrateKbps: Number(videoBitrateInput?.value || 2500),
     ratio: $('#ratioSelect')?.value || '16:9',
-    codec: $('#codecSelect')?.value || 'hevc',
+    codec: $('#codecSelect')?.value || 'h264',
     transitions: $('#transitionSelect')?.value || 'off',
     zoom: $('#zoomSelect')?.value || 'off',
     colorGradePreset: $('#colorGradeSelect')?.value || 'natural_balanced',
-    gpu: $('#gpuToggle')?.checked || false,
-    qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : true,
+    gpu: $('#gpuToggle') ? Boolean($('#gpuToggle').checked) : true,
+    qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : false,
     smartVisualDirector: smartDirectorEnabled,
     styleSource: referenceEnabled && referenceStyleVideo ? 'reference_dna' : 'glide_package',
     referenceStyleEnabled: referenceEnabled && Boolean(referenceStyleVideo),
@@ -969,7 +970,7 @@ function captureControlSnapshot(includeSubtitle = true){
     referenceStyleMode: referenceStyleModeSelect?.value === 'reference' ? 'reference' : 'inspiration',
     visualLanguagePackage: visualLanguagePackageSelect?.value || 'dark_doc',
     styleIntensity: styleIntensitySelect?.value || 'balanced',
-    visualCleanFilter: true,
+    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : false,
     visualFilterLevel: normalizedVisualFilterLevel(visualFilterLevelSelect?.value),
     adaptiveVisualFilter: Boolean(adaptiveVisualFilterToggle?.checked),
     voiceNormalize: voiceNormalizeToggle ? voiceNormalizeToggle.checked : true,
@@ -986,26 +987,26 @@ function captureControlSnapshot(includeSubtitle = true){
     adaptiveDucking: true,
     dynamicPauses: false,
     dynamicPauseIntensity: 'disabled',
-    strongMomentEnhance: strongMomentToggle ? strongMomentToggle.checked : true,
+    strongMomentEnhance: strongMomentToggle ? strongMomentToggle.checked : false,
     renderRecovery: renderRecoveryToggle ? renderRecoveryToggle.checked : true,
     directorDecisionMode: 'balanced',
     healthyRenderThreshold: Number(healthyThresholdInput?.value || 70),
     renderBudgetEnabled: Boolean(state.renderBudgetEnabled),
     renderBudgetTurboMultiplier: 1.35,
     platformMasterProfile: platformMasterProfileSelect?.value || 'youtube_long',
-    scoreVisualWindows: scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : true,
-    adaptiveQualityBoost: adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : true,
+    scoreVisualWindows: scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : false,
+    adaptiveQualityBoost: adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : false,
     queueAutoTest: queueAutoTestToggle ? queueAutoTestToggle.checked : true,
     autoDirector: smartDirectorEnabled,
     semanticVisualIndex: semanticVisualIndexToggle ? semanticVisualIndexToggle.checked : true,
     channelLearning: channelLearningToggle ? channelLearningToggle.checked : true,
     energyEditing: energyEditingToggle ? energyEditingToggle.checked : true,
     antiRepeat: antiRepeatToggle ? antiRepeatToggle.checked : true,
-    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : true,
-    continuityOutliersOnly: true,
+    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : false,
+    continuityOutliersOnly: false,
     subtitleEditorialGrammar: true,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
-    motionGraphicsPremium: true,
+    motionGraphicsPremium: false,
     introMode: introModeSelect?.value || state.introMode || 'standard',
     introSubtitleStyle: includeSubtitle ? currentIntroSubtitleStyle() : null,
     textStyle: includeSubtitle ? currentSubtitleStyle() : null,
@@ -1032,12 +1033,13 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(exportProfileSelect) exportProfileSelect.value = options.exportProfile || 'capcut_compact';
   if(videoBitrateInput) videoBitrateInput.value = String(options.videoBitrateKbps || 2500);
   if($('#ratioSelect')) $('#ratioSelect').value = options.ratio || '16:9';
-  if($('#codecSelect')) $('#codecSelect').value = options.codec || 'hevc';
+  if($('#codecSelect')) $('#codecSelect').value = options.codec || 'h264';
   if($('#transitionSelect')) $('#transitionSelect').value = options.transitions || 'off';
   if($('#zoomSelect')) $('#zoomSelect').value = options.zoom || 'off';
   if($('#colorGradeSelect')) $('#colorGradeSelect').value = options.colorGradePreset || 'natural_balanced';
-  if($('#gpuToggle')) $('#gpuToggle').checked = Boolean(options.gpu);
-  if(qualityBoostToggle) qualityBoostToggle.checked = options.qualityBoost !== false;
+  if($('#gpuToggle')) $('#gpuToggle').checked = options.gpu !== false;
+  if(qualityBoostToggle) qualityBoostToggle.checked = Boolean(options.qualityBoost);
+  if(visualCleanFilterToggle) visualCleanFilterToggle.checked = Boolean(options.visualCleanFilter);
   if(smartVisualDirectorToggle) smartVisualDirectorToggle.checked = options.smartVisualDirector !== false;
   if(referenceStyleEnabledToggle) referenceStyleEnabledToggle.checked = Boolean(options.referenceStyleEnabled && options.referenceStyleVideo);
   if(referenceStyleModeSelect) referenceStyleModeSelect.value = options.referenceStyleMode === 'reference' ? 'reference' : 'inspiration';
@@ -1059,7 +1061,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if(adaptiveDuckingToggle) adaptiveDuckingToggle.checked = options.adaptiveDucking !== false;
   if(dynamicPausesToggle) dynamicPausesToggle.checked = Boolean(options.dynamicPauses);
   if(dynamicPauseIntensity) dynamicPauseIntensity.value = options.dynamicPauseIntensity || 'conservative';
-  if(strongMomentToggle) strongMomentToggle.checked = options.strongMomentEnhance !== false;
+  if(strongMomentToggle) strongMomentToggle.checked = Boolean(options.strongMomentEnhance);
   if(renderRecoveryToggle) renderRecoveryToggle.checked = options.renderRecovery !== false;
   if(healthyThresholdInput) healthyThresholdInput.value = String(Number(options.healthyRenderThreshold || 70));
   if(options.renderPriority || options.renderExecutionProfile){
@@ -1068,15 +1070,15 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   state.renderBudgetEnabled = options.renderBudgetEnabled !== false;
   if(renderBudgetToggle) renderBudgetToggle.checked = state.renderBudgetEnabled;
   if(platformMasterProfileSelect) platformMasterProfileSelect.value = options.platformMasterProfile || 'youtube_long';
-  if(scoreVisualWindowsToggle) scoreVisualWindowsToggle.checked = options.scoreVisualWindows !== false;
-  if(adaptiveQualityBoostToggle) adaptiveQualityBoostToggle.checked = options.adaptiveQualityBoost !== false;
+  if(scoreVisualWindowsToggle) scoreVisualWindowsToggle.checked = Boolean(options.scoreVisualWindows);
+  if(adaptiveQualityBoostToggle) adaptiveQualityBoostToggle.checked = Boolean(options.adaptiveQualityBoost);
   if(queueAutoTestToggle) queueAutoTestToggle.checked = options.queueAutoTest !== false;
   if(autoDirectorToggle) autoDirectorToggle.checked = options.autoDirector !== false;
   if(semanticVisualIndexToggle) semanticVisualIndexToggle.checked = options.semanticVisualIndex !== false;
   if(channelLearningToggle) channelLearningToggle.checked = options.channelLearning !== false;
   if(energyEditingToggle) energyEditingToggle.checked = options.energyEditing !== false;
   if(antiRepeatToggle) antiRepeatToggle.checked = options.antiRepeat !== false;
-  if(continuityMatchToggle) continuityMatchToggle.checked = options.continuityMatch !== false;
+  if(continuityMatchToggle) continuityMatchToggle.checked = Boolean(options.continuityMatch);
   if(audioMasteringToggle) audioMasteringToggle.checked = options.audioMastering !== false;
   applyRenderPriorityUi();
   if(introModeSelect) introModeSelect.value = options.introMode || 'standard';
@@ -1191,10 +1193,13 @@ function snapshotProjectForRender(project){
     options.gpu = $('#gpuToggle') ? Boolean($('#gpuToggle').checked) : true;
   }
   if(typeof options.qualityBoost !== 'boolean'){
-    options.qualityBoost = qualityBoostToggle ? qualityBoostToggle.checked : true;
+    options.qualityBoost = qualityBoostToggle ? qualityBoostToggle.checked : false;
+  }
+  if(typeof options.visualCleanFilter !== 'boolean'){
+    options.visualCleanFilter = visualCleanFilterToggle ? visualCleanFilterToggle.checked : false;
   }
   if(!options.codec){
-    options.codec = $('#codecSelect')?.value || 'hevc';
+    options.codec = $('#codecSelect')?.value || 'h264';
   }
   if(!options.exportProfile){
     options.exportProfile = exportProfileSelect?.value || 'capcut_compact';
@@ -2978,12 +2983,13 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
   renderTimeEstimate.innerHTML = '<span>Tempo estimado</span><strong>Calculando perfis de render...</strong>';
   const options = {
     mode: state.mode,
-    codec: $('#codecSelect')?.value || 'hevc',
-    gpu: $('#gpuToggle')?.checked || false,
-    qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : true,
+    codec: $('#codecSelect')?.value || 'h264',
+    gpu: $('#gpuToggle') ? Boolean($('#gpuToggle').checked) : true,
+    qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : false,
+    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : false,
     smartVisualDirector: smartVisualDirectorToggle ? smartVisualDirectorToggle.checked : true,
-    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : true,
-    continuityOutliersOnly: true,
+    continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : false,
+    continuityOutliersOnly: false,
     audioMastering: audioMasteringToggle ? audioMasteringToggle.checked : true,
     autoSoundFx: autoSoundFxToggle ? autoSoundFxToggle.checked : true,
     allowAudioTrim: allowAudioTrimToggle ? allowAudioTrimToggle.checked : false,
@@ -3135,7 +3141,7 @@ function refreshExportProfileUi(){
   if(profile === 'compatibility' && codecSelect && codecSelect.value !== 'h264'){
     codecSelect.value = 'h264';
   }
-  const codec = codecSelect?.value || 'hevc';
+  const codec = codecSelect?.value || 'h264';
   const bitrate = exportBitrateFor(profile, state.mode, codec);
   const custom = profile === 'custom';
   if(!custom) videoBitrateInput.value = String(bitrate);
@@ -3327,7 +3333,7 @@ function projectChecks(){
   const noPreviewVideos = state.videos.filter(file => videoStatusOf(file).kind === 'no_preview').length;
   const checkingVideos = state.videos.filter(file => ['pending', 'checking', 'metadata_ok'].includes(videoStatusOf(file).kind)).length;
   const profile = exportProfileSelect?.value || 'capcut_compact';
-  const codec = $('#codecSelect')?.value || 'hevc';
+  const codec = $('#codecSelect')?.value || 'h264';
   const bitrate = Number(videoBitrateInput?.value || exportBitrateFor(profile, state.mode, codec));
   const estimatedMb = audioTotal > 0 ? Math.max(1, Math.round((bitrate * audioTotal / 8) / 1024 + audioTotal * 0.02)) : 0;
   const cta = selectedCtaAsset();
@@ -4760,12 +4766,15 @@ function setRenderProjectMeta({projectName = '', queueIndex = 0, renderLabel = '
   renderProjectMeta.textContent = parts.length ? parts.join(' - ') : 'Projeto: aguardando início';
 }
 
-function formatEtaSummary(eta, status = 'running'){
+function formatEtaSummary(eta, status = 'running', currentPercent = 0){
   if(!eta) return 'Tempo restante: calculando...';
-  const elapsed = formatTime(eta.elapsed_seconds || 0);
+  const elapsedSec = Number(eta.elapsed_seconds || 0);
+  const elapsed = formatTime(elapsedSec);
   if(status !== 'running') return `Tempo de render: ${elapsed}`;
   const budgetSec = Number(eta.budget_seconds || 0);
-  const limitText = budgetSec > 0 ? ` · limite ${formatTime(budgetSec)}` : '';
+  const limitText = budgetSec > 0 
+    ? (elapsedSec > budgetSec ? ' · finalizando etapas' : ` · limite ${formatTime(budgetSec)}`)
+    : '';
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
   const reason = String(eta.reason || '').toLowerCase();
   const isPreliminary = reason.includes('preliminar');
@@ -4776,10 +4785,14 @@ function formatEtaSummary(eta, status = 'running'){
   let max = Number(eta.remaining_max_seconds || 0);
   let rem = Number(eta.estimated_remaining_seconds || 0);
 
-  // Sanidade visual: quando o orçamento do modo está ativo, os tempos restantes não
-  // devem exibir previsões astronômicas que contradigam o limite do modo configurado.
-  if(budgetSec > 0){
-    const elapsedSec = Number(eta.elapsed_seconds || 0);
+  // Sanidade visual: calcula tempo restante de forma dinâmica e realista
+  if(budgetSec > 0 && elapsedSec >= budgetSec){
+    // Passou do budget estimado: nunca travar artificialmente em 10s!
+    const pct = Math.max(10, Math.min(99, Number(currentPercent || 0)));
+    rem = Math.max(15, Math.round((elapsedSec / (pct / 100)) - elapsedSec));
+    min = Math.round(rem * 0.85);
+    max = Math.round(rem * 1.25);
+  } else if(budgetSec > 0 && elapsedSec < budgetSec){
     const budgetRemaining = Math.max(15, (budgetSec * 1.25) - elapsedSec);
     if(max > budgetRemaining * 1.5){
       max = Math.round(budgetRemaining);
@@ -4788,18 +4801,20 @@ function formatEtaSummary(eta, status = 'running'){
     }
   }
 
-  if(stateName === 'variable' || min || max){
+  if(stateName === 'variable' && isPreliminary){
     if(min && max && max > min){
-      const prefix = isPreliminary ? 'estimativa preliminar' : 'restante estimado variável';
-      return `Decorrido no render ${elapsed} - ${prefix}: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+      return `Decorrido no render ${elapsed} - estimativa preliminar: ${formatTime(min)}-${formatTime(max)}${limitText}`;
     }
     if(rem > 0){
-      const prefix = isPreliminary ? 'estimativa preliminar' : 'restante aprox.';
-      return `Decorrido no render ${elapsed} - ${prefix}: ${formatTime(rem)}${limitText}`;
+      return `Decorrido no render ${elapsed} - estimativa preliminar: ~${formatTime(rem)}${limitText}`;
     }
   }
+
   if(rem > 0){
     return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(rem)}${limitText}`;
+  }
+  if(min && max && max > min){
+    return `Decorrido no render ${elapsed} - restante: ${formatTime(min)}-${formatTime(max)}${limitText}`;
   }
   return `Decorrido no render ${elapsed}${limitText}`;
 }
@@ -4818,6 +4833,11 @@ function outputValidationError(job){
 }
 
 function resetProgress({preserveMinimized = false} = {}){
+  if(state._etaLiveTimer){
+    clearInterval(state._etaLiveTimer);
+    state._etaLiveTimer = null;
+  }
+  state._currentEta = null;
   if(!preserveMinimized) modal.classList.remove('minimized');
   state.renderMaxPercent = 0;
   progressBar.style.width = '0%';
@@ -5267,14 +5287,14 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
   const options = {
     mode: optionValue('mode', state.mode),
     ratio: optionValue('ratio', $('#ratioSelect')?.value || '16:9'),
-    codec: optionValue('codec', $('#codecSelect')?.value || 'hevc'),
+    codec: optionValue('codec', $('#codecSelect')?.value || 'h264'),
     exportProfile: optionValue('exportProfile', exportProfileSelect?.value || 'capcut_compact'),
     videoBitrateKbps: Number(optionValue('videoBitrateKbps', videoBitrateInput?.value || 2500)),
     rateControl: 'vbr',
     transitions: optionValue('transitions', $('#transitionSelect')?.value || 'off'),
     zoom: optionValue('zoom', $('#zoomSelect')?.value || 'off'),
-    gpu: Boolean(optionValue('gpu', $('#gpuToggle')?.checked || false)),
-    qualityBoost: optionValue('qualityBoost', qualityBoostToggle ? qualityBoostToggle.checked : true) !== false,
+    gpu: Boolean(optionValue('gpu', $('#gpuToggle') ? $('#gpuToggle').checked : true)),
+    qualityBoost: Boolean(optionValue('qualityBoost', qualityBoostToggle ? qualityBoostToggle.checked : false)),
     smartVisualDirector: smartDirectorEnabled,
     styleSource: optionValue('styleSource', 'glide_package'),
     referenceStyleEnabled: Boolean(optionValue('referenceStyleEnabled', referenceStyleEnabledToggle ? referenceStyleEnabledToggle.checked : false)),
@@ -5282,7 +5302,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     referenceStyleMode: optionValue('referenceStyleMode', referenceStyleModeSelect?.value === 'reference' ? 'reference' : 'inspiration') === 'reference' ? 'reference' : 'inspiration',
     visualLanguagePackage: optionValue('visualLanguagePackage', visualLanguagePackageSelect?.value || 'dark_doc'),
     styleIntensity: optionValue('styleIntensity', styleIntensitySelect?.value || 'balanced'),
-    visualCleanFilter: true,
+    visualCleanFilter: Boolean(optionValue('visualCleanFilter', visualCleanFilterToggle ? visualCleanFilterToggle.checked : false)),
     visualFilterLevel: normalizedVisualFilterLevel(optionValue('visualFilterLevel', visualFilterLevelSelect?.value || 'normal')),
     adaptiveVisualFilter: Boolean(optionValue('adaptiveVisualFilter', adaptiveVisualFilterToggle?.checked || false)),
     voiceNormalize: optionValue('voiceNormalize', voiceNormalizeToggle ? voiceNormalizeToggle.checked : true) !== false,
@@ -5310,28 +5330,28 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     adaptiveDucking: true,
     dynamicPauses: optionValue('dynamicPauses', dynamicPausesToggle ? dynamicPausesToggle.checked : false) !== false,
     dynamicPauseIntensity: 'disabled',
-    strongMomentEnhance: optionValue('strongMomentEnhance', strongMomentToggle ? strongMomentToggle.checked : true) !== false,
+    strongMomentEnhance: Boolean(optionValue('strongMomentEnhance', strongMomentToggle ? strongMomentToggle.checked : false)),
     renderRecovery: optionValue('renderRecovery', renderRecoveryToggle ? renderRecoveryToggle.checked : true) !== false,
     directorDecisionMode: 'balanced',
     healthyRenderThreshold: Number(optionValue('healthyRenderThreshold', healthyThresholdInput?.value || 70)),
     renderBudgetEnabled: optionValue('renderBudgetEnabled', state.renderBudgetEnabled) !== false,
     renderBudgetTurboMultiplier: Number(optionValue('renderBudgetTurboMultiplier', 1.35)) || 1.35,
     platformMasterProfile: optionValue('platformMasterProfile', platformMasterProfileSelect?.value || 'youtube_long'),
-    scoreVisualWindows: optionValue('scoreVisualWindows', scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : true) !== false,
-    adaptiveQualityBoost: optionValue('adaptiveQualityBoost', adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : true) !== false,
+    scoreVisualWindows: Boolean(optionValue('scoreVisualWindows', scoreVisualWindowsToggle ? scoreVisualWindowsToggle.checked : false)),
+    adaptiveQualityBoost: Boolean(optionValue('adaptiveQualityBoost', adaptiveQualityBoostToggle ? adaptiveQualityBoostToggle.checked : false)),
     queueAutoTest: optionValue('queueAutoTest', queueAutoTestToggle ? queueAutoTestToggle.checked : true) !== false,
     autoDirector: smartDirectorEnabled,
     semanticVisualIndex: optionValue('semanticVisualIndex', semanticVisualIndexToggle ? semanticVisualIndexToggle.checked : true) !== false,
     channelLearning: optionValue('channelLearning', channelLearningToggle ? channelLearningToggle.checked : true) !== false,
     energyEditing: optionValue('energyEditing', energyEditingToggle ? energyEditingToggle.checked : true) !== false,
     antiRepeat: optionValue('antiRepeat', antiRepeatToggle ? antiRepeatToggle.checked : true) !== false,
-    continuityMatch: optionValue('continuityMatch', continuityMatchToggle ? continuityMatchToggle.checked : true) !== false,
-    continuityOutliersOnly: true,
+    continuityMatch: Boolean(optionValue('continuityMatch', continuityMatchToggle ? continuityMatchToggle.checked : false)),
+    continuityOutliersOnly: false,
     subtitleEditorialGrammar: true,
     audioMastering: optionValue('audioMastering', audioMasteringToggle ? audioMasteringToggle.checked : true) !== false,
     renderPriority: snapshotRenderPriority,
     renderExecutionProfile: 'studio_render',
-    motionGraphicsPremium: optionValue('motionGraphicsPremium', true) !== false,
+    motionGraphicsPremium: Boolean(optionValue('motionGraphicsPremium', false)),
     turboPolicy: 'studio_render',
     estimatedDurationSeconds: (() => {
       const durationMap = projectSnapshot?.durationMap instanceof Map ? projectSnapshot.durationMap : state.durations;
@@ -5589,7 +5609,8 @@ async function pollStatus(jobId, context = {}){
   let done = false;
   let consecutiveErrors = 0;
   const MAX_CONSECUTIVE_ERRORS = 12; // ~20-34s of failed polls before giving up
-  while(!done){
+  try{
+    while(!done){
     // Allow abort if cancel was requested and backend is unreachable
     if(state.renderCancelRequested && consecutiveErrors > 0){
       done = true;
@@ -5629,7 +5650,30 @@ async function pollStatus(jobId, context = {}){
       renderMsg.textContent = cleanDisplayText(j.message || '');
       if(renderEta){
         if(j.eta_summary){
-          renderEta.textContent = formatEtaSummary(j.eta_summary, j.status);
+          state._currentEta = {...j.eta_summary, _receivedAt: Date.now()};
+          renderEta.textContent = formatEtaSummary(j.eta_summary, j.status, pct);
+          if(!state._etaLiveTimer && j.status === 'running'){
+            state._etaLiveTimer = setInterval(() => {
+              if(!state._currentEta || !modal.classList.contains('show')){
+                if(state._etaLiveTimer){
+                  clearInterval(state._etaLiveTimer);
+                  state._etaLiveTimer = null;
+                }
+                return;
+              }
+              const deltaSec = Math.floor((Date.now() - state._currentEta._receivedAt) / 1000);
+              if(deltaSec > 0){
+                const liveEta = {
+                  ...state._currentEta,
+                  elapsed_seconds: (state._currentEta.elapsed_seconds || 0) + deltaSec,
+                  estimated_remaining_seconds: Math.max(0, (state._currentEta.estimated_remaining_seconds || 0) - deltaSec),
+                  remaining_min_seconds: Math.max(0, (state._currentEta.remaining_min_seconds || 0) - deltaSec),
+                  remaining_max_seconds: Math.max(0, (state._currentEta.remaining_max_seconds || 0) - deltaSec),
+                };
+                if(renderEta) renderEta.textContent = formatEtaSummary(liveEta, 'running', state.renderMaxPercent);
+              }
+            }, 1000);
+          }
         } else if(j.status === 'running'){
           // Fallback: show elapsed time even when eta_summary is missing
           const elapsedSecs = j.elapsed_seconds != null
@@ -5829,6 +5873,12 @@ async function pollStatus(jobId, context = {}){
     if(!done){
       const pollDelay = modal.classList.contains('minimized') ? 2800 : 1700;
       await new Promise(resolve => setTimeout(resolve, pollDelay));
+    }
+  }
+  }finally{
+    if(state._etaLiveTimer){
+      clearInterval(state._etaLiveTimer);
+      state._etaLiveTimer = null;
     }
   }
 }
@@ -7898,7 +7948,7 @@ function applyWorkflowPreset(value){
     btn.classList.toggle('active', btn.dataset.mode === preset.mode);
   });
   state.mode = preset.mode;
-  if(qualityBoostToggle) qualityBoostToggle.checked = true;
+  if(qualityBoostToggle) qualityBoostToggle.checked = Boolean(preset.qualityBoost);
   if(smartVisualDirectorToggle) smartVisualDirectorToggle.checked = true;
   if(visualFilterLevelSelect) visualFilterLevelSelect.value = 'normal';
   if(adaptiveVisualFilterToggle) adaptiveVisualFilterToggle.checked = false;
@@ -7943,16 +7993,16 @@ async function autoFixProject(){
   state.audioOrderEdited = false;
   state.backgroundOrderEdited = false;
   if(exportProfileSelect && exportProfileSelect.value === 'custom') exportProfileSelect.value = 'capcut_compact';
-  if($('#codecSelect')) $('#codecSelect').value = 'hevc';
-  if($('#zoomSelect')) $('#zoomSelect').value = 'light';
-  if($('#transitionSelect') && $('#transitionSelect').value === 'off') $('#transitionSelect').value = 'fade';
+  if($('#codecSelect')) $('#codecSelect').value = 'h264';
+  if($('#zoomSelect')) $('#zoomSelect').value = 'off';
+  if($('#transitionSelect') && $('#transitionSelect').value === 'off') $('#transitionSelect').value = 'off';
   if(ctaPositionPreset){
     const subPos = Number(subtitlePosition?.value || 16);
     ctaPositionPreset.value = subPos <= 18 ? 'top_right' : 'bottom_right';
     state.ctaPositionPreset = ctaPositionPreset.value;
     localStorage.setItem('glide_cta_position', state.ctaPositionPreset);
   }
-  if(qualityBoostToggle) qualityBoostToggle.checked = true;
+  if(qualityBoostToggle) qualityBoostToggle.checked = false;
   if(smartVisualDirectorToggle) smartVisualDirectorToggle.checked = true;
   if(visualFilterLevelSelect) visualFilterLevelSelect.value = 'normal';
   if(adaptiveVisualFilterToggle) adaptiveVisualFilterToggle.checked = false;
@@ -8270,6 +8320,7 @@ if(autoSoundFxToggle){
   [platformMasterProfileSelect, 'glide_platform_master_profile'],
   [scoreVisualWindowsToggle, 'glide_score_visual_windows'],
   [adaptiveQualityBoostToggle, 'glide_adaptive_quality_boost'],
+  [visualCleanFilterToggle, 'glide_visual_clean_filter'],
   [queueAutoTestToggle, 'glide_queue_auto_test'],
 ].forEach(([el, key]) => {
   if(!el) return;

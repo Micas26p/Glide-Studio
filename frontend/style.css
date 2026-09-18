@@ -405,11 +405,21 @@ body[data-theme-resolved="light"] .editor-intro-copy span{
   color:#059669;
 }
 
+/* Focus-visible accessibility */
+*:focus-visible{
+  outline:2px solid var(--accent);
+  outline-offset:2px;
+}
+
 /* Thin modern studio scrollbars */
+*{
+  scrollbar-width:thin;
+  scrollbar-color:rgba(255,255,255,.16) transparent;
+}
 ::-webkit-scrollbar{width:8px;height:8px}
 ::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:rgba(255,255,255,.14);border-radius:4px}
-::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.24)}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.16);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:rgba(255,255,255,.28)}
 
 .sidebar{position:fixed;inset:0 auto 0 0;width:260px;background:var(--sidebar-bg);border-right:1px solid var(--border-subtle);padding:20px 14px;z-index:8;transition:width var(--duration-normal) var(--ease-out),padding var(--duration-normal) var(--ease-out),box-shadow var(--duration-normal) var(--ease-out);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);box-shadow:4px 0 28px rgba(0,0,0,.22)}
 .sidebar-toggle{position:absolute;right:-14px;top:24px;width:28px;height:28px;border:1px solid var(--border-default);border-radius:50%;background:var(--bg-card);color:var(--muted);display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow-sm);z-index:12;transition:background var(--duration-fast) ease,border-color var(--duration-fast) ease,color var(--duration-fast) ease,box-shadow var(--duration-fast) ease,transform var(--duration-fast) ease}
@@ -436,22 +446,25 @@ body.sidebar-collapsed .render-dock{left:88px}
   border-radius:10px;
   display:block;
   flex:0 0 auto;
-  background:url('/assets/glide_studio_icon_128.png') center/contain no-repeat;
-  filter:drop-shadow(0 4px 12px rgba(0,0,0,.30));
-  image-rendering:auto;
+  background:url('/assets/glide_studio_icon_256.png') center/contain no-repeat;
+  filter:drop-shadow(0 4px 14px rgba(0,0,0,.35));
+  image-rendering:-webkit-optimize-contrast;
+  image-rendering:crisp-edges;
   -webkit-font-smoothing:antialiased;
-  transition:transform var(--duration-fast) ease,filter var(--duration-fast) ease;
+  transition:transform var(--duration-fast) var(--ease-out),filter var(--duration-fast) var(--ease-out);
 }
 .brand-mark:hover{
-  transform:scale(1.05);
-  filter:drop-shadow(0 0 12px var(--accent-glow)) drop-shadow(0 4px 14px rgba(0,0,0,.35));
+  transform:scale(1.06);
+  filter:drop-shadow(0 0 14px var(--accent-glow)) drop-shadow(0 6px 16px rgba(0,0,0,.40));
 }
 .hero-mark{
   width:50px!important;
   height:50px!important;
   border-radius:12px;
-  background:url('/assets/glide_studio_icon_128.png') center/contain no-repeat;
-  filter:drop-shadow(0 4px 18px var(--accent-glow)) drop-shadow(0 2px 8px rgba(0,0,0,.40));
+  background:url('/assets/glide_studio_icon_256.png') center/contain no-repeat;
+  filter:drop-shadow(0 4px 18px var(--accent-glow)) drop-shadow(0 2px 10px rgba(0,0,0,.45));
+  image-rendering:-webkit-optimize-contrast;
+  image-rendering:crisp-edges;
 }
 .brand strong{display:block;font-size:16px;font-weight:800;letter-spacing:-.015em;color:var(--text)}
 .brand span{display:block;margin-top:2px;color:var(--muted);font-size:11px;font-weight:600}

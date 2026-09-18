@@ -459,8 +459,8 @@
           </label>
           <label class="advanced-only">Codec
             <select id="codecSelect">
+              <option value="h264" selected>H.264 MP4 (Alta velocidade GPU)</option>
               <option value="hevc">HEVC/H.265 MP4</option>
-              <option value="h264">H.264 MP4 compatível</option>
             </select>
           </label>
           <label>Perfil de exportação
@@ -524,16 +524,13 @@
           </label>
         </div>
         <div class="toggle-row advanced-only">
-          <label class="toggle"><input id="gpuToggle" type="checkbox" /> <span>Usar NVIDIA NVENC se disponível</span></label>
-          <label class="toggle"><input id="qualityBoostToggle" type="checkbox" checked /> <span>Quality Boost natural</span></label>
+          <label class="toggle"><input id="gpuToggle" type="checkbox" checked /> <span>Usar NVIDIA NVENC se disponível</span></label>
+          <label class="toggle"><input id="qualityBoostToggle" type="checkbox" /> <span>Quality Boost natural</span></label>
           <label class="toggle director-source-toggle"><input id="smartVisualDirectorToggle" type="checkbox" checked /> <span>Diretor Visual Inteligente</span></label>
-          <div class="system-native-badge" title="Filtro Anti-Poluição Nativo: elimina textos excessivos, gráficos/dados e apresentadores fixos. Possui Salvaguarda Dinâmica que interrompe descartes automaticamente para nunca sacrificar a duração final do vídeo, preservando sempre o início 100% limpo.">
-            <span class="badge-status-dot"></span>
-            <span>Anti-Poluição Visual: Nativo &amp; Ativo</span>
-          </div>
+          <label class="toggle" title="Filtro Anti-Poluição: elimina textos excessivos, gráficos e apresentadores. Desmarque para máxima velocidade quando as mídias já estiverem limpas."><input id="visualCleanFilterToggle" type="checkbox" /> <span>Filtro Anti-Poluição Visual</span></label>
           <select id="visualFilterLevelSelect" style="display:none" aria-hidden="true"><option value="normal" selected>Normal</option></select>
-          <input id="adaptiveVisualFilterToggle" type="checkbox" style="display:none" aria-hidden="true" checked />
-          <span id="visualFilterHint" class="sr-only">Anti-Poluição nativo e obrigatório no sistema com salvaguarda dinâmica de duração.</span>
+          <input id="adaptiveVisualFilterToggle" type="checkbox" style="display:none" aria-hidden="true" />
+          <span id="visualFilterHint" class="sr-only">Filtro Anti-Poluição configurável.</span>
           <label class="toggle"><input id="voiceNormalizeToggle" type="checkbox" checked /> <span>Voz nivelada</span></label>
           <label class="toggle"><input id="autoSoundFxToggle" type="checkbox" checked /> <span>Efeitos sonoros automáticos</span></label>
           <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render. Desmarcado por padrão para preservar 100% da narração."><input id="allowAudioTrimToggle" type="checkbox" /> <span>Sacrificar áudio se faltar mídia</span></label>
@@ -1112,11 +1109,11 @@
           </select>
         </label>
         <label class="toggle compact" title="Analisa janelas internas para usar apenas o melhor trecho de cada clipe quando necessário">
-          <input type="checkbox" id="scoreVisualWindowsToggle" checked />
+          <input type="checkbox" id="scoreVisualWindowsToggle" />
           <span>Score por segundo</span>
         </label>
         <label class="toggle compact" title="Aplica Quality Boost completo apenas nos trechos que realmente precisam">
-          <input type="checkbox" id="adaptiveQualityBoostToggle" checked />
+          <input type="checkbox" id="adaptiveQualityBoostToggle" />
           <span>Boost adaptativo</span>
         </label>
         <label class="toggle compact" title="Roda mini-render técnico antes de iniciar a fila para evitar falhas tardias">
@@ -1254,8 +1251,8 @@
       <div class="render-steps" id="renderSteps">
         <span data-stage="preparing">Preparando</span>
         <span data-stage="uploading">Copiando</span>
-        <span data-stage="audio">Áudio</span>
         <span data-stage="rendering">Clipes</span>
+        <span data-stage="audio">Áudio</span>
         <span data-stage="cta">CTA + Textos + Legendas</span>
         <span data-stage="muxing">Finalizando</span>
       </div>
