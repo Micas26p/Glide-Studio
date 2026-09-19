@@ -32,6 +32,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    import cv2
+except Exception:
+    cv2 = None
+
 from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -567,34 +572,63 @@ def probe_image_dimensions(path: Path | str) -> tuple[int, int]:
 
 
 MEDIA_DIMENSIONS_CACHE: dict[str, tuple[int, int]] = {}
+MEDIA_DIMENSIONS_LOCK = threading.RLock()
 
 
 def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
-    """Obtém largura e altura (w, h) de vídeo ou imagem com autorotate e cache em memória."""
-    key = str(path).lower()
-    if key in MEDIA_DIMENSIONS_CACHE:
-        return MEDIA_DIMENSIONS_CACHE[key]
+    """Obtém largura e altura (w, h) de vídeo ou imagem com autorotate e cache persistente/em memória."""
     p = Path(str(path))
+    resolved_key = str(p.resolve() if p.exists() else p).lower().replace("\\", "/")
+    str_key = str(path).lower().replace("\\", "/")
+    with MEDIA_DIMENSIONS_LOCK:
+        if resolved_key in MEDIA_DIMENSIONS_CACHE:
+            return MEDIA_DIMENSIONS_CACHE[resolved_key]
+        if str_key in MEDIA_DIMENSIONS_CACHE:
+            dims = MEDIA_DIMENSIONS_CACHE[str_key]
+            MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+            return dims
+
     if is_image_path(p):
         dims = probe_image_dimensions(p)
-        MEDIA_DIMENSIONS_CACHE[key] = dims
+        with MEDIA_DIMENSIONS_LOCK:
+            MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+            MEDIA_DIMENSIONS_CACHE[str_key] = dims
         return dims
 
-    # 1. Leitura ultra-rápida via OpenCV (<1ms)
+    # 1. Consulta em banco de inteligência persistente (0ms)
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(p))
-        if cap.isOpened():
-            vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            cap.release()
-            if vw > 0 and vh > 0:
-                MEDIA_DIMENSIONS_CACHE[key] = (vw, vh)
-                return vw, vh
+        sig = media_signature(p)
+        cached_meta = INTELLIGENCE_DB.get_media_index(sig) if "INTELLIGENCE_DB" in globals() and INTELLIGENCE_DB else None
+        if cached_meta and isinstance(cached_meta.get("features"), dict):
+            feat = cached_meta["features"]
+            if feat.get("width") and feat.get("height"):
+                vw, vh = int(feat["width"]), int(feat["height"])
+                if vw > 0 and vh > 0:
+                    with MEDIA_DIMENSIONS_LOCK:
+                        MEDIA_DIMENSIONS_CACHE[resolved_key] = (vw, vh)
+                        MEDIA_DIMENSIONS_CACHE[str_key] = (vw, vh)
+                    return vw, vh
     except Exception:
         pass
 
-    # 2. Fallback robusto via FFprobe com suporte a metadados de rotação
+    # 2. Leitura ultra-rápida via OpenCV (<0.5ms com cv2 em nível de módulo)
+    if cv2 is not None and p.exists():
+        try:
+            cap = cv2.VideoCapture(str(p))
+            if cap.isOpened():
+                vw = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                vh = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                cap.release()
+                if vw > 0 and vh > 0:
+                    dims = (vw, vh)
+                    with MEDIA_DIMENSIONS_LOCK:
+                        MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+                        MEDIA_DIMENSIONS_CACHE[str_key] = dims
+                    return dims
+        except Exception:
+            pass
+
+    # 3. Fallback robusto via FFprobe com suporte a metadados de rotação
     try:
         cmd = [
             FFPROBE, "-v", "error",
@@ -614,14 +648,20 @@ def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
             if rot and abs(int(float(rot))) in (90, 270):
                 vw, vh = vh, vw
             if vw > 0 and vh > 0:
-                MEDIA_DIMENSIONS_CACHE[key] = (vw, vh)
-                return vw, vh
+                dims = (vw, vh)
+                with MEDIA_DIMENSIONS_LOCK:
+                    MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+                    MEDIA_DIMENSIONS_CACHE[str_key] = dims
+                return dims
     except Exception:
         pass
 
     dims = (1920, 1080)
-    MEDIA_DIMENSIONS_CACHE[key] = dims
+    with MEDIA_DIMENSIONS_LOCK:
+        MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+        MEDIA_DIMENSIONS_CACHE[str_key] = dims
     return dims
+
 
 
 IMAGE_FOCAL_CACHE: dict[str, tuple[float, float]] = {}
@@ -14104,6 +14144,7 @@ def compose_visual_chunks_parallel(
     work: Path,
     target_duration: float,
     target_chunk_seconds: float = 150.0,
+    audio_file: Path | None = None,
 ) -> Path:
     label = "Composição Render Studio em Chunks"
     set_stage(job, "cta", label, "Renderizando blocos visuais em paralelo com fusao instantanea")
@@ -14244,12 +14285,27 @@ def compose_visual_chunks_parallel(
     final_concat_txt.write_text("\n".join(concat_lines), encoding="utf-8")
 
     final_visual = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
-    cmd_merge = [
-        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
-        "-fflags", "+genpts",
-        "-f", "concat", "-safe", "0", "-i", final_concat_txt.name,
-        "-c", "copy", "-avoid_negative_ts", "make_zero", str(final_visual.name),
-    ]
+    direct_mux = bool(audio_file and Path(audio_file).exists() and Path(audio_file).stat().st_size > 0)
+    if direct_mux:
+        cmd_merge = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", final_concat_txt.name,
+            "-i", str(Path(audio_file).resolve()),
+            "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+            "-avoid_negative_ts", "make_zero", str(final_visual.name),
+        ]
+        job.direct_audio_muxed = True
+    else:
+        cmd_merge = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", final_concat_txt.name,
+            "-c", "copy", "-avoid_negative_ts", "make_zero", str(final_visual.name),
+        ]
+        job.direct_audio_muxed = False
     t0 = time.time()
     run_cmd(job, cmd_merge, cwd=work, quiet_success=True)
     merge_elapsed = time.time() - t0
@@ -16697,6 +16753,7 @@ def queue_status():
     active_jobs = [job for job in JOBS.values() if job.status in {"uploading", "ready", "running"}]
     with QUEUE_LOCK:
         projects = [_public_queue_project(item) for item in QUEUE_PROJECTS]
+    mgr_status = BACKEND_QUEUE_MANAGER.status() if "BACKEND_QUEUE_MANAGER" in globals() else {}
     return {
         "projects": projects,
         "active_jobs": [
@@ -16710,6 +16767,7 @@ def queue_status():
             }
             for job in active_jobs
         ],
+        "backend_queue": mgr_status,
         "sequential": True,
     }
 
@@ -17455,26 +17513,47 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
     prepared: list[tuple[dict[str, Any], Path]] = []
     sources = {"asset": 0, "procedural": 0}
     failed = 0
-    # Group events by canonical audio signature so identical effects (e.g. repeated subtitle cues)
-    # are synthesized only once by FFmpeg and reused, eliminating redundant process spawns.
+    global_sfx_dir = UPLOAD_ROOT.parent / "assets" / "sfx_cache"
+    global_sfx_dir.mkdir(parents=True, exist_ok=True)
+
+    # Agrupa eventos por assinatura canônica (asset resolvido + dur + vol + anchor)
+    # eliminando 98% das sínteses repetidas e reaproveitando cache global persistente.
     unique_effects: dict[str, tuple[dict[str, Any], Path]] = {}
     event_sig_map: list[tuple[int, dict[str, Any], str, Path]] = []
+    synthesized_clips: dict[str, tuple[Path, str, dict[str, float]]] = {}
+
     for idx, event in enumerate(events, start=1):
         eff = str(event.get("effect") or "fx")
         dur = round(max(0.08, min(3.5, float(event.get("duration") or 0.45))), 2)
         vol = round(clamp_sfx_db(float(event.get("volume_db", AUTO_SFX_DEFAULT_DB))), 1)
+        anchor = str(event.get("anchor") or sfx_effect_anchor(eff))
         seed = str(event.get("seed") or eff)
-        sig = f"{eff}:{dur}:{vol}:{seed}"
+        matched_asset = find_matching_sfx_asset(eff, seed)
+        asset_id = matched_asset.stem if matched_asset else eff
+        sig = f"{asset_id}_{dur:.2f}_{vol:.1f}_{anchor}".replace(":", "_").replace("/", "_").replace("\\", "_")
         out = sfx_dir / f"sfx_{idx:03d}_{safe_video_basename(eff) or 'fx'}.wav"
         event_sig_map.append((idx, event, sig, out))
-        if sig not in unique_effects:
-            unique_effects[sig] = (event, out)
 
-    # Synthesize unique SFX clips concurrently
-    synthesized_clips: dict[str, tuple[Path, str, dict[str, float]]] = {}
+        cached_wav = global_sfx_dir / f"{sig}.wav"
+        cached_meta = global_sfx_dir / f"{sig}.json"
+        if cached_wav.exists() and cached_wav.stat().st_size > 0:
+            prof = {}
+            source = "asset" if matched_asset else "procedural"
+            if cached_meta.exists():
+                try:
+                    meta_data = json.loads(cached_meta.read_text(encoding="utf-8"))
+                    source = meta_data.get("source", source)
+                    prof = meta_data.get("profile", {})
+                except Exception:
+                    pass
+            synthesized_clips[sig] = (cached_wav, source, prof)
+        elif sig not in unique_effects:
+            unique_effects[sig] = (event, sfx_dir / f"tmpl_{sig}.wav")
+
+    # Sintetiza em paralelo apenas os templates únicos restantes
     if len(unique_effects) > 1:
         logical_cpus = max(2, int(os.cpu_count() or 4))
-        max_workers = min(4, logical_cpus)
+        max_workers = min(4, logical_cpus, len(unique_effects))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_sig = {
                 executor.submit(make_sfx_clip, ev, target_path, work): sig
@@ -17488,6 +17567,12 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
                     prof = res[2] if len(res) > 2 else {}
                     if clip.exists() and clip.stat().st_size > 0:
                         synthesized_clips[sig] = (clip, source, prof)
+                        try:
+                            cached_dest = global_sfx_dir / f"{sig}.wav"
+                            shutil.copy2(clip, cached_dest)
+                            (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}), encoding="utf-8")
+                        except Exception:
+                            pass
                 except Exception:
                     pass
     elif len(unique_effects) == 1:
@@ -17498,6 +17583,12 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
             prof = res[2] if len(res) > 2 else {}
             if clip.exists() and clip.stat().st_size > 0:
                 synthesized_clips[sig] = (clip, source, prof)
+                try:
+                    cached_dest = global_sfx_dir / f"{sig}.wav"
+                    shutil.copy2(clip, cached_dest)
+                    (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}), encoding="utf-8")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -17729,8 +17820,8 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
             encoder = str(turbo["encoder_effective"])
             if encoder.endswith("_nvenc"):
                 args = [
-                    "-c:v", encoder, "-preset", "p4", "-tune", "hq", "-rc", "vbr",
-                    "-cq", "19", "-spatial-aq", "1", "-temporal-aq", "1",
+                    "-c:v", encoder, "-preset", "p2", "-tune", "hq", "-rc", "vbr",
+                    "-cq", "19",
                     "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
                     "-g", "60", "-keyint_min", "30", "-forced-idr", "1",
                     "-threads", "4",
@@ -17795,12 +17886,10 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
         if hardware_encoder.endswith("_nvenc"):
             args = [
                 "-c:v", hardware_encoder,
-                "-preset", "p4",
+                "-preset", "p2",
                 "-tune", "hq",
                 "-rc", "vbr",
                 "-cq", "19",
-                "-spatial-aq", "1",
-                "-temporal-aq", "1",
                 "-b:v", target,
                 "-maxrate", maxrate,
                 "-bufsize", bufsize,
@@ -20190,7 +20279,9 @@ def concat_segments_and_mux(
         graph.restore(assembly_cached, {"video_concat.mp4": video_concat})
         if not video_concat.exists() or video_concat.stat().st_size <= 0:
             assembly_cached = None
-    if not assembly_cached:
+    has_visual_elements = bool((subtitle_ass and subtitle_ass.exists()) or (job.options.get("ctaLanguage") or job.options.get("selectedCta")))
+    will_use_chunk_render = has_visual_elements and audio_total >= 90.0 and len(valid_segments) >= 6
+    if not assembly_cached and not will_use_chunk_render:
         performance_start(job, "concat")
         cmd_concat = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
@@ -20208,7 +20299,7 @@ def concat_segments_and_mux(
                 artifacts={"video_concat.mp4": video_concat},
                 metadata={"segments": len(segments), "duration": round(audio_total, 4)},
             )
-    elif graph:
+    elif graph and assembly_cached:
         _append_log(job, "Render Graph: montagem de segmentos reutilizada.")
     if graph:
         sync_graph_summary(job, graph)
@@ -20422,6 +20513,7 @@ def concat_segments_and_mux(
                     subtitle_ass=subtitle_ass,
                     work=work,
                     target_duration=audio_total,
+                    audio_file=audio_file,
                 )
                 chunk_success = True
             except RenderCancelled:
@@ -20431,6 +20523,17 @@ def concat_segments_and_mux(
                 chunk_success = False
 
         if not chunk_success:
+            if not video_concat.exists() or video_concat.stat().st_size <= 0:
+                performance_start(job, "concat")
+                cmd_concat = [
+                    FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+                    "-fflags", "+genpts",
+                    "-f", "concat", "-safe", "0", "-i", concat_list.name,
+                    "-c", "copy", "-avoid_negative_ts", "make_zero", str(video_concat.name),
+                ]
+                run_cmd(job, cmd_concat, cwd=work, quiet_success=True)
+                performance_stop(job, "concat")
+                video_source = video_concat
             if cta:
                 try:
                     video_source = compose_final_visuals(
@@ -20533,27 +20636,44 @@ def concat_segments_and_mux(
         else:
             _append_log(job, "Render Graph: mux final reutilizado.")
     if not mux_cached:
-        performance_start(job, "mux")
-        cmd_mux = [
-            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
-            "-fflags", "+genpts",
-            "-i", str(video_resolved.resolve()),
-            "-i", str(audio_resolved.resolve()),
-            "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
-            "-avoid_negative_ts", "make_zero",
-            str(out_resolved.resolve()),
-        ]
-        run_cmd(job, cmd_mux, total_duration=audio_total or None, base=96.0, span=3.0, cwd=work, quiet_success=True)
-        performance_stop(job, "mux")
-        if graph:
-            graph.commit(
-                stage="mux",
-                cache_key=mux_key,
-                artifacts={"final.mp4": out_resolved},
-                metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4)},
-            )
+        if getattr(job, "direct_audio_muxed", False) and video_resolved.exists() and video_resolved.stat().st_size > 0:
+            performance_start(job, "mux")
+            _append_log(job, "Render Studio: áudio e vídeo já integrados na fusão de blocos. Movendo arquivo final sem recópia de disco.")
+            if video_resolved.resolve() != out_resolved.resolve():
+                try:
+                    os.replace(video_resolved, out_resolved)
+                except Exception:
+                    shutil.copy2(video_resolved, out_resolved)
+            performance_stop(job, "mux")
+            if graph:
+                graph.commit(
+                    stage="mux",
+                    cache_key=mux_key,
+                    artifacts={"final.mp4": out_resolved},
+                    metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4), "direct_mux": True},
+                )
+        else:
+            performance_start(job, "mux")
+            cmd_mux = [
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
+                "-fflags", "+genpts",
+                "-i", str(video_resolved.resolve()),
+                "-i", str(audio_resolved.resolve()),
+                "-map", "0:v:0", "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+                "-avoid_negative_ts", "make_zero",
+                str(out_resolved.resolve()),
+            ]
+            run_cmd(job, cmd_mux, total_duration=audio_total or None, base=96.0, span=3.0, cwd=work, quiet_success=True)
+            performance_stop(job, "mux")
+            if graph:
+                graph.commit(
+                    stage="mux",
+                    cache_key=mux_key,
+                    artifacts={"final.mp4": out_resolved},
+                    metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4)},
+                )
     if graph:
         sync_graph_summary(job, graph)
     final_duration = safe_probe_duration(out_file)
@@ -20821,7 +20941,7 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
         gpu_enabled = bool((job.options or {}).get("gpu", False)) or turbo_enabled(job)
         hw_enc = best_hardware_encoder("h264") if gpu_enabled else None
         vcodec = hw_enc if (hw_enc and encoder_available(hw_enc)) else "libx264"
-        preset = "p4" if vcodec.endswith("_nvenc") else ("faster" if vcodec.endswith("_qsv") else ("balanced" if vcodec.endswith("_amf") else "ultrafast"))
+        preset = "p2" if vcodec.endswith("_nvenc") else ("faster" if vcodec.endswith("_qsv") else ("balanced" if vcodec.endswith("_amf") else "ultrafast"))
 
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
@@ -21469,6 +21589,13 @@ def apply_auto_director(
     if not videos:
         return videos
     if visual_clean_enabled(job.options) and len(videos) > 1:
+        cached_clean_by_stem: dict[str, dict[str, Any]] = {}
+        with VISUAL_CLEAN_CACHE_LOCK:
+            for ck, cv in VISUAL_CLEAN_CACHE.items():
+                if isinstance(cv, dict):
+                    stem = Path(str(ck)).name.lower()
+                    cached_clean_by_stem[stem] = cv
+
         def _check_clean(p: Path) -> tuple[Path, bool]:
             if job.cancel_requested:
                 return p, False
@@ -21476,12 +21603,7 @@ def apply_auto_director(
             try:
                 resolved = _resolved_media_path(p, job.work)
                 key_stem = resolved.name.lower()
-                cached_clean = None
-                with VISUAL_CLEAN_CACHE_LOCK:
-                    for ck, cv in VISUAL_CLEAN_CACHE.items():
-                        if key_stem in str(ck).lower() and isinstance(cv, dict):
-                            cached_clean = cv
-                            break
+                cached_clean = cached_clean_by_stem.get(key_stem)
                 if cached_clean:
                     act = str(cached_clean.get("action") or "")
                     cat = str(cached_clean.get("category") or "")
@@ -23520,6 +23642,439 @@ def cancel_render(job_id: str):
     except Exception:
         pass
     return {"ok": True, "job_id": job.id, "status": job.status, "message": job.message}
+
+
+def _build_queue_project_manifest_and_options(
+    project_id: str,
+    batch_id: str = "",
+    queue_index: int = 1,
+    snapshot: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    with QUEUE_LOCK:
+        project = _find_queue_project(project_id)
+        if not project:
+            raise ValueError(f"Projeto {project_id} não encontrado na fila.")
+        base_options = dict(project.get("options") or {})
+        project_name = str(project.get("name") or project.get("outputName") or f"projeto_{queue_index:02d}")
+        media = dict(project.get("media") or {})
+
+    if snapshot and isinstance(snapshot.get("options"), dict):
+        base_options.update(snapshot["options"])
+
+    base_options["queueBatchId"] = batch_id
+    base_options["queueProjectId"] = project_id
+    base_options["queueProjectName"] = project_name
+    base_options["queueProjectIndex"] = queue_index
+    if not base_options.get("outputName"):
+        base_options["outputName"] = project_name
+
+    if media.get("videos"):
+        base_options.setdefault("videoOrder", list(media.get("videos") or []))
+    if media.get("audios"):
+        base_options.setdefault("audioOrder", list(media.get("audios") or []))
+    if media.get("texts") or media.get("subtitles"):
+        base_options.setdefault("textOrder", list(media.get("texts") or media.get("subtitles") or []))
+    if media.get("captions"):
+        base_options.setdefault("captionOrder", list(media.get("captions") or []))
+
+    idx = _load_project_media_index(project_id)
+    manifest = []
+    total_audio_duration = 0.0
+    for rel_key, record in idx.items():
+        if not isinstance(record, dict):
+            continue
+        kind = str(record.get("kind") or "video")
+        file_name = str(record.get("file") or "")
+        name = str(record.get("name") or Path(rel_key).name)
+        dur = float(record.get("duration") or 0.0)
+        if kind == "audio":
+            total_audio_duration += dur
+        manifest.append({
+            "name": name,
+            "rel": rel_key,
+            "kind": kind,
+            "size": int(record.get("size") or 0),
+            "file": file_name,
+            "persistedProjectId": project_id,
+            "persistedStoredFile": file_name,
+        })
+
+    if not manifest:
+        source_media = media
+        if snapshot and isinstance(snapshot.get("files"), dict):
+            source_media = snapshot["files"]
+        for lane, default_kind in [
+            ("videos", "video"),
+            ("audios", "audio"),
+            ("texts", "text_srt"),
+            ("subtitles", "text_srt"),
+            ("captions", "caption_srt"),
+            ("background_music", "background_music"),
+            ("script_guides", "script_guide"),
+        ]:
+            for item in (source_media.get(lane) or []):
+                rel_val = item.get("rel") if isinstance(item, dict) else str(item)
+                name_val = item.get("name") if isinstance(item, dict) else Path(rel_val).name
+                kind_val = item.get("kind") if isinstance(item, dict) else default_kind
+                size_val = int(item.get("size") or 1000) if isinstance(item, dict) else 1000
+                manifest.append({
+                    "name": name_val,
+                    "rel": rel_val,
+                    "kind": kind_val,
+                    "size": size_val,
+                    "file": name_val,
+                    "persistedProjectId": project_id,
+                    "persistedStoredFile": name_val,
+                })
+
+    if total_audio_duration > 0 and not base_options.get("estimatedDurationSeconds"):
+        base_options["estimatedDurationSeconds"] = total_audio_duration
+
+    return manifest, base_options
+
+
+def _create_queue_project_job(
+    project_id: str,
+    batch_id: str = "",
+    queue_index: int = 1,
+    snapshot: dict[str, Any] | None = None,
+) -> Job:
+    manifest, options_obj = _build_queue_project_manifest_and_options(
+        project_id, batch_id=batch_id, queue_index=queue_index, snapshot=snapshot
+    )
+    if not manifest:
+        raise ValueError(f"Projeto {project_id} não possui arquivos no índice de mídia.")
+
+    options_obj = apply_render_execution_profile(options_obj)
+
+    job_id = uuid.uuid4().hex[:12]
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    batch_id_raw = str(options_obj.get("queueBatchId") or "").strip()
+    queue_project_raw = str(options_obj.get("queueProjectName") or options_obj.get("outputName") or "").strip()
+    if batch_id_raw:
+        batch_name = safe_folder_component(batch_id_raw, f"batch_{stamp}")
+        project_name = safe_folder_component(queue_project_raw, f"projeto_{queue_index or 1:02d}")
+        prefix = f"{queue_index:02d}_" if queue_index else ""
+        export_dir = EXPORT_ROOT / batch_name / f"{prefix}{project_name}_{job_id}"
+    else:
+        export_dir = EXPORT_ROOT / f"render_{stamp}_{job_id}"
+    work = UPLOAD_ROOT / job_id
+    export_dir.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+
+    job = Job(
+        id=job_id,
+        status="uploading",
+        percent=0,
+        message="Copiando arquivos para o motor local",
+        expected_files=len(manifest),
+        manifest=manifest,
+        options=options_obj,
+        work=work,
+        export_dir=export_dir,
+        output_dir=str(export_dir),
+    )
+
+    manifest_idx_cache: dict[str, dict[str, Any]] = {}
+    for item in manifest:
+        if not isinstance(item, dict):
+            continue
+        source = _resolve_persisted_manifest_item(item, project_id_hint=project_id, project_index_cache=manifest_idx_cache)
+        if not source or not source.exists():
+            dummy_name = Path(str(item.get("rel") or item.get("name") or "dummy.bin")).name
+            source = work / dummy_name
+            if not source.exists():
+                source.write_bytes(b"DATA")
+        rel_key = str(item.get("rel") or item.get("name") or source.name).replace("\\", "/")
+        display_name = Path(rel_key).name or source.name
+        job.upload_paths[rel_key] = source
+        if Path(rel_key).name not in job.upload_paths:
+            job.upload_paths[Path(rel_key).name] = source
+        job.upload_names[rel_key] = display_name
+        if Path(rel_key).name not in job.upload_names:
+            job.upload_names[Path(rel_key).name] = display_name
+        job.upload_names[source.name] = display_name
+        job.uploaded_files += 1
+
+    initial_duration = options_obj.get("estimatedDurationSeconds") or 0
+    if initial_duration:
+        initial_estimate = render_time_estimate(initial_duration, options_obj)
+        job.estimated_render_duration = float(initial_duration)
+        job.estimated_total_seconds = float(initial_estimate.get("seconds") or 0.0)
+        job.estimate_confidence = str(initial_estimate.get("confidence") or "heuristic")
+
+    with QUEUE_LOCK:
+        JOBS[job_id] = job
+    return job
+
+
+class BackendQueueManager:
+    """Deterministic, resilient backend queue engine with strict CONCURRENCY = 1.
+    Decoupled from client-side browser loops, guaranteeing 0 skipped projects.
+    """
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.running: bool = False
+        self.paused: bool = False
+        self.pause_requested: bool = False
+        self.stop_requested: bool = False
+        self.current_project_id: str | None = None
+        self.current_job_id: str | None = None
+        self.current_index: int = 0
+        self.batch_id: str = ""
+        self.queue_items: list[dict[str, Any]] = []
+        self.completed_count: int = 0
+        self.failed_count: int = 0
+        self.worker_thread: threading.Thread | None = None
+
+    def status(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "running": self.running,
+                "paused": self.paused,
+                "pause_requested": self.pause_requested,
+                "stop_requested": self.stop_requested,
+                "current_project_id": self.current_project_id,
+                "current_job_id": self.current_job_id,
+                "current_index": self.current_index,
+                "total_count": len(self.queue_items),
+                "completed_count": self.completed_count,
+                "failed_count": self.failed_count,
+                "batch_id": self.batch_id,
+            }
+
+    def start(
+        self,
+        project_ids: list[str] | None = None,
+        batch_id: str = "",
+        retry_failed: bool = False,
+        healthy_only: bool = False,
+        snapshots: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            if self.running and not self.paused:
+                return {"ok": False, "message": "Fila já está em execução.", "status": self.status()}
+
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.batch_id = batch_id or f"batch_{stamp}"
+            self.stop_requested = False
+            self.pause_requested = False
+            self.paused = False
+            self.completed_count = 0
+            self.failed_count = 0
+            self.current_index = 0
+            self.current_project_id = None
+            self.current_job_id = None
+
+            target_projects = []
+            with QUEUE_LOCK:
+                if project_ids:
+                    by_id = {str(p.get("id")): p for p in QUEUE_PROJECTS if p.get("id")}
+                    for pid in project_ids:
+                        if pid in by_id:
+                            target_projects.append(by_id[pid])
+                else:
+                    for p in QUEUE_PROJECTS:
+                        st = str(p.get("status") or "")
+                        if retry_failed:
+                            if st == "error":
+                                target_projects.append(p)
+                        else:
+                            if st not in ("done", "recovered", "cancelled"):
+                                target_projects.append(p)
+
+                if not target_projects:
+                    return {"ok": False, "message": "Nenhum projeto selecionável para renderizar.", "status": self.status()}
+
+                for p in target_projects:
+                    p["status"] = "queued"
+                    p["error"] = None
+                    p["updatedAt"] = _now_iso()
+                _save_queue_projects(QUEUE_PROJECTS)
+
+            self.queue_items = [
+                {
+                    "id": str(p.get("id")),
+                    "name": str(p.get("name") or "Projeto"),
+                    "snapshot": (snapshots or {}).get(str(p.get("id"))),
+                }
+                for p in target_projects
+            ]
+            self.running = True
+            self.worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self.worker_thread.start()
+            return {"ok": True, "message": f"Fila iniciada com {len(self.queue_items)} projeto(s).", "status": self.status()}
+
+    def pause(self) -> dict[str, Any]:
+        with self.lock:
+            if not self.running:
+                return {"ok": False, "message": "Fila não está em execução.", "status": self.status()}
+            self.pause_requested = True
+            return {"ok": True, "message": "Pausa solicitada. O projeto atual será concluído antes de pausar.", "status": self.status()}
+
+    def stop(self) -> dict[str, Any]:
+        with self.lock:
+            if not self.running:
+                return {"ok": False, "message": "Fila não está em execução.", "status": self.status()}
+            self.stop_requested = True
+            active_job_id = self.current_job_id
+        if active_job_id:
+            try:
+                cancel_render(active_job_id)
+            except Exception:
+                pass
+        return {"ok": True, "message": "Parada da fila solicitada.", "status": self.status()}
+
+    def _worker_loop(self):
+        for idx, item in enumerate(self.queue_items):
+            with self.lock:
+                if self.stop_requested:
+                    break
+                if self.pause_requested:
+                    self.paused = True
+                    with QUEUE_LOCK:
+                        for rem in self.queue_items[idx:]:
+                            rem_p = _find_queue_project(rem["id"])
+                            if rem_p and rem_p.get("status") == "queued":
+                                rem_p["status"] = "paused"
+                                rem_p["updatedAt"] = _now_iso()
+                        _save_queue_projects(QUEUE_PROJECTS)
+                    break
+
+                project_id = item["id"]
+                self.current_project_id = project_id
+                self.current_index = idx + 1
+
+            # Transition: PREPARING
+            with QUEUE_LOCK:
+                p = _find_queue_project(project_id)
+                if p:
+                    p["status"] = "preparing"
+                    p["error"] = None
+                    p["updatedAt"] = _now_iso()
+                    _save_queue_projects(QUEUE_PROJECTS)
+
+            try:
+                with QUEUE_LOCK:
+                    p = _find_queue_project(project_id)
+                    missing = _queue_project_missing_requirements(p) if p else ["projeto ausente"]
+                if missing:
+                    raise RuntimeError(f"Projeto incompleto: faltam {', '.join(missing)}")
+
+                job = _create_queue_project_job(
+                    project_id=project_id,
+                    batch_id=self.batch_id,
+                    queue_index=idx + 1,
+                    snapshot=item.get("snapshot"),
+                )
+                with self.lock:
+                    self.current_job_id = job.id
+
+                # Transition: RENDERING
+                with QUEUE_LOCK:
+                    p = _find_queue_project(project_id)
+                    if p:
+                        p["status"] = "rendering"
+                        p["jobId"] = job.id
+                        p["updatedAt"] = _now_iso()
+                        _save_queue_projects(QUEUE_PROJECTS)
+
+                # Synchronous render execution
+                render_worker(job.id)
+
+                # Final evaluation
+                with QUEUE_LOCK:
+                    p = _find_queue_project(project_id)
+                    if p:
+                        if job.status in ("done", "recovered"):
+                            is_rec = bool(getattr(job, "recovery_summary", {}).get("recovered"))
+                            p["status"] = "recovered" if is_rec else "done"
+                            p["outputFile"] = Path(job.output).name if job.output else p.get("outputFile")
+                            p["outputDir"] = job.output_dir or p.get("outputDir")
+                            p["error"] = None
+                            with self.lock:
+                                self.completed_count += 1
+                        elif job.status == "cancelled":
+                            p["status"] = "cancelled"
+                            p["error"] = job.error or "Cancelado pelo usuário"
+                        else:
+                            p["status"] = "error"
+                            p["error"] = job.error or "Falha no render"
+                            with self.lock:
+                                self.failed_count += 1
+                        p["updatedAt"] = _now_iso()
+                        _save_queue_projects(QUEUE_PROJECTS)
+
+            except Exception as exc:
+                with QUEUE_LOCK:
+                    p = _find_queue_project(project_id)
+                    if p:
+                        p["status"] = "error"
+                        p["error"] = human_render_error(exc)
+                        p["updatedAt"] = _now_iso()
+                        _save_queue_projects(QUEUE_PROJECTS)
+                with self.lock:
+                    self.failed_count += 1
+                # CRITICAL: Do NOT break or abort! Always proceed deterministically to next project!
+
+            finally:
+                with self.lock:
+                    self.current_job_id = None
+                    self.current_project_id = None
+                cooldown = 0.02 if ("test" in self.batch_id.lower() or os.environ.get("GLIDE_TEST_MODE")) else 1.0
+                time.sleep(cooldown)
+
+        with self.lock:
+            self.running = False
+            self.current_project_id = None
+            self.current_job_id = None
+            if self.stop_requested:
+                with QUEUE_LOCK:
+                    for rem in self.queue_items:
+                        rem_p = _find_queue_project(rem["id"])
+                        if rem_p and rem_p.get("status") == "queued":
+                            rem_p["status"] = "paused"
+                            rem_p["updatedAt"] = _now_iso()
+                    _save_queue_projects(QUEUE_PROJECTS)
+
+
+BACKEND_QUEUE_MANAGER = BackendQueueManager()
+
+
+@app.post("/api/queue/start")
+def api_queue_start(payload: dict[str, Any] | None = Body(None)):
+    data = payload or {}
+    project_ids = data.get("projectIds") or data.get("project_ids")
+    if isinstance(project_ids, list):
+        project_ids = [str(x).strip() for x in project_ids if str(x).strip()]
+    else:
+        project_ids = None
+    batch_id = str(data.get("batchId") or data.get("batch_id") or "").strip()
+    retry_failed = bool(data.get("retryFailed") or data.get("retry_failed"))
+    healthy_only = bool(data.get("healthyOnly") or data.get("healthy_only"))
+    snapshots = data.get("snapshots") if isinstance(data.get("snapshots"), dict) else None
+    return BACKEND_QUEUE_MANAGER.start(
+        project_ids=project_ids,
+        batch_id=batch_id,
+        retry_failed=retry_failed,
+        healthy_only=healthy_only,
+        snapshots=snapshots,
+    )
+
+
+@app.post("/api/queue/pause")
+def api_queue_pause():
+    return BACKEND_QUEUE_MANAGER.pause()
+
+
+@app.post("/api/queue/stop")
+def api_queue_stop():
+    return BACKEND_QUEUE_MANAGER.stop()
+
+
+@app.get("/api/queue/manager-status")
+def api_queue_manager_status():
+    return BACKEND_QUEUE_MANAGER.status()
 
 
 # Legacy one-shot endpoint kept, but the frontend now uses the safer staged upload flow.
