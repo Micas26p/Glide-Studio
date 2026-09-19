@@ -537,7 +537,31 @@ class Regressions(unittest.TestCase):
                 self.assertAlmostEqual(frames / 48000.0, total_dur, delta=0.1)
 
 
+    def test_post_processing_eta_does_not_collapse_to_one_second(self):
+        """Garante que quando a renderização dos segmentos termina (rendered_sec == total_sec),
+        mas o render ainda está em mixagem de áudio ou composição de chunks (pct < 98%),
+        o ETA não colapsa prematuramente para 1 segundo."""
+        job = app.Job("test_post_eta", {}, Path(tempfile.gettempdir()))
+        job.status = "running"
+        job.stage = "cta"
+        job.percent = 85.0
+        job.has_visual_composition = True
+        job.total_timeline_duration = 1770.0
+        job.rendered_timeline_duration = 1770.0
+        job.started_at = time.time() - 1000.0
+        app.JOBS[job.id] = job
+        try:
+            status_data = app.status(job.id)
+            eta_summary = status_data.get("eta_summary", {})
+            rem = eta_summary.get("estimated_remaining_seconds", 0)
+            self.assertGreater(rem, 5.0)
+            self.assertEqual(eta_summary.get("state"), "composition")
+        finally:
+            app.JOBS.pop(job.id, None)
+
+
 if __name__ == '__main__':
     unittest.main()
+
 
 

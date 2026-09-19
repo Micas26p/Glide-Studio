@@ -24373,7 +24373,7 @@ def status(job_id: str):
         eta_confidence = str(job.estimate_confidence or "historical")
         eta_state = "complete"
         eta_reason = ""
-    elif pct >= 99.0 or (rendered_sec >= total_sec and total_sec > 0):
+    elif pct >= 99.0 or (job.stage in ("delivery", "complete") and pct >= 98.0):
         remaining = 1.0
         estimated_total = elapsed + 1.0
         eta_state = "finalizing"
@@ -24387,10 +24387,27 @@ def status(job_id: str):
         eta_reason = "preparando o plano e medindo as etapas"
     else:
         has_comp = bool(getattr(job, "has_visual_composition", False))
-        overhead_sec = 6.0 if has_comp else 2.0
-        if ema_speed > 0.05 and rendered_sec > 0.5:
+        stage_forecast = (active_estimate or {}).get("stage_forecast") or {}
+
+        # Calculate realistic post-processing remaining duration (audio, composition, mux)
+        if job.stage in ("delivery", "mux"):
+            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("mux", "delivery")) if stage_forecast else 6.0
+        elif job.stage in ("cta", "composition"):
+            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("composition", "mux", "delivery")) if stage_forecast else (20.0 + total_sec * 0.06 if has_comp else 6.0)
+        else:
+            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("sound_fx", "mastering", "composition", "mux", "delivery")) if stage_forecast else (35.0 + total_sec * 0.08 if has_comp else 10.0)
+
+        if rendered_sec >= total_sec and total_sec > 0:
+            # Segment encoding is complete; currently in post-processing (audio mix, visual chunks, mux)
+            post_pct_progress = max(0.0, min(1.0, (pct - 64.0) / 34.0)) if pct >= 64.0 else 0.0
+            raw_remaining = max(2.0, est_post * (1.0 - post_pct_progress))
+            eta_state = "composition"
+            eta_confidence = "high"
+            eta_reason = "compondo legendas, efeitos e áudio final"
+        elif ema_speed > 0.05 and rendered_sec > 0.5:
+            # Segment encoding actively in progress
             rem_timeline = max(0.0, total_sec - rendered_sec)
-            raw_remaining = (rem_timeline / ema_speed) + overhead_sec
+            raw_remaining = (rem_timeline / ema_speed) + est_post
             eta_state = "adaptive"
             eta_confidence = "high"
             eta_reason = "calculada com base na velocidade real observada"
@@ -24398,7 +24415,6 @@ def status(job_id: str):
             base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
             if base_est <= 0.0:
                 base_est = max(60.0, total_sec * 0.85)
-            stage_forecast = (active_estimate or {}).get("stage_forecast") or {}
             if stage_forecast:
                 est_prep = max(10.0, sum(float(stage_forecast.get(k, 0)) for k in ("audio", "direction", "subtitles_ass", "visual_analysis")))
                 est_encode = max(25.0, base_est - est_prep)
