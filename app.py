@@ -16754,6 +16754,14 @@ def queue_status():
     with QUEUE_LOCK:
         projects = [_public_queue_project(item) for item in QUEUE_PROJECTS]
     mgr_status = BACKEND_QUEUE_MANAGER.status() if "BACKEND_QUEUE_MANAGER" in globals() else {}
+    cur_job_id = mgr_status.get("current_job_id")
+    if cur_job_id and cur_job_id in JOBS:
+        try:
+            mgr_status["current_job"] = status(cur_job_id)
+        except Exception:
+            mgr_status["current_job"] = None
+    else:
+        mgr_status["current_job"] = None
     return {
         "projects": projects,
         "active_jobs": [
@@ -24114,6 +24122,7 @@ async def start_render_legacy(files: list[UploadFile] = File(...), manifest: str
 
 
 @app.get("/api/status/{job_id}")
+@app.get("/api/render-status/{job_id}")
 def status(job_id: str):
     job = JOBS.get(job_id)
     if not job:

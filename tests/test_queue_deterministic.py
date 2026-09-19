@@ -222,5 +222,39 @@ class TestQueueDeterministic(unittest.TestCase):
             self.assertEqual(p5["status"], "done")
 
 
+    def test_render_status_alias_and_queue_status_current_job(self):
+        """Verify /api/render-status/{id} alias and /api/queue/status current_job inclusion."""
+        test_job_id = "test_alias_job"
+        job = Job(id=test_job_id, status="running", percent=45.5, message="Testing alias")
+        with QUEUE_LOCK:
+            app.JOBS[test_job_id] = job
+
+        try:
+            resp_status = self.client.get(f"/api/status/{test_job_id}")
+            self.assertEqual(resp_status.status_code, 200)
+
+            resp_render_status = self.client.get(f"/api/render-status/{test_job_id}")
+            self.assertEqual(resp_render_status.status_code, 200)
+            self.assertEqual(resp_status.json().get("percent"), resp_render_status.json().get("percent"))
+            self.assertEqual(resp_render_status.json().get("message"), "Testing alias")
+
+            with BACKEND_QUEUE_MANAGER.lock:
+                BACKEND_QUEUE_MANAGER.current_job_id = test_job_id
+                BACKEND_QUEUE_MANAGER.running = True
+
+            resp_q = self.client.get("/api/queue/status")
+            self.assertEqual(resp_q.status_code, 200)
+            bq = resp_q.json().get("backend_queue", {})
+            self.assertIsNotNone(bq.get("current_job"))
+            self.assertEqual(bq["current_job"].get("id"), test_job_id)
+            self.assertEqual(bq["current_job"].get("percent"), 45.5)
+        finally:
+            with QUEUE_LOCK:
+                app.JOBS.pop(test_job_id, None)
+            with BACKEND_QUEUE_MANAGER.lock:
+                BACKEND_QUEUE_MANAGER.current_job_id = None
+                BACKEND_QUEUE_MANAGER.running = False
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2122,6 +2122,15 @@ async function initializeProjectQueue(){
       if(qData.backend_queue?.running){
         state.queueRendering = true;
         document.body.classList.add('queue-rendering');
+        if(modal){
+          modal.classList.add('show');
+          modal.setAttribute('aria-hidden', 'false');
+        }
+        if(pauseQueueBtn){
+          pauseQueueBtn.classList.remove('hidden');
+          pauseQueueBtn.disabled = Boolean(qData.backend_queue.pause_requested);
+          pauseQueueBtn.textContent = qData.backend_queue.pause_requested ? 'Pausa solicitada' : 'Pausar fila';
+        }
         monitorBackendQueue();
       }
     }
@@ -5126,13 +5135,16 @@ function playUiSound(style = state.uiSoundStyle, {force = false, allowHidden = f
   const now = ctx.currentTime + .004;
   const sound = String(style || 'soft_tick');
   if(sound === 'success_chime'){
-    uiBeep(ctx, now, {freq: 520, endFreq: 690, duration: .085, gain: .026, type: 'sine', filter: 4200});
-    uiBeep(ctx, now + .082, {freq: 690, endFreq: 920, duration: .095, gain: .024, type: 'triangle', filter: 4600});
-    uiBeep(ctx, now + .178, {freq: 920, endFreq: 1180, duration: .12, gain: .018, type: 'sine', filter: 5200});
+    uiBeep(ctx, now, {freq: 523.25, endFreq: 659.25, duration: .09, gain: .095, type: 'sine', filter: 4800});
+    uiBeep(ctx, now + .075, {freq: 659.25, endFreq: 783.99, duration: .11, gain: .090, type: 'triangle', filter: 5200});
+    uiBeep(ctx, now + .165, {freq: 783.99, endFreq: 1046.5, duration: .14, gain: .085, type: 'sine', filter: 5800});
+    uiBeep(ctx, now + .285, {freq: 1046.5, endFreq: 1318.5, duration: .24, gain: .075, type: 'sine', filter: 6400});
   }else if(sound === 'queue_complete'){
-    uiBeep(ctx, now, {freq: 220, endFreq: 160, duration: .09, gain: .022, type: 'sine', filter: 1200});
-    uiBeep(ctx, now + .07, {freq: 620, endFreq: 840, duration: .11, gain: .026, type: 'triangle', filter: 4400});
-    uiBeep(ctx, now + .18, {freq: 980, endFreq: 1240, duration: .14, gain: .02, type: 'sine', filter: 5400});
+    uiBeep(ctx, now, {freq: 440, endFreq: 554.37, duration: .10, gain: .09, type: 'triangle', filter: 4200});
+    uiBeep(ctx, now + .09, {freq: 554.37, endFreq: 659.25, duration: .12, gain: .095, type: 'sine', filter: 4800});
+    uiBeep(ctx, now + .19, {freq: 659.25, endFreq: 880, duration: .15, gain: .10, type: 'triangle', filter: 5400});
+    uiBeep(ctx, now + .32, {freq: 880, endFreq: 1108.7, duration: .32, gain: .09, type: 'sine', filter: 6200});
+    uiBeep(ctx, now + .32, {freq: 1318.5, endFreq: 1760, duration: .32, gain: .06, type: 'sine', filter: 6800});
   }else if(sound === 'glass_click'){
     uiBeep(ctx, now, {freq: 940, endFreq: 1420, duration: .045, gain: .028, type: 'triangle', filter: 5400});
     uiBeep(ctx, now + .026, {freq: 1780, endFreq: 980, duration: .048, gain: .017, type: 'sine', filter: 6200});
@@ -5148,8 +5160,14 @@ function playUiSound(style = state.uiSoundStyle, {force = false, allowHidden = f
 }
 
 function playCompletionSound(kind = 'project'){
-  if(!state.uiSoundsEnabled || !state.uiProjectDoneSoundEnabled) return;
-  playUiSound(kind === 'queue' ? 'queue_complete' : 'success_chime', {allowHidden: true});
+  if(state.uiProjectDoneSoundEnabled === false) return;
+  try{
+    const ctx = getUiAudioContext();
+    if(ctx && ctx.state === 'suspended'){
+      ctx.resume().catch(() => {});
+    }
+  }catch(_){}
+  playUiSound(kind === 'queue' ? 'queue_complete' : 'success_chime', {force: true, allowHidden: true});
 }
 
 function shouldPlayUiSound(event){
@@ -7505,92 +7523,197 @@ async function prepareHealthyProjects(){
   return payload;
 }
 
+let isMonitoringBackendQueue = false;
+
 async function monitorBackendQueue(){
-  const pollInterval = 1000;
-  while(state.queueRendering){
-    try{
-      const res = await fetch('/api/queue/status', {cache: 'no-store'});
-      if(res.ok){
-        const data = await res.json();
-        const bq = data.backend_queue || {};
+  if(isMonitoringBackendQueue) return;
+  isMonitoringBackendQueue = true;
+  const pollInterval = 850;
+  let lastRenderJobId = null;
+  const knownCompletedIds = new Set(
+    state.projects.filter(p => ['done', 'recovered'].includes(p.status)).map(p => p.id)
+  );
 
-        if(Array.isArray(data.projects)){
-          data.projects.forEach(bp => {
-            const local = state.projects.find(p => p.id === bp.id);
-            if(local){
-              local.status = bp.status;
-              local.error = bp.error || '';
-              local.outputFile = bp.outputFile || local.outputFile;
-              local.outputDir = bp.outputDir || local.outputDir;
-              local.backendJobId = bp.jobId || local.backendJobId;
-            }
-          });
-          renderProjectQueue();
-        }
+  try{
+    while(state.queueRendering){
+      try{
+        const res = await fetch('/api/queue/status', {cache: 'no-store'});
+        if(res.ok){
+          const data = await res.json();
+          const bq = data.backend_queue || {};
 
-        if(bq.running){
-          state.queueRendering = true;
-          state.queuePaused = Boolean(bq.paused);
-          state.queuePauseRequested = Boolean(bq.pause_requested);
+          // 1. Sync project statuses and trigger completion chime whenever any project finishes
+          if(Array.isArray(data.projects)){
+            data.projects.forEach(bp => {
+              const local = state.projects.find(p => p.id === bp.id);
+              if(local){
+                const wasDone = ['done', 'recovered'].includes(local.status);
+                local.status = bp.status;
+                local.error = bp.error || '';
+                local.outputFile = bp.outputFile || local.outputFile;
+                local.outputDir = bp.outputDir || local.outputDir;
+                local.backendJobId = bp.jobId || local.backendJobId;
 
-          if(bq.current_job_id){
-            state.activeJobId = bq.current_job_id;
-            try{
-              const jobRes = await fetch(`/api/render-status/${bq.current_job_id}`, {cache: 'no-store'});
-              if(jobRes.ok){
-                const j = await jobRes.json();
-                setRenderProjectMeta({
-                  projectName: j.options?.queueProjectName || j.options?.outputName || `Projeto ${bq.current_index || 1}`,
-                  queueIndex: bq.current_index || 1,
-                  status: j.status === 'running' ? 'Renderizando' : (j.stage_label || 'Processando'),
-                  renderLabel: renderPriorityLabel(j.options?.renderPriority),
-                });
-                setRenderStage(j.stage || 'rendering');
-                setRenderProgress(j.percent || 0, j.stage_label || 'Renderizando', j.message || '');
+                const isNowDone = ['done', 'recovered'].includes(bp.status);
+                if(isNowDone && !wasDone && !knownCompletedIds.has(bp.id)){
+                  knownCompletedIds.add(bp.id);
+                  // Play pleasant completion sound effect on each render!
+                  playCompletionSound('project');
+                  showToast('Render Concluído', `"${bp.name || local.name}" finalizado com sucesso!`, 'success');
+                  notifyRenderComplete({output_name: bp.outputFile || local.name});
+                  refreshRenderGallery().catch(() => {});
+                }
               }
-            }catch(_){}
+            });
+            renderProjectQueue();
           }
-          dockSummary.textContent = `Fila em execução: projeto ${bq.current_index || 1}/${bq.total_count || state.projects.length}. ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} com erro.`;
-        }else{
-          state.queueRendering = false;
-          state.queuePaused = Boolean(bq.paused);
-          state.queuePauseRequested = false;
-          document.body.classList.remove('queue-rendering');
-          if(renderQueueBtn){
-            renderQueueBtn.disabled = false;
-            const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
-            queueBtnLabel.textContent = 'Renderizar fila';
-          }
-          await refreshRenderGallery();
-          renderProjectQueue();
 
-          if(bq.stop_requested){
-            dockSummary.textContent = `Fila interrompida pelo usuário: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
-            showToast('Fila Interrompida', `${bq.completed_count || 0} projeto(s) concluído(s).`, 'info');
-          }else if(bq.paused){
-            dockSummary.textContent = `Fila pausada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
-            showToast('Fila Pausada', 'Fila pausada.', 'info');
+          if(bq.running){
+            state.queueRendering = true;
+            state.queuePaused = Boolean(bq.paused);
+            state.queuePauseRequested = Boolean(bq.pause_requested);
+
+            // Keep modal visible and active
+            if(modal && !modal.classList.contains('show')){
+              modal.classList.add('show');
+              modal.setAttribute('aria-hidden', 'false');
+            }
+            if(pauseQueueBtn){
+              pauseQueueBtn.classList.remove('hidden');
+              pauseQueueBtn.disabled = Boolean(bq.pause_requested);
+              pauseQueueBtn.textContent = bq.pause_requested ? 'Pausa solicitada' : 'Pausar fila';
+            }
+
+            const currentIndex = bq.current_index || 1;
+            const totalCount = bq.total_count || state.projects.length;
+            const activePid = bq.current_project_id;
+            const curProject = state.projects.find(p => p.id === activePid) || { name: `Projeto ${currentIndex}` };
+
+            if(activePid){
+              activateRenderingProject(activePid);
+            }
+
+            // Reset progress bar on project transition
+            if(bq.current_job_id && bq.current_job_id !== lastRenderJobId){
+              lastRenderJobId = bq.current_job_id;
+              state.activeJobId = bq.current_job_id;
+              state.renderMaxPercent = 0;
+            }
+
+            // Retrieve live job progress (from bq.current_job or /api/status/{job_id})
+            let j = bq.current_job || null;
+            if(!j && bq.current_job_id){
+              try{
+                const jobRes = await fetch(`/api/status/${bq.current_job_id}?ts=${Date.now()}`, {cache: 'no-store'});
+                if(jobRes.ok){
+                  j = await jobRes.json();
+                }
+              }catch(_){}
+            }
+
+            if(j){
+              const rawPct = Math.max(0, Math.min(100, j.percent || 0));
+              state.renderMaxPercent = Math.max(state.renderMaxPercent || 0, rawPct);
+              const displayPct = state.renderMaxPercent;
+
+              progressBar.style.width = displayPct + '%';
+              eyePercent.textContent = Math.round(displayPct) + '%';
+              renderTitle.textContent = `Renderizando: ${curProject.name}`;
+              renderMsg.textContent = cleanDisplayText(j.message || 'Processando render acelerado...');
+
+              const currentStage = j.stage || 'rendering';
+              setRenderStage(currentStage);
+
+              const renderLabel = renderPriorityLabel(j.options?.renderPriority || curProject.options?.renderPriority);
+              setRenderProjectMeta({
+                projectName: curProject.name,
+                queueIndex: `${currentIndex}/${totalCount}`,
+                renderLabel,
+                status: j.stage_label || currentStage,
+              });
+
+              if(renderEta){
+                renderEta.textContent = formatEtaSummary(j.eta_summary, j.status || 'running', displayPct);
+              }
+
+              if(renderLog && Array.isArray(j.log) && j.log.length){
+                renderLog.textContent = j.log.slice(-18).join('\n');
+                renderLog.scrollTop = renderLog.scrollHeight;
+              }
+
+              if(j.output_dir){
+                state.outputDir = j.output_dir;
+              }
+            }else{
+              // Preparing stage before render worker spawns
+              setRenderStage('preparing');
+              progressBar.style.width = '3%';
+              eyePercent.textContent = '3%';
+              renderTitle.textContent = `Preparando: ${curProject.name}`;
+              renderMsg.textContent = 'Organizando arquivos, cache e verificações antes do render...';
+              setRenderProjectMeta({
+                projectName: curProject.name,
+                queueIndex: `${currentIndex}/${totalCount}`,
+                renderLabel: renderPriorityLabel(curProject.options?.renderPriority),
+                status: 'Preparando',
+              });
+              if(renderEta){
+                renderEta.textContent = 'Tempo restante: calculando...';
+              }
+            }
+
+            dockSummary.textContent = `Fila em execução: projeto ${currentIndex}/${totalCount}. ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} com erro.`;
           }else{
-            setRenderStage('queue_done');
-            setRenderProgress(100);
-            renderTitle.textContent = 'Fila concluída';
-            renderMsg.textContent = `${bq.completed_count || 0} projeto(s) concluído(s), ${bq.failed_count || 0} com erro.`;
-            dockSummary.textContent = `Fila finalizada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
-            showToast('Fila Concluída', `${bq.completed_count || 0} projeto(s) finalizado(s).`, (bq.completed_count || 0) > 0 ? 'success' : 'info');
-            if((bq.completed_count || 0) > 0) playCompletionSound('queue');
+            state.queueRendering = false;
+            state.queuePaused = Boolean(bq.paused);
+            state.queuePauseRequested = false;
+            document.body.classList.remove('queue-rendering');
+            if(pauseQueueBtn) pauseQueueBtn.classList.add('hidden');
+            if(renderQueueBtn){
+              renderQueueBtn.disabled = false;
+              const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
+              queueBtnLabel.textContent = 'Renderizar fila';
+            }
+            await refreshRenderGallery();
+            renderProjectQueue();
+
+            if(bq.stop_requested){
+              dockSummary.textContent = `Fila interrompida pelo usuário: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
+              showToast('Fila Interrompida', `${bq.completed_count || 0} projeto(s) concluído(s).`, 'info');
+            }else if(bq.paused){
+              dockSummary.textContent = `Fila pausada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
+              showToast('Fila Pausada', 'Fila pausada.', 'info');
+            }else{
+              setRenderStage('queue_done');
+              setRenderProgress(100);
+              renderTitle.textContent = 'Fila concluída';
+              renderMsg.textContent = `${bq.completed_count || 0} projeto(s) concluído(s), ${bq.failed_count || 0} com erro.`;
+              dockSummary.textContent = `Fila finalizada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
+              showToast('Fila Concluída', `${bq.completed_count || 0} projeto(s) finalizado(s).`, (bq.completed_count || 0) > 0 ? 'success' : 'info');
+              if((bq.completed_count || 0) > 0) playCompletionSound('queue');
+            }
+            break;
           }
-          break;
         }
+      }catch(err){
+        console.warn('Erro ao consultar status da fila no backend:', err);
       }
-    }catch(err){
-      console.warn('Erro ao consultar status da fila no backend:', err);
+      await new Promise(r => setTimeout(r, pollInterval));
     }
-    await new Promise(r => setTimeout(r, pollInterval));
+  }finally{
+    isMonitoringBackendQueue = false;
   }
 }
 
 async function renderQueue(config = {}){
   if(state.queueRendering || state.renderActive) return;
+
+  // Unlock Web Audio Context during user gesture click
+  try {
+    const ctx = getUiAudioContext();
+    if(ctx && ctx.state === 'suspended') ctx.resume().catch(() => {});
+  } catch(_) {}
+
   if(renderQueueBtn){
     renderQueueBtn.disabled = true;
     const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
@@ -7636,8 +7759,18 @@ async function renderQueue(config = {}){
 
     modal.classList.add('show');
     modal.setAttribute('aria-hidden', 'false');
+    if(pauseQueueBtn){
+      pauseQueueBtn.classList.remove('hidden');
+      pauseQueueBtn.disabled = false;
+      pauseQueueBtn.textContent = 'Pausar fila';
+    }
     setRenderStage('preparing');
     setRenderProgress(0, 'Iniciando Fila', 'Motor determinístico de fila ativo (concorrência = 1)');
+    setRenderProjectMeta({
+      projectName: state.projects[0]?.name || 'Fila de Produção',
+      queueIndex: `1/${state.projects.length}`,
+      status: 'Iniciando',
+    });
 
     monitorBackendQueue();
   }catch(error){

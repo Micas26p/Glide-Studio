@@ -2,6 +2,7 @@
 render_graph_cache/
 temp_uploads/
 cta_cache/
+assets/sfx_cache/
 exports/
 renders/
 webview_profile/
