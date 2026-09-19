@@ -362,7 +362,7 @@ const spaceManagerBox = $('#spaceManagerBox');
 const spaceSummary = $('#spaceSummary');
 
 const videoExt = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mts', 'm2ts'];
-const imageExt = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff'];
+const imageExt = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'avif', 'heic', 'heif', 'jfif'];
 const audioExt = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'webm', 'mp4', 'm4v', 'mov'];
 const audioOnlyExt = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg'];
 const audioContainerExt = ['mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'webm', 'mp4', 'm4v', 'mov'];
@@ -6981,8 +6981,8 @@ async function applyAutomatorDistribution(options = {}){
     state.automatorSessionId = created.sessionId;
 
     const uploadedSlots = new Set();
-    const MAX_FILES = fileSpecs.length > 500 ? 12 : 8;
-    const MAX_BYTES = 35 * 1024 * 1024;
+    const MAX_FILES = fileSpecs.length > 200 ? 25 : (fileSpecs.length > 50 ? 16 : 8);
+    const MAX_BYTES = 45 * 1024 * 1024;
     const batches = [];
     let currentBatch = [];
     let currentBatchBytes = 0;
@@ -7001,7 +7001,7 @@ async function applyAutomatorDistribution(options = {}){
       batches.push(currentBatch);
     }
 
-    const poolSize = Math.min(3, Math.max(1, batches.length > 30 ? 3 : (batches.length > 8 ? 2 : 1)));
+    const poolSize = Math.min(3, Math.max(1, batches.length > 20 ? 3 : (batches.length > 6 ? 2 : 1)));
 
     const uploadSingleFileWithRetry = async (spec, maxRetries = 3) => {
       if(uploadedSlots.has(spec.slot)) return;

@@ -377,6 +377,46 @@ class Regressions(unittest.TestCase):
         self.assertEqual(s["target_lufs"], -14.0)
         self.assertEqual(s["mode"], "single_pass_linear_broadcast")
 
+    def test_automator_kind_allowed_modern_image_formats(self):
+        """Verifica se AVIF, HEIC, HEIF e JFIF são aceitos pelo automator e IMAGE_EXTS."""
+        for ext in (".avif", ".heic", ".heif", ".jfif", ".jpg", ".png", ".webp"):
+            self.assertTrue(app._automator_kind_allowed("image", ext), f"Falha ao aceitar image com {ext}")
+            self.assertTrue(app._automator_kind_allowed("video", ext), f"Falha ao aceitar visual lane com {ext}")
+            self.assertTrue(ext in app.IMAGE_EXTS, f"{ext} ausente de app.IMAGE_EXTS")
+
+    def test_ensure_compatible_image_source_avif_conversion(self):
+        """Verifica se imagens AVIF são convertidas transparentemente para JPEG legível pelo FFmpeg."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as td:
+            avif_path = Path(td) / "test_photo.avif"
+            test_img = Image.new("RGB", (640, 480), color=(120, 180, 220))
+            test_img.save(avif_path, format="AVIF")
+            self.assertTrue(avif_path.exists())
+
+            compat_path = app.ensure_compatible_image_source(avif_path, Path(td))
+            self.assertTrue(compat_path.exists())
+            self.assertEqual(compat_path.suffix.lower(), ".jpg")
+            w, h = app.probe_image_dimensions(compat_path)
+            self.assertEqual(w, 640)
+            self.assertEqual(h, 480)
+
+    def test_normalize_and_relocate_media_file_avif(self):
+        """Verifica se _normalize_and_relocate_media_file converte AVIF para JPG no destino."""
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as td:
+            src = Path(td) / "staging_file.avif"
+            tgt = Path(td) / "dest_file.jpg"
+            img = Image.new("RGB", (320, 240), color=(200, 100, 50))
+            img.save(src, format="AVIF")
+
+            final_path = app._normalize_and_relocate_media_file(src, tgt)
+            self.assertEqual(final_path.resolve(), tgt.resolve())
+            self.assertTrue(tgt.exists())
+            self.assertFalse(src.exists())
+            w, h = app.probe_image_dimensions(tgt)
+            self.assertEqual(w, 320)
+            self.assertEqual(h, 240)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -499,7 +499,7 @@ def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:
         temporary.unlink(missing_ok=True)
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mts", ".m2ts"}
-IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".jfif"}
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".webm"}
 SRT_EXTS = {".srt"}
 SCRIPT_GUIDE_EXTS = {".txt", ".docx", ".pdf", ".html", ".htm"}
@@ -546,6 +546,42 @@ def image_duration_default(options: dict[str, Any] | None = None) -> float:
 
 
 IMAGE_MOTIONS = ("zoom_in", "pan_right", "zoom_out", "pan_left")
+
+
+def ensure_compatible_image_source(source: Path | str, work_dir: Path | None = None) -> Path:
+    """Garante que o arquivo de imagem seja compatível com demuxers do FFmpeg (converte AVIF/HEIC com cache)."""
+    p = Path(str(source))
+    ext = p.suffix.lower()
+    if ext not in {".avif", ".heic", ".heif"}:
+        return p
+    if not p.exists():
+        return p
+    cache_dir = (work_dir or p.parent) / ".image_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(str(p.resolve()).encode("utf-8", errors="ignore")).hexdigest()[:16]
+    converted_jpg = cache_dir / f"{p.stem}_{digest}.jpg"
+    converted_png = cache_dir / f"{p.stem}_{digest}.png"
+    if converted_jpg.exists() and converted_jpg.stat().st_size > 0:
+        return converted_jpg
+    if converted_png.exists() and converted_png.stat().st_size > 0:
+        return converted_png
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(str(p)) as img:
+            try:
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+            if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                img.save(converted_png, format="PNG", optimize=True)
+                return converted_png
+            else:
+                rgb_img = img.convert("RGB")
+                rgb_img.save(converted_jpg, format="JPEG", quality=95, subsampling=0)
+                return converted_jpg
+    except Exception as exc:
+        logger.warning(f"Falha ao normalizar imagem {p}: {exc}")
+        return p
 
 
 def probe_image_dimensions(path: Path | str) -> tuple[int, int]:
@@ -3451,7 +3487,8 @@ def queue_project_technical_autotest(project: dict[str, Any]) -> dict[str, Any]:
     height = max(2, int(round(width * 9 / 16 / 2)) * 2) if str(options.get("ratio") or "16:9") == "16:9" else min(height, 640)
     codec = "libx264"
     if visual.suffix.lower() in IMAGE_EXTS:
-        visual_args = ["-loop", "1", "-framerate", "30", "-t", "3.0", "-i", str(visual)]
+        compat_visual = ensure_compatible_image_source(visual, test_dir)
+        visual_args = ["-loop", "1", "-framerate", "30", "-t", "3.0", "-i", str(compat_visual)]
     else:
         visual_args = ["-t", "3.0", "-i", str(visual)]
     cmd = [
@@ -7615,6 +7652,14 @@ def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = N
 
             resolved_p = _resolved_media_path(path, cwd)
             img_bgr = cv2.imread(str(resolved_p))
+            if img_bgr is None or img_bgr.size == 0:
+                try:
+                    from PIL import Image
+                    with Image.open(str(resolved_p)) as pil_img:
+                        rgb_conv = pil_img.convert("RGB")
+                        img_bgr = cv2.cvtColor(np.array(rgb_conv), cv2.COLOR_RGB2BGR)
+                except Exception:
+                    pass
             if img_bgr is not None and img_bgr.size > 0:
                 h_orig, w_orig = img_bgr.shape[:2]
                 scale = min(VISUAL_CLEAN_FRAME_W / max(1, w_orig), VISUAL_CLEAN_FRAME_H / max(1, h_orig))
@@ -15838,7 +15883,10 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         rel_key = str(raw.get("rel") or raw.get("name") or "").replace("\\", "/").strip("/")
         if not slot or slot in expected or project_id not in project_ids or not rel_key:
             raise HTTPException(status_code=400, detail="Slot de arquivo AUTO inválido.")
-        if not _automator_kind_allowed(kind, Path(rel_key).suffix):
+        suffix = Path(rel_key).suffix.lower()
+        if suffix in {".ds_store", ".thumbs", ".ini", ".db"} or Path(rel_key).name.startswith("._"):
+            continue
+        if not _automator_kind_allowed(kind, suffix):
             raise HTTPException(status_code=400, detail=f"Tipo não suportado no AUTO: {rel_key} ({kind})")
         expected[slot] = {
             "slot": slot,
@@ -15854,11 +15902,11 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         project_files = [item for item in expected.values() if item["projectId"] == project_id]
         subtitles = [item for item in project_files if item["kind"] == "subtitle"]
         audios = [item for item in project_files if item["kind"] == "audio"]
-        videos = [item for item in project_files if item["kind"] == "video"]
-        if len(subtitles) != 1 or len(audios) != 1 or not videos:
+        visual_media = [item for item in project_files if item["kind"] in ("video", "image")]
+        if len(subtitles) != 1 or len(audios) != 1 or not visual_media:
             raise HTTPException(
                 status_code=400,
-                detail=f"Projeto {project_id}: o AUTO exige uma narração, Textos em SRT e pelo menos um vídeo real.",
+                detail=f"Projeto {project_id}: o AUTO exige uma narração, Textos em SRT e pelo menos um vídeo ou imagem.",
             )
     session_id = uuid.uuid4().hex
     folder = AUTOMATOR_STAGING_ROOT / session_id
@@ -16060,6 +16108,36 @@ def _safe_relocate_staging_file(source: Path, target: Path) -> None:
                 except Exception:
                     pass
                 return
+    _safe_relocate_staging_file(source, target)
+
+
+def _normalize_and_relocate_media_file(source: Path, target: Path) -> Path:
+    """Move ou converte transparentemente imagens sem suporte nativo no FFmpeg (AVIF, HEIC) para JPEG de alta fidelidade."""
+    src_suffix = source.suffix.lower()
+    if src_suffix in {".avif", ".heic", ".heif"}:
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(str(source)) as img:
+                try:
+                    img = ImageOps.exif_transpose(img)
+                except Exception:
+                    pass
+                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+                    converted_target = target.with_suffix(".png")
+                    img.save(converted_target, format="PNG", optimize=True)
+                else:
+                    converted_target = target.with_suffix(".jpg")
+                    rgb_img = img.convert("RGB")
+                    rgb_img.save(converted_target, format="JPEG", quality=95, subsampling=0)
+            try:
+                source.unlink(missing_ok=True)
+            except Exception:
+                pass
+            return converted_target
+        except Exception:
+            pass
+    _safe_relocate_staging_file(source, target)
+    return target
 
 
 @app.get("/api/queue/automator/sessions/{session_id}/status")
@@ -16146,13 +16224,15 @@ def commit_automator_session(session_id: str):
                 folder = _project_media_dir(project_id)
                 folder.mkdir(parents=True, exist_ok=True)
                 digest = hashlib.sha256(rel_key.lower().encode("utf-8", errors="ignore")).hexdigest()[:20]
-                target = folder / f"{digest}_{session_id[:10]}{source.suffix.lower()}"
+                src_ext = source.suffix.lower()
+                dest_ext = ".jpg" if src_ext in {".avif", ".heic", ".heif"} else src_ext
+                target = folder / f"{digest}_{session_id[:10]}{dest_ext}"
                 items_to_relocate.append((source, target, slot, spec))
 
             def _relocate_item(item_tuple: tuple[Path, Path, str, dict[str, Any]]):
                 src, tgt, sl, sp = item_tuple
-                _safe_relocate_staging_file(src, tgt)
-                return tgt, sl, sp
+                final_tgt = _normalize_and_relocate_media_file(src, tgt)
+                return final_tgt, sl, sp
 
             max_workers = min(8, max(1, len(items_to_relocate)))
             if max_workers > 1:
@@ -19939,7 +20019,8 @@ def make_segments_smart(
         segment_threads = max(1, int(performance_budget.get("segment_threads") or 2))
         segment_thread_args = ["-threads", str(segment_threads), "-filter_threads", str(segment_filter_threads)]
         if plan.media_kind == "image" or is_image_path(plan.source):
-            img_w, img_h = probe_image_dimensions(plan.source)
+            img_source = ensure_compatible_image_source(plan.source, work)
+            img_w, img_h = probe_image_dimensions(img_source)
             target_ratio = float(w) / float(max(1, h))
             img_ratio = float(img_w) / float(max(1, img_h))
             ratio_diff = img_ratio / max(0.01, target_ratio)
@@ -19950,8 +20031,8 @@ def make_segments_smart(
                 w,
                 h,
                 plan.target_duration,
-                plan.image_motion or image_motion_for(plan.source, segment_no),
-                plan.source,
+                plan.image_motion or image_motion_for(img_source, segment_no),
+                img_source,
                 style_profile,
                 is_outro=plan.is_outro,
                 filmic_grade=filmic_grade,
@@ -19962,7 +20043,7 @@ def make_segments_smart(
             )
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
-                "-i", str(plan.source),
+                "-i", str(img_source),
                 "-filter_complex", filter_complex,
                 "-map", "[vout]",
                 "-an", "-r", "30",
@@ -23593,6 +23674,8 @@ async def upload_file(
                 tmp.unlink()
             raise HTTPException(status_code=400, detail="Arquivo vazio (0 bytes) não é permitido.")
         os.replace(tmp, dest)
+        if dest.suffix.lower() in {".avif", ".heic", ".heif"}:
+            dest = ensure_compatible_image_source(dest, job.work)
     except Exception:
         if tmp.exists():
             try:

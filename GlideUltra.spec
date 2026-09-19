@@ -22,6 +22,9 @@ hiddenimports = [
     "cv2",
     "numpy",
     "pypdf",
+    "PIL",
+    "PIL.Image",
+    "PIL.ImageOps",
 ]
 
 a = Analysis(
