@@ -145,10 +145,23 @@ def categories_for_path(path: Path | str) -> list[dict[str, Any]]:
 def media_signature(path: Path) -> str:
     try:
         stat = path.stat()
-        raw = f"{path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+        size = stat.st_size
+        sig = f"{path.name}:{size}"
+        if size > 0:
+            try:
+                with open(path, "rb") as f:
+                    head = f.read(2048)
+                    tail = b""
+                    if size > 4096:
+                        f.seek(max(0, size - 2048))
+                        tail = f.read(2048)
+                    h = hashlib.md5(head + tail).hexdigest()[:16]
+                    sig = f"{path.name}:{size}:{h}"
+            except Exception:
+                sig = f"{path.name}:{size}:{stat.st_mtime_ns}"
+        return hashlib.sha256(sig.encode("utf-8", errors="ignore")).hexdigest()
     except Exception:
-        raw = str(path)
-    return hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()
+        return hashlib.sha256(str(path.name).encode("utf-8", errors="ignore")).hexdigest()
 
 
 def clip_number_hint(path: Path | str) -> int | None:

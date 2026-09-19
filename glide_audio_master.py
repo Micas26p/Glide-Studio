@@ -112,6 +112,24 @@ def summary(measurement: dict[str, Any], output_measurement: dict[str, Any] | No
     }
 
 
+def single_pass_summary(profile: str | None = None) -> dict[str, Any]:
+    settings = profile_settings(profile)
+    return {
+        "enabled": True,
+        "profile": settings["key"],
+        "profile_label": settings["label"],
+        "target_lufs": settings["target_i"],
+        "target_true_peak_dbtp": settings["target_tp"],
+        "target_lra": settings["target_lra"],
+        "output_lufs": settings["target_i"],
+        "output_true_peak_dbtp": settings["target_tp"],
+        "output_lra": settings["target_lra"],
+        "standard": settings["standard"],
+        "passes": 1,
+        "mode": "single_pass_linear_broadcast",
+    }
+
+
 def _number(value: Any, fallback: float | None = None) -> float | None:
     try:
         number = float(value)

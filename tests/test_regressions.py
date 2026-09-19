@@ -336,6 +336,47 @@ class Regressions(unittest.TestCase):
         self.assertIn("video", kinds)
         self.assertIn("image", kinds)
 
+    def test_persistent_media_signature_across_paths(self):
+        """Verifica se media_signature é consistente mesmo quando arquivos estão em pastas temporárias distintas."""
+        from glide_director import media_signature
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            p1 = Path(d1) / "sample_clip.mp4"
+            p2 = Path(d2) / "sample_clip.mp4"
+            content = b"TEST_VIDEO_BYTES_HEADER" + b"\x00" * 8000 + b"TAIL_BYTES"
+            p1.write_bytes(content)
+            p2.write_bytes(content)
+            sig1 = media_signature(p1)
+            sig2 = media_signature(p2)
+            self.assertEqual(sig1, sig2)
+
+    def test_persistent_visual_clean_cache_key_across_paths(self):
+        """Verifica se visual_clean_cache_key é consistente entre pastas temporárias distintas."""
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            p1 = Path(d1) / "sample_clip.mp4"
+            p2 = Path(d2) / "sample_clip.mp4"
+            content = b"CLEAN_CHECK_BYTES" + b"\x11" * 8000 + b"END_BYTES"
+            p1.write_bytes(content)
+            p2.write_bytes(content)
+            k1 = app.visual_clean_cache_key(p1, duration=5.0)
+            k2 = app.visual_clean_cache_key(p2, duration=5.0)
+            self.assertEqual(k1, k2)
+
+    def test_laptop_thermal_worker_calibration(self):
+        """Verifica se em notebooks o limite de workers paralelos é calibrado em 2 para evitar thermal throttling a 93C."""
+        job = app.Job("test_thermal")
+        with patch.object(app, "hardware_profile", return_value={"gpus": [{"name": "RTX 3050 Laptop GPU"}], "preferred_gpu": "RTX 3050 Laptop GPU"}):
+            budget = app.render_performance_budget(job, gpu=True, segment_count=50)
+            self.assertTrue(budget["is_laptop"])
+            self.assertEqual(budget["segment_workers"], 2)
+
+    def test_single_pass_mastering_summary(self):
+        """Verifica se o sumário do mastering single-pass broadcast é gerado corretamente."""
+        from glide_audio_master import single_pass_summary
+        s = single_pass_summary("youtube_long")
+        self.assertEqual(s["passes"], 1)
+        self.assertEqual(s["target_lufs"], -14.0)
+        self.assertEqual(s["mode"], "single_pass_linear_broadcast")
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -42,7 +42,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from glide_config import load_config_bundle
-from glide_audio_master import first_pass_filter, limiter_value, parse_loudnorm_output, second_pass_filter, summary as audio_master_report
+from glide_audio_master import first_pass_filter, limiter_value, parse_loudnorm_output, second_pass_filter, single_pass_summary, summary as audio_master_report
 from glide_director import (
     DIRECTOR_VERSION,
     build_energy_map,
@@ -5835,8 +5835,10 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     # Orçamento dinâmico de alta performance com auto-calibração térmica de hardware
     if priority == "max":
         if is_laptop:
-            workers = 3 if hardware_active else 2
-            cpu_thread_budget = max(4, min(12, int(logical_cpus * 0.70))) if logical_cpus >= 12 else max(3, min(8, int(logical_cpus * 0.55)))
+            # Em notebooks (RTX Laptop + Core i7/i9), 2 workers em paralelo previnem thermal throttle
+            # permitindo que a CPU sustente turbo boost acima de 3.8-4.5GHz em vez de throttling a 1.59GHz
+            workers = 2
+            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.50)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
@@ -5852,14 +5854,14 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
         filter_threads = max(2, min(3, cpu_thread_budget // max(1, workers)))
         complex_threads = max(2, min(3, cpu_thread_budget // max(1, workers)))
     elif priority == "quality":
-        workers = 2 if (hardware_active and logical_cpus >= 8) else 1
-        cpu_thread_budget = max(3, min(6 if is_laptop else logical_cpus - 1, int(logical_cpus * 0.50 if is_laptop else logical_cpus * 0.65)))
+        workers = 2 if (hardware_active and logical_cpus >= 8 and not is_laptop) else 1
+        cpu_thread_budget = max(3, min(6 if is_laptop else logical_cpus - 1, int(logical_cpus * 0.45 if is_laptop else logical_cpus * 0.65)))
         filter_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
         complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
     else:  # balanced
         if is_laptop:
-            workers = 3 if hardware_active else 2
-            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.55)))
+            workers = 2
+            cpu_thread_budget = max(3, min(6, int(logical_cpus * 0.45)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.70)))
@@ -7583,9 +7585,23 @@ def visual_clean_cache_key(path: Path, duration: float = 0.0, cwd: Path | None =
     resolved = _resolved_media_path(path, cwd)
     try:
         stat = resolved.stat()
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}:{stat.st_size}:{stat.st_mtime_ns}"
+        size = stat.st_size
+        sig = f"{size}"
+        if size > 0:
+            try:
+                with open(resolved, "rb") as f:
+                    head = f.read(2048)
+                    tail = b""
+                    if size > 4096:
+                        f.seek(max(0, size - 2048))
+                        tail = f.read(2048)
+                    h = hashlib.md5(head + tail).hexdigest()[:16]
+                    sig = f"{size}_{h}"
+            except Exception:
+                sig = f"{size}_{stat.st_mtime_ns}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name}:{sig}:{duration:.2f}"
     except Exception:
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name}:{duration:.2f}"
 
 
 def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = None, start_offset: float = 0.0) -> list[bytes]:
@@ -18255,8 +18271,6 @@ def build_video_filter(
         )
     if quality_boost:
         vf += f",{quality_boost_chain()}"
-    else:
-        vf += ",unsharp=3:3:0.45:3:3:0.0"
     if filmic_grade:
         vf += f",{filmic_grade}"
     if continuity_filter:
@@ -22477,6 +22491,29 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
         return actual_audio
     performance_start(job, "mastering")
     master_profile = str(job.options.get("platformMasterProfile") or "youtube_long")
+    priority = render_priority(job)
+    fast_master = (priority != "quality") or (job.estimated_render_duration > 180.0)
+    if fast_master:
+        mastered = work / "audio_mastered.wav"
+        fast_filter = f"{first_pass_filter(master_profile)}:linear=true,alimiter=limit={limiter_value(master_profile)}"
+        has_comp = getattr(job, "has_visual_composition", False)
+        job.percent = max(job.percent, 64.0 if has_comp else 95.0)
+        run_cmd(
+            job,
+            [
+                FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-threads", "4",
+                "-i", str(actual_audio), "-vn",
+                "-af", fast_filter,
+                "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le",
+                str(mastered),
+            ],
+            cwd=work,
+            quiet_success=True,
+        )
+        job.percent = max(job.percent, 65.0 if has_comp else 95.5)
+        job.audio_master_summary = single_pass_summary(master_profile)
+        return mastered
+
     first_cmd = [
         FFMPEG, "-hide_banner", "-nostats", "-threads", "4", "-i", str(actual_audio),
         "-vn", "-af", first_pass_filter(master_profile), "-f", "null", os.devnull,

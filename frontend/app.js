@@ -4791,44 +4791,52 @@ function formatEtaSummary(eta, status = 'running', currentPercent = 0){
   if(!eta) return 'Tempo restante: calculando...';
   const elapsedSec = Number(eta.elapsed_seconds || 0);
   const elapsed = formatTime(elapsedSec);
-  if(status !== 'running') return `Tempo de render: ${elapsed}`;
+  if(status !== 'running') return `Tempo total de render: ${elapsed}`;
   const budgetSec = Number(eta.budget_seconds || 0);
-  const limitText = budgetSec > 0 
-    ? (elapsedSec > budgetSec ? ' · finalizando etapas' : ` · limite ${formatTime(budgetSec)}`)
-    : '';
+  const pct = Math.max(0, Math.min(100, Number(currentPercent || 0)));
+
+  // "finalizando etapas" APENAS quando estiver de fato no final da esteira
+  let limitText = '';
+  if(pct >= 88){
+    limitText = ' · finalizando etapas';
+  } else if(budgetSec > 0 && elapsedSec < budgetSec){
+    limitText = ` · limite ${formatTime(budgetSec)}`;
+  }
+
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
   const reason = String(eta.reason || '').toLowerCase();
   const isPreliminary = reason.includes('preliminar');
   if(stateName === 'warming_up' || stateName === 'unknown'){
     return `Decorrido no render ${elapsed} - calculando tempo restante...${limitText}`;
   }
+
   let min = Number(eta.remaining_min_seconds || 0);
   let max = Number(eta.remaining_max_seconds || 0);
   let rem = Number(eta.estimated_remaining_seconds || 0);
 
-  // Sanidade visual: calcula tempo restante de forma dinâmica e realista
-  if(budgetSec > 0 && elapsedSec >= budgetSec){
-    // Passou do budget estimado: nunca travar artificialmente em 10s!
-    const pct = Math.max(10, Math.min(99, Number(currentPercent || 0)));
-    rem = Math.max(15, Math.round((elapsedSec / (pct / 100)) - elapsedSec));
-    min = Math.round(rem * 0.85);
-    max = Math.round(rem * 1.25);
-  } else if(budgetSec > 0 && elapsedSec < budgetSec){
-    const budgetRemaining = Math.max(15, (budgetSec * 1.25) - elapsedSec);
-    if(max > budgetRemaining * 1.5){
-      max = Math.round(budgetRemaining);
-      min = Math.round(Math.min(min, max * 0.7));
-      rem = Math.round(Math.min(rem, max));
-    }
+  // Sanidade visual e física estrita: calcula tempo restante de forma dinâmica e proporcional ao progresso real
+  let calcRem = 0;
+  if(pct >= 3){
+    const estTotal = elapsedSec / (pct / 100);
+    calcRem = Math.max(0, Math.round(estTotal - elapsedSec));
   }
 
-  if(stateName === 'variable' && isPreliminary){
-    if(min && max && max > min){
-      return `Decorrido no render ${elapsed} - estimativa preliminar: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+  if(calcRem > 0){
+    if(rem <= 0 || (budgetSec > 0 && elapsedSec >= budgetSec) || Math.abs(rem - calcRem) > (calcRem * 0.65)){
+      rem = calcRem;
+    } else {
+      rem = Math.round((rem * 0.35) + (calcRem * 0.65));
     }
-    if(rem > 0){
-      return `Decorrido no render ${elapsed} - estimativa preliminar: ~${formatTime(rem)}${limitText}`;
-    }
+    min = Math.round(rem * 0.85);
+    max = Math.round(rem * 1.20);
+  }
+
+  if(pct >= 98){
+    return `Decorrido no render ${elapsed} - finalizando etapas...`;
+  }
+
+  if(stateName === 'variable' && isPreliminary && min && max && max > min){
+    return `Decorrido no render ${elapsed} - estimativa preliminar: ${formatTime(min)}-${formatTime(max)}${limitText}`;
   }
 
   if(rem > 0){
@@ -5135,16 +5143,16 @@ function playUiSound(style = state.uiSoundStyle, {force = false, allowHidden = f
   const now = ctx.currentTime + .004;
   const sound = String(style || 'soft_tick');
   if(sound === 'success_chime'){
-    uiBeep(ctx, now, {freq: 523.25, endFreq: 659.25, duration: .09, gain: .095, type: 'sine', filter: 4800});
-    uiBeep(ctx, now + .075, {freq: 659.25, endFreq: 783.99, duration: .11, gain: .090, type: 'triangle', filter: 5200});
-    uiBeep(ctx, now + .165, {freq: 783.99, endFreq: 1046.5, duration: .14, gain: .085, type: 'sine', filter: 5800});
-    uiBeep(ctx, now + .285, {freq: 1046.5, endFreq: 1318.5, duration: .24, gain: .075, type: 'sine', filter: 6400});
+    uiBeep(ctx, now, {freq: 523.25, endFreq: 659.25, duration: .10, gain: .28, type: 'sine', filter: 5200});
+    uiBeep(ctx, now + .080, {freq: 659.25, endFreq: 783.99, duration: .12, gain: .26, type: 'triangle', filter: 5600});
+    uiBeep(ctx, now + .175, {freq: 783.99, endFreq: 1046.5, duration: .15, gain: .24, type: 'sine', filter: 6000});
+    uiBeep(ctx, now + .300, {freq: 1046.5, endFreq: 1318.5, duration: .26, gain: .22, type: 'sine', filter: 6600});
   }else if(sound === 'queue_complete'){
-    uiBeep(ctx, now, {freq: 440, endFreq: 554.37, duration: .10, gain: .09, type: 'triangle', filter: 4200});
-    uiBeep(ctx, now + .09, {freq: 554.37, endFreq: 659.25, duration: .12, gain: .095, type: 'sine', filter: 4800});
-    uiBeep(ctx, now + .19, {freq: 659.25, endFreq: 880, duration: .15, gain: .10, type: 'triangle', filter: 5400});
-    uiBeep(ctx, now + .32, {freq: 880, endFreq: 1108.7, duration: .32, gain: .09, type: 'sine', filter: 6200});
-    uiBeep(ctx, now + .32, {freq: 1318.5, endFreq: 1760, duration: .32, gain: .06, type: 'sine', filter: 6800});
+    uiBeep(ctx, now, {freq: 440, endFreq: 554.37, duration: .11, gain: .26, type: 'triangle', filter: 4600});
+    uiBeep(ctx, now + .095, {freq: 554.37, endFreq: 659.25, duration: .13, gain: .28, type: 'sine', filter: 5200});
+    uiBeep(ctx, now + .200, {freq: 659.25, endFreq: 880, duration: .16, gain: .28, type: 'triangle', filter: 5800});
+    uiBeep(ctx, now + .340, {freq: 880, endFreq: 1108.7, duration: .34, gain: .26, type: 'sine', filter: 6400});
+    uiBeep(ctx, now + .340, {freq: 1318.5, endFreq: 1760, duration: .34, gain: .18, type: 'sine', filter: 7000});
   }else if(sound === 'glass_click'){
     uiBeep(ctx, now, {freq: 940, endFreq: 1420, duration: .045, gain: .028, type: 'triangle', filter: 5400});
     uiBeep(ctx, now + .026, {freq: 1780, endFreq: 980, duration: .048, gain: .017, type: 'sine', filter: 6200});
@@ -5161,13 +5169,19 @@ function playUiSound(style = state.uiSoundStyle, {force = false, allowHidden = f
 
 function playCompletionSound(kind = 'project'){
   if(state.uiProjectDoneSoundEnabled === false) return;
+  const soundStyle = kind === 'queue' ? 'queue_complete' : 'success_chime';
   try{
     const ctx = getUiAudioContext();
     if(ctx && ctx.state === 'suspended'){
-      ctx.resume().catch(() => {});
+      ctx.resume().then(() => {
+        playUiSound(soundStyle, {force: true, allowHidden: true});
+      }).catch(() => {
+        playUiSound(soundStyle, {force: true, allowHidden: true});
+      });
+      return;
     }
   }catch(_){}
-  playUiSound(kind === 'queue' ? 'queue_complete' : 'success_chime', {force: true, allowHidden: true});
+  playUiSound(soundStyle, {force: true, allowHidden: true});
 }
 
 function shouldPlayUiSound(event){
@@ -5799,10 +5813,21 @@ async function pollStatus(jobId, context = {}){
         showToast('Render Concluído', `"${j.output_name || 'Vídeo'}" finalizado com sucesso!`, 'success');
         const closeBtn = $('#closeModal');
         if(closeBtn) closeBtn.textContent = 'Fechar';
+        if(state._etaLiveTimer){
+          clearInterval(state._etaLiveTimer);
+          state._etaLiveTimer = null;
+        }
+        state._currentEta = null;
+        const totalElapsed = Number(j.elapsed_seconds || (j.eta_summary && j.eta_summary.elapsed_seconds) || 0);
+        if(renderEta){
+          renderEta.textContent = totalElapsed > 0
+            ? `Render concluído em ${formatTime(Math.round(totalElapsed))}`
+            : 'Render concluído com sucesso';
+        }
         const delivery = j.delivery_summary || {};
         renderMsg.textContent = delivery.mode === 'browser_download'
           ? 'MP4 final pronto para download do navegador.'
-          : 'MP4 final salvo na pasta definida.';
+          : `MP4 final salvo na pasta definida (${j.output_name || 'vídeo final'}).`;
         progressBar.style.width = '100%';
         eyePercent.textContent = '100%';
         downloadBtn.href = j.download;
@@ -7684,11 +7709,17 @@ async function monitorBackendQueue(){
               dockSummary.textContent = `Fila pausada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
               showToast('Fila Pausada', 'Fila pausada.', 'info');
             }else{
+              if(state._etaLiveTimer){
+                clearInterval(state._etaLiveTimer);
+                state._etaLiveTimer = null;
+              }
+              state._currentEta = null;
               setRenderStage('queue_done');
               setRenderProgress(100);
               renderTitle.textContent = 'Fila concluída';
               renderMsg.textContent = `${bq.completed_count || 0} projeto(s) concluído(s), ${bq.failed_count || 0} com erro.`;
               dockSummary.textContent = `Fila finalizada: ${bq.completed_count || 0} concluído(s), ${bq.failed_count || 0} erro(s).`;
+              if(renderEta) renderEta.textContent = 'Fila 100% concluída';
               showToast('Fila Concluída', `${bq.completed_count || 0} projeto(s) finalizado(s).`, (bq.completed_count || 0) > 0 ? 'success' : 'info');
               if((bq.completed_count || 0) > 0) playCompletionSound('queue');
             }
