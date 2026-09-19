@@ -226,7 +226,50 @@ class Regressions(unittest.TestCase):
             res2 = self.client.get(f'/api/status/{job.id}').json()
             rem2 = res2['eta_summary']['estimated_remaining_seconds']
             self.assertLess(rem2, rem1)
-            self.assertNotEqual(rem1, rem2)
+    def test_preparation_overrun_preserves_encoding_eta(self):
+        """Garante que atrasos na fase de preparação (ex: 500 clipes) não colapsem a estimativa para 2 segundos."""
+        job = app.Job(id='test-prep-overrun', status='running')
+        job.created_at = 1000.0
+        job.started_at = 1000.0
+        job.estimated_total_seconds = 1200.0
+        job.percent = 20.0
+        job.rendered_timeline_duration = 0.0
+        job.total_timeline_duration = 1800.0
+        job.preflight_summary['active_render_estimate'] = {
+            'seconds': 1200.0,
+            'confidence': 'calibrated',
+            'stage_forecast': {
+                'audio': 20.0,
+                'direction': 30.0,
+                'subtitles_ass': 10.0,
+                'visual_analysis': 40.0,
+                'segments': 800.0,
+                'composition': 250.0,
+                'mux': 20.0,
+            }
+        }
+        app.JOBS[job.id] = job
+
+        with patch('time.time', return_value=2500.0):
+            res = self.client.get(f'/api/status/{job.id}').json()
+            rem = res['eta_summary']['estimated_remaining_seconds']
+            self.assertGreater(rem, 700.0, f"Remaining ETA ({rem}s) collapsed instead of preserving encoding duration!")
+
+    def test_analyze_voice_energy_vectorized(self):
+        """Verifica que analyze_voice_energy usa numpy vetorizado sem erro e calcula RMS correto."""
+        import numpy as np
+        t = np.linspace(0, 10, 10000, endpoint=False)
+        sig = (np.sin(2 * np.pi * 5 * t) * 16000).astype(np.int16)
+        raw_bytes = sig.tobytes()
+
+        class MockCompletedProcess:
+            returncode = 0
+            stdout = raw_bytes
+
+        with patch('app._run_hidden', return_value=MockCompletedProcess()):
+            res = app.analyze_voice_energy(Path(__file__), 10.0, Path("."))
+            self.assertTrue(res.get("available"))
+            self.assertEqual(len(res.get("points", [])), 10)
 
     def test_smart_image_motion_and_easing(self):
         """Verifica os 10 arquétipos, anti-repetição, safe framing e interpolação Hermite sem filtros destrutivos."""

@@ -6949,8 +6949,19 @@ def enforce_clean_opening_protocol(
     if len(valid_pairs) <= 1:
         return valid_pairs, {"enforced": False, "swapped": 0}
 
+    visual_clean_active = bool(job.options.get("visualCleanFilter", False))
+
     def _hero_score(p: Path, d: float) -> float:
-        an = probe_visual_clean_health(p, d, "normal", cwd=work)
+        an: dict[str, Any] = {}
+        ckey = visual_clean_cache_key(p, d, work)
+        with VISUAL_CLEAN_CACHE_LOCK:
+            if ckey in VISUAL_CLEAN_CACHE:
+                an = VISUAL_CLEAN_CACHE[ckey]
+        if not an:
+            if visual_clean_active:
+                an = probe_visual_clean_health(p, d, "normal", cwd=work)
+            else:
+                an = {"category": "clean", "action": "keep", "metrics": {}}
         cat = str(an.get("category") or "clean")
         act = str(an.get("action") or "keep")
         if act == "hard_reject" or cat in {"black_screen", "static_black_screen", "presenter", "webcam_pip", "presentation_slide", "ui_screenshot"}:
@@ -7199,16 +7210,13 @@ def solve_kuhn_munkres_broll_assignment(affinity_matrix: list[list[float]]) -> l
 
     # Native Python Hungarian (Kuhn-Munkres) O(N*M^2) with zero dependencies (fast, standalone)
     try:
-        scipy_opt = sys.modules.get("scipy.optimize")
-        if scipy_opt is not None:
-            lsa = getattr(scipy_opt, "linear_sum_assignment", None)
-            if lsa:
-                import numpy as np  # type: ignore
-                aff_np = np.array(affinity_matrix, dtype=float)
-                max_v = float(aff_np.max()) if aff_np.size > 0 else 1.0
-                cost_matrix = max_v - aff_np
-                row_ind, col_ind = lsa(cost_matrix)
-                return [(int(r), int(c)) for r, c in zip(row_ind, col_ind)]
+        from scipy.optimize import linear_sum_assignment  # type: ignore
+        import numpy as np  # type: ignore
+        aff_np = np.array(affinity_matrix, dtype=float)
+        max_v = float(aff_np.max()) if aff_np.size > 0 else 1.0
+        cost_matrix = max_v - aff_np
+        row_ind, col_ind = linear_sum_assignment(cost_matrix)
+        return [(int(r), int(c)) for r, c in zip(row_ind, col_ind)]
     except Exception:
         pass
 
@@ -7293,6 +7301,7 @@ def match_media_to_subtitles(
 
     # 1. Carrega tokens, perfis visuais e vetores semânticos de cada mídia
     media_info_list: list[dict[str, Any]] = []
+    visual_clean_active = bool(job.options.get("visualCleanFilter", False))
     for idx, (path, dur) in enumerate(valid_pairs):
         tokens = extract_media_tokens(path)
         prof = get_media_visual_profile(path, dur, cwd=cwd)
@@ -7309,7 +7318,16 @@ def match_media_to_subtitles(
         media_sem = {k: round(v / tot_m, 4) for k, v in media_sem.items()}
         dominant_theme = max(media_sem, key=lambda k: media_sem[k])
 
-        v_analysis = probe_visual_clean_health(path, dur, "normal", cwd=cwd)
+        # Fast-path: aproveita diagnóstico prévio em cache se disponível.
+        # Caso o filtro visual esteja desativado e não haja cache, usa perfil seguro sem disparar subprocessos lentos.
+        v_analysis: dict[str, Any] = {}
+        ckey = visual_clean_cache_key(path, dur, cwd)
+        with VISUAL_CLEAN_CACHE_LOCK:
+            if ckey in VISUAL_CLEAN_CACHE:
+                v_analysis = VISUAL_CLEAN_CACHE[ckey]
+        if not v_analysis and visual_clean_active:
+            v_analysis = probe_visual_clean_health(path, dur, "normal", cwd=cwd)
+
         v_metrics = v_analysis.get("metrics") or {}
         v_qscore = float(v_metrics.get("quality_score") or prof.get("quality_score") or 0.70)
         v_edge = float(v_metrics.get("edge_density") or 0.04)
@@ -19846,7 +19864,7 @@ def make_segments_smart(
             trim_start = get_media_clean_start_offset(src, cwd=work)
             if trim_start > 0.15:
                 return str(src.resolve()).lower(), trim_start
-            v_health = probe_video_render_health(src, dur, cwd=work)
+            v_health = probe_video_render_health(src, dur, cwd=work, probe_frames=False)
             if float(v_health.get("suggested_offset", 0.0) or 0.0) > 0.3:
                 return str(src.resolve()).lower(), float(v_health["suggested_offset"])
         except Exception:
@@ -20061,6 +20079,7 @@ def make_segments_smart(
     next_segment_no = 1
     completed_planned_duration = 0.0
     render_state_lock = threading.RLock()
+    job.segment_render_started_at = time.time()
 
     def render_one(plan: SegmentPlan, segment_no: int) -> tuple[Path | None, float]:
         nonlocal completed_planned_duration
@@ -21652,16 +21671,30 @@ def analyze_voice_energy(audio_file: Path, duration: float, work: Path) -> dict[
         )
         if result.returncode != 0 or not result.stdout:
             return {"available": False, "points": [], "reason": "amostra PCM indisponivel"}
-        samples = array("h")
-        samples.frombytes(result.stdout)
-        window = 1000
-        rms_values: list[float] = []
-        for start in range(0, len(samples), window):
-            chunk = samples[start:start + window]
-            if not chunk:
-                continue
-            square_mean = sum(float(value) * float(value) for value in chunk) / len(chunk)
-            rms_values.append(square_mean ** 0.5)
+        try:
+            import numpy as np
+        except ImportError:
+            np = None
+        if np is not None:
+            raw_arr = np.frombuffer(result.stdout, dtype=np.int16)
+            window = 1000
+            n_chunks = len(raw_arr) // window
+            if n_chunks > 0:
+                chunks = raw_arr[:n_chunks * window].reshape(-1, window).astype(np.float32)
+                rms_values = np.sqrt(np.mean(chunks ** 2, axis=1)).tolist()
+            else:
+                rms_values = []
+        else:
+            samples = array("h")
+            samples.frombytes(result.stdout)
+            window = 1000
+            rms_values = []
+            for start in range(0, len(samples), window):
+                chunk = samples[start:start + window]
+                if not chunk:
+                    continue
+                square_mean = sum(float(value) * float(value) for value in chunk) / len(chunk)
+                rms_values.append(square_mean ** 0.5)
         if not rms_values:
             return {"available": False, "points": [], "reason": "sem amostras"}
         floor = max(1.0, sorted(rms_values)[max(0, int(len(rms_values) * 0.12) - 1)])
@@ -24321,8 +24354,10 @@ def status(job_id: str):
 
     # Live speed & throughput estimation (EMA)
     last_ema = getattr(job, "_ema_speed", None)
-    if rendered_sec > 0.5 and elapsed > 2.0:
-        inst_speed = rendered_sec / elapsed
+    segment_render_start = getattr(job, "segment_render_started_at", None)
+    if rendered_sec > 0.5:
+        encoding_elapsed = max(1.0, (now_ts - segment_render_start) if segment_render_start else min(elapsed, rendered_sec * 1.5))
+        inst_speed = rendered_sec / encoding_elapsed
         if last_ema is None:
             ema_speed = inst_speed
         else:
@@ -24363,7 +24398,15 @@ def status(job_id: str):
             base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
             if base_est <= 0.0:
                 base_est = max(60.0, total_sec * 0.85)
-            raw_remaining = max(5.0, base_est - elapsed)
+            stage_forecast = (active_estimate or {}).get("stage_forecast") or {}
+            if stage_forecast:
+                est_prep = max(10.0, sum(float(stage_forecast.get(k, 0)) for k in ("audio", "direction", "subtitles_ass", "visual_analysis")))
+                est_encode = max(25.0, base_est - est_prep)
+            else:
+                est_prep = max(10.0, base_est * 0.15)
+                est_encode = max(25.0, base_est * 0.85)
+            prep_remaining = max(3.0, est_prep - elapsed)
+            raw_remaining = prep_remaining + est_encode
             eta_state = "calibrated"
             eta_confidence = "medium"
             eta_reason = "estimativa inicial baseada no projeto"
@@ -24374,11 +24417,12 @@ def status(job_id: str):
             dt = max(0.0, now_ts - last_time)
             if 0.0 < dt < 30.0:
                 expected_eta = max(1.0, last_eta - dt)
-                smoothed = 0.85 * expected_eta + 0.15 * raw_remaining
-                # Crucial fix: never allow ETA to grow uncontrollably
-                smoothed = min(smoothed, last_eta + 0.5)
-                smoothed = max(1.0, smoothed)
-                remaining = round(smoothed, 1)
+                if raw_remaining > expected_eta:
+                    smoothed = 0.80 * expected_eta + 0.20 * raw_remaining
+                    smoothed = min(smoothed, expected_eta + 8.0)
+                else:
+                    smoothed = 0.85 * expected_eta + 0.15 * raw_remaining
+                remaining = max(1.0, round(smoothed, 1))
             else:
                 remaining = round(raw_remaining, 1)
         else:
