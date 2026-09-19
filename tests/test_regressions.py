@@ -4,9 +4,11 @@ import atexit
 import gc
 import io
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -416,6 +418,80 @@ class Regressions(unittest.TestCase):
             w, h = app.probe_image_dimensions(tgt)
             self.assertEqual(w, 320)
             self.assertEqual(h, 240)
+
+
+    def test_visual_clean_cache_key_duration_invariant(self):
+        """Verifica se visual_clean_cache_key é consistente independentemente do tempo de probe passado."""
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "sample.mp4"
+            p.write_bytes(b"testmp4data" * 200)
+            k1 = app.visual_clean_cache_key(p, duration=5.0)
+            k2 = app.visual_clean_cache_key(p, duration=15.0)
+            k3 = app.visual_clean_cache_key(p, duration=0.0)
+            self.assertEqual(k1, k2)
+            self.assertEqual(k2, k3)
+
+    def test_ema_eta_and_speed_calculation(self):
+        """Verifica se o cálculo de throughput EMA, FPS e ETA decrescente funciona corretamente."""
+        job = app.Job(
+            id="test-job-eta-ema",
+            status="running",
+            percent=45.0,
+            options={"mode": "standard"},
+            work=Path(tempfile.gettempdir()),
+        )
+        job.started_at = time.time() - 100.0  # 100 seconds elapsed
+        job.rendered_timeline_duration = 150.0  # 150s rendered => 1.5x realtime
+        job.total_timeline_duration = 300.0  # 300s total timeline
+        app.JOBS[job.id] = job
+        try:
+            status_data = app.status(job.id)
+            eta = status_data.get("eta_summary") or {}
+            self.assertIsNotNone(eta.get("speed_factor"))
+            self.assertAlmostEqual(eta["speed_factor"], 1.5, delta=0.1)
+            self.assertIn("1.50x tempo real", eta.get("speed_label", ""))
+            self.assertIn("45.0 FPS", eta.get("speed_label", ""))
+            # Remaining timeline is 150s at 1.5x speed => ~100s + overhead
+            rem = eta.get("estimated_remaining_seconds", 0)
+            self.assertGreater(rem, 80.0)
+            self.assertLess(rem, 130.0)
+        finally:
+            app.JOBS.pop(job.id, None)
+
+    def test_build_pcm_sfx_event_bed_numpy(self):
+        """Verifica se a mixagem de efeitos de áudio em memória funciona e gera um WAV PCM válido."""
+        import wave, struct
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            clip1 = work / "clip1.wav"
+            clip2 = work / "clip2.wav"
+            sr = 48000
+            for c_path in (clip1, clip2):
+                with wave.open(str(c_path), "wb") as wf:
+                    wf.setnchannels(2)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sr)
+                    # 0.5s of sine-like audio
+                    samples = bytearray()
+                    for s_i in range(int(0.5 * sr)):
+                        val = int(5000 * math.sin(s_i * 0.1))
+                        samples += struct.pack("<hh", val, val)
+                    wf.writeframes(samples)
+
+            prepared = [
+                ({"time": 1.0, "effect": "whoosh"}, clip1),
+                ({"time": 2.5, "effect": "hit"}, clip2),
+            ]
+            total_dur = 4.0
+            bed = app.build_pcm_sfx_event_bed(prepared, total_dur, work)
+            self.assertTrue(bed.exists())
+            self.assertGreater(bed.stat().st_size, 44)
+            with wave.open(str(bed), "rb") as wf:
+                self.assertEqual(wf.getnchannels(), 2)
+                self.assertEqual(wf.getsampwidth(), 2)
+                self.assertEqual(wf.getframerate(), 48000)
+                frames = wf.getnframes()
+                self.assertAlmostEqual(frames / 48000.0, total_dur, delta=0.1)
 
 
 if __name__ == '__main__':

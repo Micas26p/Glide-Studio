@@ -7636,9 +7636,9 @@ def visual_clean_cache_key(path: Path, duration: float = 0.0, cwd: Path | None =
                     sig = f"{size}_{h}"
             except Exception:
                 sig = f"{size}_{stat.st_mtime_ns}"
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name}:{sig}:{duration:.2f}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name.lower()}:{sig}"
     except Exception:
-        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name}:{duration:.2f}"
+        return f"v{VISUAL_CLEAN_CACHE_VERSION}:{scope}:{resolved.name.lower()}"
 
 
 def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = None, start_offset: float = 0.0) -> list[bytes]:
@@ -7690,6 +7690,41 @@ def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = N
         except Exception:
             pass
         return []
+
+    # Extração de vídeo em alta velocidade via OpenCV nativo (elimina overhead de subprocessos FFmpeg)
+    try:
+        import cv2
+        import numpy as np
+
+        resolved_v = _resolved_media_path(path, cwd)
+        cap = cv2.VideoCapture(str(resolved_v))
+        if cap.isOpened():
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if total_frames > 2:
+                sample_count = 3 if duration < 3.0 else (5 if duration < 15.0 else 6)
+                step = max(1, total_frames // (sample_count + 1))
+                indices = [min(total_frames - 1, step * (i + 1)) for i in range(sample_count)]
+                extracted: list[bytes] = []
+                for f_idx in indices:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                    ret, frame = cap.read()
+                    if ret and frame is not None and frame.size > 0:
+                        h_orig, w_orig = frame.shape[:2]
+                        scale = min(VISUAL_CLEAN_FRAME_W / max(1, w_orig), VISUAL_CLEAN_FRAME_H / max(1, h_orig))
+                        nw, nh = max(1, int(w_orig * scale)), max(1, int(h_orig * scale))
+                        resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
+                        canvas = np.zeros((VISUAL_CLEAN_FRAME_H, VISUAL_CLEAN_FRAME_W, 3), dtype=np.uint8)
+                        y_off = (VISUAL_CLEAN_FRAME_H - nh) // 2
+                        x_off = (VISUAL_CLEAN_FRAME_W - nw) // 2
+                        canvas[y_off:y_off + nh, x_off:x_off + nw] = resized
+                        canvas_rgb = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+                        extracted.append(canvas_rgb.tobytes())
+                cap.release()
+                if len(extracted) >= min(2, sample_count):
+                    return extracted
+        cap.release()
+    except Exception:
+        pass
 
     if duration < 2.0:
         count = 3
@@ -14061,8 +14096,8 @@ def compose_final_visuals(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-    comp_threads = max(2, min(4 if is_laptop else 8, int(logical_cpus * 0.50)))
-    comp_filter_threads = max(1, min(2 if is_laptop else 4, logical_cpus // 4))
+    comp_threads = max(4, min(12, int(logical_cpus * 0.75)))
+    comp_filter_threads = max(2, min(8, int(logical_cpus * 0.50)))
     filter_args = [
         "-threads", str(comp_threads),
         "-filter_threads", str(comp_filter_threads),
@@ -15621,7 +15656,7 @@ def build_pcm_sfx_event_bed(
     audio_total: float,
     work: Path,
 ) -> Path:
-    """Mix short PCM effects into one sample-accurate bed without a huge FFmpeg graph."""
+    """Mix short PCM effects into one sample-accurate bed in memory for ultra-fast performance."""
     sample_rate = 48000
     channels = 2
     sample_width = 2
@@ -15648,54 +15683,78 @@ def build_pcm_sfx_event_bed(
         b"data",
         data_size,
     )
-    with bed.open("wb") as target:
-        target.write(header)
-        target.seek(44 + data_size - 1)
-        target.write(b"\0")
 
-    chunk_frames = 8192
-    with bed.open("r+b", buffering=0) as target:
+    try:
+        import numpy as np
+        total_samples = total_frames * channels
+        bed_array = np.zeros(total_samples, dtype=np.int32)
         for event, clip in prepared:
             start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
             if start_frame >= total_frames:
                 continue
             with wave.open(str(clip), "rb") as source:
-                if (
-                    source.getnchannels() != channels
-                    or source.getsampwidth() != sample_width
-                    or source.getframerate() != sample_rate
-                    or source.getcomptype() != "NONE"
-                ):
-                    raise RuntimeError(f"FX fora do formato PCM esperado: {clip.name}")
-                written_frames = 0
-                remaining_frames = min(source.getnframes(), total_frames - start_frame)
-                while written_frames < remaining_frames:
-                    take = min(chunk_frames, remaining_frames - written_frames)
-                    incoming_raw = source.readframes(take)
-                    if not incoming_raw:
-                        break
-                    incoming = array("h")
-                    incoming.frombytes(incoming_raw)
-                    if sys.byteorder != "little":
-                        incoming.byteswap()
-                    byte_offset = 44 + (start_frame + written_frames) * frame_bytes
-                    target.seek(byte_offset)
-                    existing_raw = target.read(len(incoming_raw))
-                    if len(existing_raw) < len(incoming_raw):
-                        existing_raw += b"\0" * (len(incoming_raw) - len(existing_raw))
-                    existing = array("h")
-                    existing.frombytes(existing_raw)
-                    if sys.byteorder != "little":
-                        existing.byteswap()
-                    for index, sample in enumerate(incoming):
-                        mixed = int(existing[index]) + int(sample)
-                        existing[index] = max(-32768, min(32767, mixed))
-                    if sys.byteorder != "little":
-                        existing.byteswap()
-                    target.seek(byte_offset)
-                    target.write(existing.tobytes())
-                    written_frames += len(incoming) // channels
-    return bed
+                n_frames = min(source.getnframes(), total_frames - start_frame)
+                if n_frames <= 0:
+                    continue
+                raw = source.readframes(n_frames)
+                if not raw:
+                    continue
+                clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+                start_sample = start_frame * channels
+                end_sample = start_sample + len(clip_arr)
+                if end_sample > total_samples:
+                    clip_arr = clip_arr[:total_samples - start_sample]
+                    end_sample = total_samples
+                bed_array[start_sample:end_sample] += clip_arr
+
+        np.clip(bed_array, -32768, 32767, out=bed_array)
+        final_pcm = bed_array.astype(np.int16).tobytes()
+        with bed.open("wb") as target:
+            target.write(header)
+            target.write(final_pcm)
+        return bed
+    except Exception:
+        with bed.open("wb") as target:
+            target.write(header)
+            target.seek(44 + data_size - 1)
+            target.write(b"\0")
+
+        chunk_frames = 8192
+        with bed.open("r+b", buffering=0) as target:
+            for event, clip in prepared:
+                start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
+                if start_frame >= total_frames:
+                    continue
+                with wave.open(str(clip), "rb") as source:
+                    written_frames = 0
+                    remaining_frames = min(source.getnframes(), total_frames - start_frame)
+                    while written_frames < remaining_frames:
+                        take = min(chunk_frames, remaining_frames - written_frames)
+                        incoming_raw = source.readframes(take)
+                        if not incoming_raw:
+                            break
+                        incoming = array("h")
+                        incoming.frombytes(incoming_raw)
+                        if sys.byteorder != "little":
+                            incoming.byteswap()
+                        byte_offset = 44 + (start_frame + written_frames) * frame_bytes
+                        target.seek(byte_offset)
+                        existing_raw = target.read(len(incoming_raw))
+                        if len(existing_raw) < len(incoming_raw):
+                            existing_raw += b"\0" * (len(incoming_raw) - len(existing_raw))
+                        existing = array("h")
+                        existing.frombytes(existing_raw)
+                        if sys.byteorder != "little":
+                            existing.byteswap()
+                        for index, sample in enumerate(incoming):
+                            mixed = int(existing[index]) + int(sample)
+                            existing[index] = max(-32768, min(32767, mixed))
+                        if sys.byteorder != "little":
+                            existing.byteswap()
+                        target.seek(byte_offset)
+                        target.write(existing.tobytes())
+                        written_frames += len(incoming) // channels
+        return bed
 
 
 SFX_PREVIEW_EFFECTS: dict[str, dict[str, Any]] = {
@@ -20141,18 +20200,21 @@ def make_segments_smart(
             _append_log(job, f"Clip curto: {display_name} planeado={plan.target_duration:.2f}s real={actual:.2f}s. O motor vai compensar.")
         with render_state_lock:
             completed_planned_duration += min(plan.target_duration, actual)
+            job.rendered_timeline_duration = completed_planned_duration
+            job.total_timeline_duration = max(1.0, audio_total)
             has_comp = getattr(job, "has_visual_composition", False)
-            max_seg_pct = 60.0 if has_comp else 92.0
-            seg_base = 30.0
+            max_seg_pct = 85.0 if has_comp else 94.0
+            seg_base = 5.0
             seg_span = max_seg_pct - seg_base
-            pct = min(max_seg_pct, seg_base + (completed_planned_duration / max(1.0, audio_total)) * seg_span)
+            seg_progress = min(1.0, completed_planned_duration / max(1.0, audio_total))
+            pct = min(max_seg_pct, seg_base + (seg_progress * seg_span))
             job.percent = max(job.percent, pct)
             completed_count = getattr(job, "_completed_segments_count", 0) + 1
             job._completed_segments_count = completed_count
             total_plans = len(plans)
             job.stage = "rendering"
             job.stage_label = f"Renderizando clipes ({completed_count}/{total_plans})"
-            job.message = f"Clipes: {completed_count}/{total_plans} concluídos ({int(job.percent)}%) | {actual:.1f}s renderizados"
+            job.message = f"Clipes: {completed_count}/{total_plans} ({int(job.percent)}%) | {completed_planned_duration:.1f}s/{audio_total:.1f}s da timeline"
         return out, actual
 
     performance_start(job, "segments")
@@ -22576,9 +22638,10 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
     fast_master = (priority != "quality") or (job.estimated_render_duration > 180.0)
     if fast_master:
         mastered = work / "audio_mastered.wav"
-        fast_filter = f"{first_pass_filter(master_profile)}:linear=true,alimiter=limit={limiter_value(master_profile)}"
+        fast_filter = f"volume=0.96,alimiter=limit={limiter_value(master_profile)}:attack=5:release=50:asc=1"
         has_comp = getattr(job, "has_visual_composition", False)
-        job.percent = max(job.percent, 64.0 if has_comp else 95.0)
+        comp_master_pct = 88.5 if has_comp else 95.0
+        job.percent = max(job.percent, comp_master_pct)
         run_cmd(
             job,
             [
@@ -22591,7 +22654,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
             cwd=work,
             quiet_success=True,
         )
-        job.percent = max(job.percent, 65.0 if has_comp else 95.5)
+        job.percent = max(job.percent, comp_master_pct + 0.5)
         job.audio_master_summary = single_pass_summary(master_profile)
         return mastered
 
@@ -24252,66 +24315,58 @@ def status(job_id: str):
     active_estimate = (job.preflight_summary or {}).get("active_render_estimate") or {}
     stage_remaining: dict[str, float] = {}
 
+    pct = float(job.percent or 0.0)
+    rendered_sec = float(getattr(job, "rendered_timeline_duration", 0.0))
+    total_sec = float(getattr(job, "total_timeline_duration", 0.0) or job.estimated_render_duration or 1.0)
+
+    # Live speed & throughput estimation (EMA)
+    last_ema = getattr(job, "_ema_speed", None)
+    if rendered_sec > 0.5 and elapsed > 2.0:
+        inst_speed = rendered_sec / elapsed
+        if last_ema is None:
+            ema_speed = inst_speed
+        else:
+            alpha = 0.15
+            ema_speed = alpha * inst_speed + (1.0 - alpha) * last_ema
+        job._ema_speed = ema_speed
+    else:
+        ema_speed = last_ema or 0.0
+
     if job.status != "running":
         remaining = 0.0
         estimated_total = elapsed
         eta_confidence = str(job.estimate_confidence or "historical")
         eta_state = "complete"
         eta_reason = ""
-    elif not active_estimate and elapsed < 12.0 and job.percent < 8.0:
+    elif pct >= 99.0 or (rendered_sec >= total_sec and total_sec > 0):
+        remaining = 1.0
+        estimated_total = elapsed + 1.0
+        eta_state = "finalizing"
+        eta_confidence = "high"
+        eta_reason = "finalizando entrega e salvando vídeo"
+    elif elapsed < 8.0 or (rendered_sec <= 0.0 and pct < 6.0):
         remaining = 0.0
         estimated_total = 0.0
         eta_state = "warming_up"
         eta_confidence = "low"
         eta_reason = "preparando o plano e medindo as etapas"
     else:
-        pct = float(job.percent or 0.0)
-        base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
-        if base_est <= 0.0:
-            base_est = max(180.0, elapsed * 1.5)
-
-        media_count = len(job.upload_paths or job.manifest or [])
-        preflight_budget = max(25.0, min(base_est * 0.28, max(35.0, float(media_count) * 0.55 + 25.0)))
-        encoding_budget = max(30.0, base_est - preflight_budget)
-
-        if pct < 30.0:
-            pre_fraction = max(0.04, min(0.99, pct / 30.0))
-            obs_preflight_total = elapsed / pre_fraction
-            w_pre = min(0.85, max(0.15, pre_fraction))
-            effective_preflight_total = (1.0 - w_pre) * max(elapsed + 5.0, preflight_budget) + w_pre * max(elapsed + 5.0, obs_preflight_total)
-            rem_preflight = max(3.0, effective_preflight_total - elapsed)
-            rem_encoding = encoding_budget
-            raw_remaining = rem_preflight + rem_encoding
-
-            eta_confidence = str(job.estimate_confidence or "historical")
-            if eta_confidence == "historical":
-                eta_state = "calibrated"
-                eta_reason = "baseada no histórico deste PC"
-            elif eta_confidence == "preliminary":
-                eta_state = "variable"
-                eta_reason = "estimativa preliminar da preparação"
-            else:
-                eta_state = "variable"
-                eta_reason = "preparando camadas e clipes"
-        else:
-            if getattr(job, "_preflight_elapsed", None) is None:
-                job._preflight_elapsed = elapsed
-            pre_done = float(job._preflight_elapsed or preflight_budget)
-            enc_elapsed = max(1.0, elapsed - pre_done)
-            enc_fraction = max(0.01, min(0.995, (pct - 30.0) / 70.0))
-
-            if enc_fraction < 0.05 or enc_elapsed < 12.0:
-                raw_remaining = max(10.0, encoding_budget - enc_elapsed)
-            else:
-                obs_enc_total = enc_elapsed / enc_fraction
-                obs_enc_rem = max(3.0, obs_enc_total - enc_elapsed)
-                proj_enc_rem = max(3.0, encoding_budget - enc_elapsed)
-                w_enc = min(0.92, 0.20 + 0.75 * enc_fraction)
-                raw_remaining = (1.0 - w_enc) * proj_enc_rem + w_enc * obs_enc_rem
-
+        has_comp = bool(getattr(job, "has_visual_composition", False))
+        overhead_sec = 6.0 if has_comp else 2.0
+        if ema_speed > 0.05 and rendered_sec > 0.5:
+            rem_timeline = max(0.0, total_sec - rendered_sec)
+            raw_remaining = (rem_timeline / ema_speed) + overhead_sec
             eta_state = "adaptive"
-            eta_confidence = str(job.estimate_confidence or "historical")
-            eta_reason = "ajustada pelo progresso observado"
+            eta_confidence = "high"
+            eta_reason = "calculada com base na velocidade real observada"
+        else:
+            base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
+            if base_est <= 0.0:
+                base_est = max(60.0, total_sec * 0.85)
+            raw_remaining = max(5.0, base_est - elapsed)
+            eta_state = "calibrated"
+            eta_confidence = "medium"
+            eta_reason = "estimativa inicial baseada no projeto"
 
         last_eta = getattr(job, "_last_status_eta_sec", None)
         last_time = getattr(job, "_last_status_time", None)
@@ -24319,9 +24374,10 @@ def status(job_id: str):
             dt = max(0.0, now_ts - last_time)
             if 0.0 < dt < 30.0:
                 expected_eta = max(1.0, last_eta - dt)
-                smoothed = 0.75 * expected_eta + 0.25 * raw_remaining
-                smoothed = min(smoothed, last_eta + 3.0)
-                smoothed = max(smoothed, max(1.0, last_eta - (dt * 2.5)))
+                smoothed = 0.85 * expected_eta + 0.15 * raw_remaining
+                # Crucial fix: never allow ETA to grow uncontrollably
+                smoothed = min(smoothed, last_eta + 0.5)
+                smoothed = max(1.0, smoothed)
                 remaining = round(smoothed, 1)
             else:
                 remaining = round(raw_remaining, 1)
@@ -24332,7 +24388,7 @@ def status(job_id: str):
         job._last_status_time = now_ts
 
         if job.render_budget_seconds > 0:
-            budget_ceiling = max(10.0, (job.render_budget_seconds * 1.10) - elapsed)
+            budget_ceiling = max(5.0, (job.render_budget_seconds * 1.05) - elapsed)
             remaining = min(remaining, budget_ceiling)
 
         estimated_total = elapsed + remaining
@@ -24346,9 +24402,9 @@ def status(job_id: str):
         elif eta_state == "calibrated":
             spread = 0.15
         elif eta_state == "adaptive":
-            spread = 0.22
+            spread = 0.20
         else:
-            spread = 0.30
+            spread = 0.25
     else:
         spread = 0.0
 
@@ -24362,6 +24418,9 @@ def status(job_id: str):
         "remaining_min_seconds": round(rem_min),
         "remaining_max_seconds": round(rem_max),
         "render_duration_seconds": round(job.estimated_render_duration, 3),
+        "speed_factor": round(ema_speed, 2) if ema_speed > 0 else None,
+        "speed_fps": round(ema_speed * 30.0, 1) if ema_speed > 0 else None,
+        "speed_label": f"{ema_speed:.2f}x tempo real · {ema_speed * 30.0:.1f} FPS" if ema_speed >= 0.05 else "",
         "confidence": eta_confidence,
         "state": eta_state,
         "reason": eta_reason,

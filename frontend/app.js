@@ -4795,57 +4795,33 @@ function formatEtaSummary(eta, status = 'running', currentPercent = 0){
   const budgetSec = Number(eta.budget_seconds || 0);
   const pct = Math.max(0, Math.min(100, Number(currentPercent || 0)));
 
-  // "finalizando etapas" APENAS quando estiver de fato no final da esteira
   let limitText = '';
-  if(pct >= 88){
+  if(pct >= 98){
     limitText = ' · finalizando etapas';
   } else if(budgetSec > 0 && elapsedSec < budgetSec){
     limitText = ` · limite ${formatTime(budgetSec)}`;
   }
 
+  const speedText = eta.speed_label ? ` · ${eta.speed_label}` : '';
   const stateName = String(eta.state || eta.confidence || '').toLowerCase();
-  const reason = String(eta.reason || '').toLowerCase();
-  const isPreliminary = reason.includes('preliminar');
   if(stateName === 'warming_up' || stateName === 'unknown'){
-    return `Decorrido no render ${elapsed} - calculando tempo restante...${limitText}`;
+    return `Decorrido ${elapsed} · calculando tempo restante...${limitText}`;
   }
 
-  let min = Number(eta.remaining_min_seconds || 0);
-  let max = Number(eta.remaining_max_seconds || 0);
   let rem = Number(eta.estimated_remaining_seconds || 0);
-
-  // Sanidade visual e física estrita: calcula tempo restante de forma dinâmica e proporcional ao progresso real
-  let calcRem = 0;
-  if(pct >= 3){
-    const estTotal = elapsedSec / (pct / 100);
-    calcRem = Math.max(0, Math.round(estTotal - elapsedSec));
-  }
-
-  if(calcRem > 0){
-    if(rem <= 0 || (budgetSec > 0 && elapsedSec >= budgetSec) || Math.abs(rem - calcRem) > (calcRem * 0.65)){
-      rem = calcRem;
-    } else {
-      rem = Math.round((rem * 0.35) + (calcRem * 0.65));
-    }
-    min = Math.round(rem * 0.85);
-    max = Math.round(rem * 1.20);
-  }
-
   if(pct >= 98){
-    return `Decorrido no render ${elapsed} - finalizando etapas...`;
-  }
-
-  if(stateName === 'variable' && isPreliminary && min && max && max > min){
-    return `Decorrido no render ${elapsed} - estimativa preliminar: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+    return `Decorrido ${elapsed} · finalizando etapas...`;
   }
 
   if(rem > 0){
-    return `Decorrido no render ${elapsed} - restante aprox. ${formatTime(rem)}${limitText}`;
+    return `Decorrido ${elapsed} · restante aprox. ${formatTime(rem)}${speedText}${limitText}`;
   }
+  let min = Number(eta.remaining_min_seconds || 0);
+  let max = Number(eta.remaining_max_seconds || 0);
   if(min && max && max > min){
-    return `Decorrido no render ${elapsed} - restante: ${formatTime(min)}-${formatTime(max)}${limitText}`;
+    return `Decorrido ${elapsed} · restante: ${formatTime(min)}-${formatTime(max)}${speedText}${limitText}`;
   }
-  return `Decorrido no render ${elapsed}${limitText}`;
+  return `Decorrido ${elapsed}${speedText}${limitText}`;
 }
 
 function renderDoneIsValidated(job){
@@ -7608,6 +7584,11 @@ async function monitorBackendQueue(){
               pauseQueueBtn.disabled = Boolean(bq.pause_requested);
               pauseQueueBtn.textContent = bq.pause_requested ? 'Pausa solicitada' : 'Pausar fila';
             }
+            if(stopRenderBtn){
+              stopRenderBtn.classList.remove('hidden');
+              stopRenderBtn.disabled = Boolean(bq.stop_requested);
+              stopRenderBtn.textContent = bq.stop_requested ? 'Parando...' : 'Parar render';
+            }
 
             const currentIndex = bq.current_index || 1;
             const totalCount = bq.total_count || state.projects.length;
@@ -7694,6 +7675,7 @@ async function monitorBackendQueue(){
             state.queuePauseRequested = false;
             document.body.classList.remove('queue-rendering');
             if(pauseQueueBtn) pauseQueueBtn.classList.add('hidden');
+            if(stopRenderBtn) stopRenderBtn.classList.add('hidden');
             if(renderQueueBtn){
               renderQueueBtn.disabled = false;
               const queueBtnLabel = renderQueueBtn.querySelector('span') || renderQueueBtn;
