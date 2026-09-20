@@ -580,6 +580,54 @@ class Regressions(unittest.TestCase):
             with self.assertRaises(app.RenderCancelled):
                 app.filter_renderable_videos(job, [work / "dummy.mp4"], work)
 
+    def test_hard_reject_outro_subscribe_static_video_and_black_screen(self):
+        """Garante que telas de subscribe/agradecimento, vídeos estáticos/congelados e
+        telas pretas são invariavelmente classificadas como hard_reject e eliminadas da timeline,
+        inclusive quando o filtro de velocidade estiver desativado (Hard-Gate obrigatório)."""
+        # 1. Classificação de tela de subscribe / YouTube outro
+        outro_metrics = {"source": "outro_subscribe.mp4", "metrics": {"mean": 55.0, "text_lines": 2, "has_red_subscribe_banner": 1.0}}
+        cl_outro = app._classify_visual_analysis(outro_metrics, "normal")
+        self.assertEqual(cl_outro.get("category"), "outro_subscribe_screen")
+        self.assertEqual(cl_outro.get("action"), "hard_reject")
+
+        # 2. Classificação de vídeo estático (movimento nulo / slide exportado como vídeo)
+        static_metrics = {"source": "frozen_slide.mp4", "metrics": {"mean": 60.0, "frame_diff": 0.8}}
+        cl_static = app._classify_visual_analysis(static_metrics, "normal", media_kind="video")
+        self.assertEqual(cl_static.get("category"), "static_video")
+        self.assertEqual(cl_static.get("action"), "hard_reject")
+
+        # 3. Classificação de tela preta
+        black_metrics = {"source": "dark_screen.mp4", "metrics": {"mean": 6.0, "black_ratio": 0.90}}
+        cl_black = app._classify_visual_analysis(black_metrics, "normal", media_kind="video")
+        self.assertIn(cl_black.get("category"), {"black_screen", "static_black_screen"})
+        self.assertEqual(cl_black.get("action"), "hard_reject")
+
+        # 4. Portão Rígido (Hard-Gate): mesmo com visualCleanFilter=False, clipes são bloqueados
+        job = app.Job(id="test_hard_gate_invariance", options={"visualCleanFilter": False})
+        pair_outro = (Path("outro.mp4"), 5.0)
+        pair_static = (Path("static.mp4"), 5.0)
+        pair_black = (Path("black.mp4"), 5.0)
+        pair_clean = (Path("broll_clean.mp4"), 5.0)
+
+        def mock_probe(p, d, lvl, cwd=None):
+            name = str(p)
+            if "outro" in name:
+                return {"category": "outro_subscribe_screen", "action": "hard_reject", "reason": "outro card"}
+            elif "static" in name:
+                return {"category": "static_video", "action": "hard_reject", "reason": "video estatico"}
+            elif "black" in name:
+                return {"category": "black_screen", "action": "hard_reject", "reason": "tela preta"}
+            return {"category": "clean", "action": "keep", "reason": "broll limpo"}
+
+        with unittest.mock.patch("app.probe_visual_clean_health", side_effect=mock_probe):
+            approved_pairs, summary = app.apply_visual_clean_filter(
+                job, [pair_outro, pair_static, pair_black, pair_clean], 20.0, Path(".")
+            )
+
+        self.assertEqual(len(approved_pairs), 1)
+        self.assertEqual(approved_pairs[0][0].name, "broll_clean.mp4")
+        self.assertEqual(summary.get("hard_rejected"), 3)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -975,7 +975,7 @@ function captureControlSnapshot(includeSubtitle = true){
     referenceStyleMode: referenceStyleModeSelect?.value === 'reference' ? 'reference' : 'inspiration',
     visualLanguagePackage: visualLanguagePackageSelect?.value || 'dark_doc',
     styleIntensity: styleIntensitySelect?.value || 'balanced',
-    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : false,
+    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : true,
     visualFilterLevel: normalizedVisualFilterLevel(visualFilterLevelSelect?.value),
     adaptiveVisualFilter: Boolean(adaptiveVisualFilterToggle?.checked),
     voiceNormalize: voiceNormalizeToggle ? voiceNormalizeToggle.checked : true,
@@ -1044,7 +1044,7 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   if($('#colorGradeSelect')) $('#colorGradeSelect').value = options.colorGradePreset || 'natural_balanced';
   if($('#gpuToggle')) $('#gpuToggle').checked = options.gpu !== false;
   if(qualityBoostToggle) qualityBoostToggle.checked = Boolean(options.qualityBoost);
-  if(visualCleanFilterToggle) visualCleanFilterToggle.checked = Boolean(options.visualCleanFilter);
+  if(visualCleanFilterToggle) visualCleanFilterToggle.checked = options.visualCleanFilter !== false;
   if(smartVisualDirectorToggle) smartVisualDirectorToggle.checked = options.smartVisualDirector !== false;
   if(referenceStyleEnabledToggle) referenceStyleEnabledToggle.checked = Boolean(options.referenceStyleEnabled && options.referenceStyleVideo);
   if(referenceStyleModeSelect) referenceStyleModeSelect.value = options.referenceStyleMode === 'reference' ? 'reference' : 'inspiration';
@@ -1201,7 +1201,7 @@ function snapshotProjectForRender(project){
     options.qualityBoost = qualityBoostToggle ? qualityBoostToggle.checked : false;
   }
   if(typeof options.visualCleanFilter !== 'boolean'){
-    options.visualCleanFilter = visualCleanFilterToggle ? visualCleanFilterToggle.checked : false;
+    options.visualCleanFilter = visualCleanFilterToggle ? visualCleanFilterToggle.checked : true;
   }
   if(!options.codec){
     options.codec = $('#codecSelect')?.value || 'h264';
@@ -3011,7 +3011,7 @@ async function refreshRenderEstimate(duration = currentTimelineDuration()){
     codec: $('#codecSelect')?.value || 'h264',
     gpu: $('#gpuToggle') ? Boolean($('#gpuToggle').checked) : true,
     qualityBoost: qualityBoostToggle ? qualityBoostToggle.checked : false,
-    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : false,
+    visualCleanFilter: visualCleanFilterToggle ? visualCleanFilterToggle.checked : true,
     smartVisualDirector: smartVisualDirectorToggle ? smartVisualDirectorToggle.checked : true,
     continuityMatch: continuityMatchToggle ? continuityMatchToggle.checked : false,
     continuityOutliersOnly: false,
@@ -5326,7 +5326,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     referenceStyleMode: optionValue('referenceStyleMode', referenceStyleModeSelect?.value === 'reference' ? 'reference' : 'inspiration') === 'reference' ? 'reference' : 'inspiration',
     visualLanguagePackage: optionValue('visualLanguagePackage', visualLanguagePackageSelect?.value || 'dark_doc'),
     styleIntensity: optionValue('styleIntensity', styleIntensitySelect?.value || 'balanced'),
-    visualCleanFilter: Boolean(optionValue('visualCleanFilter', visualCleanFilterToggle ? visualCleanFilterToggle.checked : false)),
+    visualCleanFilter: Boolean(optionValue('visualCleanFilter', visualCleanFilterToggle ? visualCleanFilterToggle.checked : true)),
     visualFilterLevel: normalizedVisualFilterLevel(optionValue('visualFilterLevel', visualFilterLevelSelect?.value || 'normal')),
     adaptiveVisualFilter: Boolean(optionValue('adaptiveVisualFilter', adaptiveVisualFilterToggle?.checked || false)),
     voiceNormalize: optionValue('voiceNormalize', voiceNormalizeToggle ? voiceNormalizeToggle.checked : true) !== false,

@@ -1611,7 +1611,7 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
             "smartVisualDirector": True,
             "autoDirector": True,
             "directorDecisionMode": "balanced",
-            "visualCleanFilter": False,
+            "visualCleanFilter": True,
             "visualFilterLevel": "normal",
             "adaptiveVisualFilter": False,
             "healthyRenderThreshold": 70,
@@ -1924,7 +1924,7 @@ def _migrate_high_speed_render_defaults_v130() -> None:
         "scoreVisualWindows": False,
         "continuityMatch": False,
         "continuityOutliersOnly": False,
-        "visualCleanFilter": False,
+        "visualCleanFilter": True,
         "gpu": True,
         "speedOptimizationVersion": 1,
     }
@@ -4837,7 +4837,7 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     nvidia_factor = 0.94 if gpu_effective and str(hw.get("acceleration") or "").startswith("NVIDIA") else 1.0
     encode_factor = perf_factor * nvidia_factor * (1.0 if gpu_effective else 1.72)
 
-    has_visual_clean = bool(options.get("visualCleanFilter", False))
+    has_visual_clean = bool(options.get("visualCleanFilter", True))
     dir_cost_max = min(90.0, 4.0 + duration * 0.008 + (m_count * 0.12) * perf_factor)
     va_cost_max = min(240.0, 6.0 + duration * 0.012 + (m_count * 0.35) * perf_factor) if has_visual_clean else 2.0
     dir_cost_qual = min(120.0, 8.0 + duration * 0.015 + (m_count * 0.18) * perf_factor)
@@ -6914,7 +6914,7 @@ def enforce_clean_opening_protocol(
     if len(valid_pairs) <= 1:
         return valid_pairs, {"enforced": False, "swapped": 0}
 
-    visual_clean_active = bool(job.options.get("visualCleanFilter", False))
+    visual_clean_active = bool(job.options.get("visualCleanFilter", True))
 
     def _hero_score(p: Path, d: float) -> float:
         an: dict[str, Any] = {}
@@ -6929,7 +6929,7 @@ def enforce_clean_opening_protocol(
                 an = {"category": "clean", "action": "keep", "metrics": {}}
         cat = str(an.get("category") or "clean")
         act = str(an.get("action") or "keep")
-        if act == "hard_reject" or cat in {"black_screen", "static_black_screen", "presenter", "webcam_pip", "presentation_slide", "ui_screenshot"}:
+        if act == "hard_reject" or cat in {"black_screen", "static_black_screen", "presenter", "webcam_pip", "presentation_slide", "ui_screenshot", "outro_subscribe_screen", "static_video"}:
             return -1000.0
         m = an.get("metrics") or {}
         mean_v = float(m.get("mean") or 50.0)
@@ -7266,7 +7266,7 @@ def match_media_to_subtitles(
 
     # 1. Carrega tokens, perfis visuais e vetores semânticos de cada mídia
     media_info_list: list[dict[str, Any]] = []
-    visual_clean_active = bool(job.options.get("visualCleanFilter", False))
+    visual_clean_active = bool(job.options.get("visualCleanFilter", True))
     for idx, (path, dur) in enumerate(valid_pairs):
         tokens = extract_media_tokens(path)
         prof = get_media_visual_profile(path, dur, cwd=cwd)
@@ -8038,6 +8038,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
     green_total = 0
     blue_total = 0
     saturation_total = 0.0
+    bottom_red_count = 0
+    bottom_red_cols = [0] * w
     for idx in range(total):
         base = idx * 3
         r, g, b = frame[base], frame[base + 1], frame[base + 2]
@@ -8056,6 +8058,10 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         )
         x = idx % w
         y = idx // w
+        if y >= int(h * 0.45):
+            if r > 130 and r > int(g * 1.55) and r > int(b * 1.55):
+                bottom_red_count += 1
+                bottom_red_cols[x] = 1
         if int(w * 0.24) <= x <= int(w * 0.76) and int(h * 0.08) <= y <= int(h * 0.90):
             center_pixels += 1
             if is_skin:
@@ -8070,6 +8076,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
                 torso_skin += 1
         if is_skin:
             skin[idx] = 1
+    active_red_cols = sum(bottom_red_cols)
+    has_red_subscribe_banner = 1.0 if (active_red_cols >= 10 and bottom_red_count >= 20) else 0.0
     values = gray
     mean = sum(values) / total
     variance = sum((px - mean) * (px - mean) for px in values) / total
@@ -8211,6 +8219,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         "green_mean": round(green_total / total, 3),
         "blue_mean": round(blue_total / total, 3),
         "saturation_mean": round(saturation_total / total, 5),
+        "has_red_subscribe_banner": has_red_subscribe_banner,
+        "bottom_red_count": bottom_red_count,
     }
     return metrics, bytes(gray), bytes(edge_mask)
 
@@ -8709,14 +8719,54 @@ def _classify_visual_analysis(
 
     med_black = float(metrics.get("black_ratio") or 0.0)
     is_black_screen = (
-        med_mean <= 14.0
-        or med_black >= 0.50
-        or (med_mean <= 26.0 and (med_stdev <= 38.0 or med_black >= 0.40))
-        or (med_black >= 0.40 and med_mean <= 32.0)
+        med_mean <= 18.0
+        or med_black >= 0.40
+        or (med_mean <= 30.0 and (med_stdev <= 40.0 or med_black >= 0.35))
+        or (med_black >= 0.35 and med_mean <= 36.0)
     )
     is_static_black = bool(
-        (med_diff <= 1.5 or is_image)
-        and (med_mean <= 26.0 or med_black >= 0.45 or is_black_screen)
+        (med_diff <= 2.0 or is_image)
+        and (med_mean <= 30.0 or med_black >= 0.40 or is_black_screen)
+    )
+
+    # Deteccao Rigorosa de Videos Estaticos (arquivos de video com movimento nulo ou congelado)
+    is_static_video = bool(
+        (not is_image)
+        and (
+            med_diff <= 1.8
+            or (med_diff <= 2.8 and (text_score >= 0.30 or text_lines >= 2 or uniform_bg >= 0.28 or med_edge >= 0.06 or med_persistence >= 0.40))
+        )
+    )
+
+    # Deteccao Rigorosa de Telas de Subscribe, Agradecimento e Outros
+    source_name = str(classified.get("source") or "").lower()
+    has_outro_name = any(tok in source_name for tok in (
+        "subscribe", "subscrib", "inscreva", "inscricao", "inscrição",
+        "thanks", "obrigado", "outro", "endcard", "end_card", "endscreen",
+        "end_screen", "watch_next", "like_share", "canal", "tela_final",
+        "final_card", "closing"
+    ))
+    has_red_subscribe_banner = bool(metrics.get("has_red_subscribe_banner") or temporal.get("has_red_subscribe_banner"))
+    has_subscribe_with_context = bool(
+        has_red_subscribe_banner
+        and (
+            text_lines >= 1
+            or text_score >= 0.25
+            or data_score >= 0.35
+            or is_static_content
+            or uniform_bg >= 0.15
+            or (not is_image and med_diff <= 3.5)
+        )
+    )
+    is_outro_or_subscribe = bool(
+        has_outro_name
+        or has_subscribe_with_context
+        or (
+            (text_lines >= 2 or text_score >= 0.42)
+            and (med_bottom >= 0.30 or bottom_band >= 0.20 or has_red_subscribe_banner)
+            and (med_persistence >= 0.32 or is_static_content)
+            and (uniform_bg >= 0.20 or med_top >= 0.16 or (not is_image and med_diff <= 3.5))
+        )
     )
 
     if is_black_screen or is_static_black:
@@ -8725,6 +8775,20 @@ def _classify_visual_analysis(
             "action": "hard_reject",
             "reason": "tela preta ou video estatico sem conteudo visual",
             "confidence": 1.0,
+        })
+    elif is_outro_or_subscribe:
+        classified.update({
+            "category": "outro_subscribe_screen",
+            "action": "hard_reject",
+            "reason": "tela de subscribe, agradecimento ou encerramento (outro/end-screen)",
+            "confidence": 1.0,
+        })
+    elif is_static_video:
+        classified.update({
+            "category": "static_video",
+            "action": "hard_reject",
+            "reason": "video estatico sem movimento natural (quadro congelado ou slide)",
+            "confidence": 0.98,
         })
     elif lower_third_news:
         classified.update({
@@ -9544,6 +9608,7 @@ def probe_visual_clean_health(
     med_focal_x = _median([float(item.get("focal_center_x") or 0.50) for item in metrics])
     med_diff = _median(diffs, 0.0 if len(frames) == 1 else 255.0)
     med_persistence = _median(persistence_values)
+    has_red_subscribe = bool(any(float(item.get("has_red_subscribe_banner") or 0.0) >= 1.0 for item in metrics))
     lower_third = med_bottom >= 0.48 and med_cols >= 0.55
     column_dominance = max(0.0, med_cols - med_rows)
     text_score = min(1.0, (
@@ -9747,6 +9812,7 @@ def probe_visual_clean_health(
         "is_historical_monochrome": is_historical_monochrome,
         "quality_score": round(quality_score, 4),
         "corner_watermark": corner_watermark,
+        "has_red_subscribe_banner": has_red_subscribe,
         "temporal": temporal_metrics,
         "fingerprint": fingerprint_from_bytes(gray_frames[len(gray_frames) // 2], VISUAL_CLEAN_FRAME_W, VISUAL_CLEAN_FRAME_H),
     }
@@ -10325,7 +10391,7 @@ def apply_visual_clean_filter(
     candidate_sources: set[str] | None = None,
     imported_count: int | None = None,
 ) -> tuple[list[tuple[Path, float]], dict[str, Any]]:
-    enabled = bool(job.options.get("visualCleanFilter", False))
+    enabled = bool(job.options.get("visualCleanFilter", True))
     priority = render_priority(job)
     min_speed = float(job.options.get("minSpeed") or MIN_VIDEO_SPEED)
     needed_raw = max(0.0, audio_total * min_speed)
@@ -10346,6 +10412,8 @@ def apply_visual_clean_filter(
         "rejected_text": 0,
         "rejected_data": 0,
         "rejected_black": 0,
+        "rejected_static_video": 0,
+        "rejected_outro_subscribe": 0,
         "presenter_rejected": 0,
         "presenter_suspects": 0,
         "contextual_people": 0,
@@ -10374,9 +10442,29 @@ def apply_visual_clean_filter(
         "items": [],
     }
     if not enabled:
-        summary["status"] = "disabled"
-        _append_log(job, "Filtro Anti-Poluição Visual: desativado nas opções (todos os clipes preservados para render ultrarrápido).")
-        return list(valid_pairs), summary
+        # Portão Rígido Inviolável: Mesmo com o filtro visual desativado nas opções,
+        # telas pretas, vídeos estáticos/slides e telas de subscribe/outro NUNCA são permitidos.
+        hard_gated_pairs: list[tuple[Path, float]] = []
+        for source, duration in valid_pairs:
+            an = probe_visual_clean_health(source, duration, "normal", cwd=work)
+            cat = str(an.get("category") or "clean")
+            act = str(an.get("action") or "keep")
+            if act == "hard_reject" or cat in {"black_screen", "static_black_screen", "static_video", "outro_subscribe_screen"}:
+                _append_log(job, f"Filtro Rigoroso (Hard-Gate): Clipe {source.name} bloqueado permanentemente ({cat}: {an.get('reason')}).")
+                summary["hard_rejected"] += 1
+                if cat in {"black_screen", "static_black_screen"}:
+                    summary["rejected_black"] += 1
+                elif cat == "static_video":
+                    summary["rejected_static_video"] = summary.get("rejected_static_video", 0) + 1
+                elif cat == "outro_subscribe_screen":
+                    summary["rejected_outro_subscribe"] = summary.get("rejected_outro_subscribe", 0) + 1
+                continue
+            hard_gated_pairs.append((source, duration))
+        summary["status"] = "hard_gate_only"
+        summary["approved"] = len(hard_gated_pairs)
+        summary["clean_clips"] = len(hard_gated_pairs)
+        _append_log(job, f"Filtro Anti-Poluição Visual: Portão rígido executado ({len(hard_gated_pairs)} clipes aprovados, {summary['hard_rejected']} rejeitados por conteúdo inválido/estático/outro).")
+        return hard_gated_pairs, summary
     if not valid_pairs:
         summary["status"] = "empty"
         return valid_pairs, summary
@@ -10559,13 +10647,14 @@ def apply_visual_clean_filter(
                     if action != "hard_reject":
                         seen_clean_image_hashes.append((img_hash, source))
 
-        is_unusable = category in {"black_screen", "invalid", "no_frames", "low_quality"}
+        is_unusable = category in {"black_screen", "static_black_screen", "invalid", "no_frames", "low_quality", "static_video", "outro_subscribe_screen"}
         is_pollution = (
             action == "hard_reject"
             or category in {
                 "text_dominant", "data_dominant", "presenter", "watermark_corner",
                 "ui_screenshot", "presentation_slide", "webcam_pip",
                 "polluted_banner", "screen_recording", "perceptual_duplicate", "low_resolution",
+                "static_video", "outro_subscribe_screen", "static_black_screen",
             }
             or (media_kind == "image" and is_unusable)
         )
@@ -10596,8 +10685,12 @@ def apply_visual_clean_filter(
                 summary["rejected_presentation_slides"] = summary.get("rejected_presentation_slides", 0) + 1
             elif category == "webcam_pip":
                 summary["rejected_webcam_pip"] = summary.get("rejected_webcam_pip", 0) + 1
-            elif category == "black_screen":
+            elif category in {"black_screen", "static_black_screen"}:
                 summary["rejected_black"] += 1
+            elif category == "static_video":
+                summary["rejected_static_video"] = summary.get("rejected_static_video", 0) + 1
+            elif category == "outro_subscribe_screen":
+                summary["rejected_outro_subscribe"] = summary.get("rejected_outro_subscribe", 0) + 1
             elif category == "presenter":
                 summary["presenter_rejected"] += 1
             if media_kind == "image":
@@ -23266,7 +23359,7 @@ def render_worker(job_id: str):
             "transitions": effective_visual.get("transitions"),
             "quality_boost": effective_visual.get("quality_boost"),
             "continuity": bool(effective_visual.get("continuity_match")),
-            "visual_clean": bool(job.options.get("visualCleanFilter", False)),
+            "visual_clean": bool(job.options.get("visualCleanFilter", True)),
             "visual_clean_version": VISUAL_CLEAN_CACHE_VERSION,
             "score_visual_windows": bool(job.options.get("scoreVisualWindows", False)),
             "adaptive_quality_boost": bool(job.options.get("adaptiveQualityBoost", False)),
