@@ -2,6 +2,10 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 python-multipart==0.0.20
 numpy>=1.26,<3
+scipy>=1.11
+pillow>=10.0
 opencv-python-headless>=4.10,<5
 pypdf>=4.3,<6
 pywebview>=5.0
+pyinstaller>=6.0
+

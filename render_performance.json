@@ -542,6 +542,44 @@
         "processed": 6,
         "reused": 0
       }
+    },
+    {
+      "at": "2026-09-20T12:23:46",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_mp9oifuh_1moc",
+      "project_name": "4",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1770.272,
+      "elapsed_seconds": 2843.974,
+      "realtime_factor": 1.6065,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "audio": 69.06,
+        "direction": 973.735,
+        "subtitles_ass": 0.158,
+        "visual_analysis": 17.866,
+        "continuity": 0.003,
+        "segments": 407.435,
+        "sound_fx": 349.254,
+        "composition": 554.952,
+        "mux": 0.012,
+        "delivery": 4.406,
+        "total": 2843.387
+      },
+      "budget_seconds": 2301.325,
+      "budget_state": "exceeded",
+      "budget_met": false,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 10,
+        "reused": 2
+      }
     }
   ]
 }
