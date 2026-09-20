@@ -48,33 +48,14 @@ WINDOW_TITLE = "Glide Studio - App Local"
 
 
 def _apply_low_memory_webview_flags() -> None:
-    """Configure WebView2 (Edge Chromium) to use drastically less RAM.
+    """Configure WebView2 (Edge Chromium) to eliminate bloat without starving UI performance.
 
-    By default, WebView2 spawns 5-7 sub-processes (GPU, renderer, utility, etc.)
-    that together consume ~800 MB of RAM for a single-page app.  The flags below
-    collapse the process tree and disable heavyweight Chromium features that are
-    unnecessary for an internal localhost UI:
-
-    * --renderer-process-limit=1      – one renderer instead of many
-    * --js-flags=--max-old-space-size=192 – cap V8 heap at 192 MB
-    * --disable-gpu-compositing       – skip the GPU compositor (FFmpeg/NVENC is
-      NOT affected — that runs out-of-process via subprocess.Popen)
-    * --disable-gpu-shader-disk-cache – no shader cache on disk
-    * --disable-features=…            – disable back/forward cache, site isolation
-      (single-origin app), translate, etc.
-    * --disable-background-networking – avoid prefetching & telemetry
-    * --disable-client-side-phishing-detection
-    * --disable-default-apps
-    * --no-pings
-    * --disable-breakpad              – no crash reporter
+    Disables background networking, crashpad, autofill, and unused browser features.
+    GPU hardware compositing is kept ENABLED so the GPU accelerates UI rendering smoothly
+    without burning CPU cycles on software rasterization.
     """
     flags = " ".join([
-        "--renderer-process-limit=1",
-        "--js-flags=--max-old-space-size=192",
-        "--disable-gpu-compositing",
-        "--disable-gpu-shader-disk-cache",
-        "--disable-features=BackForwardCache,IsolateOrigins,TranslateUI,Translate,"
-        "MediaRouter,SpareRendererForSitePerProcess,AutofillServerCommunication",
+        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication",
         "--disable-background-networking",
         "--disable-client-side-phishing-detection",
         "--disable-default-apps",
@@ -88,25 +69,6 @@ def _apply_low_memory_webview_flags() -> None:
     if existing:
         flags = existing + " " + flags
     os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = flags
-
-
-def _lower_process_priority() -> None:
-    """Set the current process to BELOW_NORMAL priority on Windows.
-
-    This prevents the Glide Studio backend (uvicorn + FastAPI) from competing
-    with the OS, explorer, and other user applications for CPU time when the
-    system is under memory pressure and Windows is doing memory compression.
-    """
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.GetCurrentProcess()
-        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-        kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
-    except Exception:
-        pass
 
 
 def _cleanup_webview_caches_on_boot() -> None:
@@ -653,7 +615,6 @@ def smoke_test(runtime: DesktopRuntime):
 
 
 def main():
-    _lower_process_priority()
     _cleanup_webview_caches_on_boot()
     runtime: DesktopRuntime | None = None
     smoke = smoke_requested()

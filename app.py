@@ -10508,7 +10508,7 @@ def apply_visual_clean_filter(
             any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
             for g in hw.get("gpus", [])
         ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-        max_workers = min(2, logical_cpus) if _is_laptop else min(4, logical_cpus)
+        max_workers = min(3, logical_cpus) if _is_laptop else min(4, logical_cpus)
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [

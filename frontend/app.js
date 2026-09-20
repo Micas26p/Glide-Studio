@@ -5906,7 +5906,7 @@ async function pollStatus(jobId, context = {}){
       renderMsg.textContent = waitMsg;
     }
     if(!done){
-      const pollDelay = modal.classList.contains('minimized') ? 4000 : 2500;
+      const pollDelay = modal.classList.contains('minimized') ? 2500 : 1500;
       await new Promise(resolve => setTimeout(resolve, pollDelay));
     }
   }
