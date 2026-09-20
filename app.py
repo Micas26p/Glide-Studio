@@ -6972,10 +6972,10 @@ def enforce_clean_opening_protocol(
 
         return score
 
-    # 1. Eliminar poluição terminal de todo o pool (processamento paralelo ultra-rápido)
+    # 1. Eliminar poluição terminal de todo o pool (processamento paralelo otimizado)
     import concurrent.futures
     scores_by_path: dict[str, float] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, max(1, len(valid_pairs)))) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(4, max(1, len(valid_pairs)))) as executor:
         future_map = {executor.submit(_hero_score, p, d): (p, d) for p, d in valid_pairs}
         for fut in concurrent.futures.as_completed(future_map):
             p, d = future_map[fut]
@@ -10502,7 +10502,12 @@ def apply_visual_clean_filter(
 
     if len(tasks) > 1:
         logical_cpus = max(2, int(os.cpu_count() or 4))
-        max_workers = min(4, logical_cpus)
+        hw = hardware_profile()
+        _is_laptop = any(
+            any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
+            for g in hw.get("gpus", [])
+        ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+        max_workers = min(2, logical_cpus) if _is_laptop else min(4, logical_cpus)
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [

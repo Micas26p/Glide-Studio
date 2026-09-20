@@ -47,6 +47,92 @@ _INSTANCE_MUTEX = None
 WINDOW_TITLE = "Glide Studio - App Local"
 
 
+def _apply_low_memory_webview_flags() -> None:
+    """Configure WebView2 (Edge Chromium) to use drastically less RAM.
+
+    By default, WebView2 spawns 5-7 sub-processes (GPU, renderer, utility, etc.)
+    that together consume ~800 MB of RAM for a single-page app.  The flags below
+    collapse the process tree and disable heavyweight Chromium features that are
+    unnecessary for an internal localhost UI:
+
+    * --renderer-process-limit=1      – one renderer instead of many
+    * --js-flags=--max-old-space-size=192 – cap V8 heap at 192 MB
+    * --disable-gpu-compositing       – skip the GPU compositor (FFmpeg/NVENC is
+      NOT affected — that runs out-of-process via subprocess.Popen)
+    * --disable-gpu-shader-disk-cache – no shader cache on disk
+    * --disable-features=…            – disable back/forward cache, site isolation
+      (single-origin app), translate, etc.
+    * --disable-background-networking – avoid prefetching & telemetry
+    * --disable-client-side-phishing-detection
+    * --disable-default-apps
+    * --no-pings
+    * --disable-breakpad              – no crash reporter
+    """
+    flags = " ".join([
+        "--renderer-process-limit=1",
+        "--js-flags=--max-old-space-size=192",
+        "--disable-gpu-compositing",
+        "--disable-gpu-shader-disk-cache",
+        "--disable-features=BackForwardCache,IsolateOrigins,TranslateUI,Translate,"
+        "MediaRouter,SpareRendererForSitePerProcess,AutofillServerCommunication",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-default-apps",
+        "--no-pings",
+        "--disable-breakpad",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+    ])
+    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if existing:
+        flags = existing + " " + flags
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = flags
+
+
+def _lower_process_priority() -> None:
+    """Set the current process to BELOW_NORMAL priority on Windows.
+
+    This prevents the Glide Studio backend (uvicorn + FastAPI) from competing
+    with the OS, explorer, and other user applications for CPU time when the
+    system is under memory pressure and Windows is doing memory compression.
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetCurrentProcess()
+        BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
+        kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+
+
+def _cleanup_webview_caches_on_boot() -> None:
+    """Aggressively clean WebView2 caches before starting the UI.
+
+    The webview_profile directory accumulates hundreds of MB of shader caches,
+    code caches, blob storage, etc. across sessions.  Cleaning these on boot
+    prevents stale caches from inflating RAM usage.
+    """
+    root = default_data_root()
+    profile = root / "webview_profile"
+    if not profile.exists():
+        return
+    for name in WEBVIEW_CACHE_DIR_NAMES:
+        target = profile / name
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+    # Also clean nested EBWebView caches
+    ebwv = profile / "EBWebView"
+    if ebwv.is_dir():
+        for name in WEBVIEW_CACHE_DIR_NAMES:
+            target = ebwv / name
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+
+
 def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -493,6 +579,7 @@ def run_browser_app(runtime: DesktopRuntime):
 def run_native_app(runtime: DesktopRuntime):
     import webview
 
+    _apply_low_memory_webview_flags()
     set_windows_app_id()
     url = f"{runtime.base_url}/?desktop=1&v={APP_VERSION}"
     window = webview.create_window(
@@ -566,6 +653,8 @@ def smoke_test(runtime: DesktopRuntime):
 
 
 def main():
+    _lower_process_priority()
+    _cleanup_webview_caches_on_boot()
     runtime: DesktopRuntime | None = None
     smoke = smoke_requested()
     write_smoke_trace("main:start")

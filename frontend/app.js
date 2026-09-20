@@ -5906,7 +5906,7 @@ async function pollStatus(jobId, context = {}){
       renderMsg.textContent = waitMsg;
     }
     if(!done){
-      const pollDelay = modal.classList.contains('minimized') ? 2800 : 1700;
+      const pollDelay = modal.classList.contains('minimized') ? 4000 : 2500;
       await new Promise(resolve => setTimeout(resolve, pollDelay));
     }
   }
@@ -9620,7 +9620,7 @@ function setupDesktopMode(){
   if(!DESKTOP_MODE) return;
   document.body.classList.add('desktop-mode');
   pingDesktop();
-  setInterval(pingDesktop, 10000);
+  setInterval(pingDesktop, 30000);
   document.addEventListener('visibilitychange', () => {
     if(!document.hidden) pingDesktop();
   });
@@ -9732,7 +9732,7 @@ if (colorGradeSelect) {
 }
 
 fetchDropzoneStatus();
-setInterval(fetchDropzoneStatus, 10000);
+setInterval(fetchDropzoneStatus, 30000);
 loadPresetMusicStatus();
 loadSfxPreviewMap();
 loadSemanticModelStatus();
