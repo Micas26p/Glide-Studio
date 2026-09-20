@@ -19783,6 +19783,11 @@ def filter_renderable_videos(job: Job, video_files: list[Path], work: Path) -> t
             elif err_out:
                 invalid_infos.append(err_out)
 
+    if job.cancel_requested:
+        if getattr(job, "render_budget_state", None) == "exceeded":
+            raise RuntimeError(f"Orçamento de render ({round(job.render_budget_seconds)}s) excedido pelo Watchdog.")
+        raise RenderCancelled("Render cancelado pelo usuario.")
+
     return valid_pairs, invalid_infos
 
 
@@ -19815,6 +19820,13 @@ def make_segments_smart(
     w, h = render_size(mode, ratio)
     valid_pairs, invalid_infos = filter_renderable_videos(job, video_files, work)
     log_invalid_video_filter(job, invalid_infos)
+    if job.cancel_requested:
+        if getattr(job, "render_budget_state", None) == "exceeded":
+            raise RuntimeError(f"Orçamento de render ({round(job.render_budget_seconds)}s) excedido pelo Watchdog.")
+        raise RenderCancelled("Render cancelado pelo usuario.")
+    if not valid_pairs:
+        raise RuntimeError("Nenhum video valido foi encontrado. Remova arquivos corrompidos ou adicione novos clipes.")
+
     min_speed = float(job.options.get("minSpeed") or MIN_VIDEO_SPEED)
     force_short = bool(job.options.get("forceShortRender", False))
     candidate_sources = visual_clean_candidate_sources(valid_pairs, audio_total, min_speed, force_short=force_short)
@@ -19843,6 +19855,10 @@ def make_segments_smart(
     job.preflight_summary["clean_opening"] = clean_opening_summary
     performance_stop(job, "visual_analysis")
     log_visual_clean_filter(job, visual_clean_summary)
+    if job.cancel_requested:
+        if getattr(job, "render_budget_state", None) == "exceeded":
+            raise RuntimeError(f"Orçamento de render ({round(job.render_budget_seconds)}s) excedido pelo Watchdog.")
+        raise RenderCancelled("Render cancelado pelo usuario.")
     if not valid_pairs:
         raise RuntimeError("Nenhum video valido foi encontrado. Remova arquivos corrompidos ou adicione novos clipes.")
     original_video_count = len(video_files)

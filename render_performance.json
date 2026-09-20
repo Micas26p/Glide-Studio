@@ -580,6 +580,80 @@
         "processed": 10,
         "reused": 2
       }
+    },
+    {
+      "at": "2026-09-20T14:27:36",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_mpg1f7nx_hdav",
+      "project_name": "6",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1512.621,
+      "elapsed_seconds": 2797.398,
+      "realtime_factor": 1.8494,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "direction": 1075.526,
+        "visual_analysis": 33.391,
+        "continuity": 0.0,
+        "segments": 431.057,
+        "sound_fx": 320.135,
+        "composition": 472.845,
+        "mux": 0.006,
+        "delivery": 2.771,
+        "total": 2796.904
+      },
+      "budget_seconds": 1963.568,
+      "budget_state": "exceeded",
+      "budget_met": false,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 7,
+        "reused": 5
+      }
+    },
+    {
+      "at": "2026-09-20T14:58:51",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_mp9oi8nq_d5ao",
+      "project_name": "7",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1639.688,
+      "elapsed_seconds": 1841.281,
+      "realtime_factor": 1.1229,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "audio": 54.351,
+        "direction": 306.858,
+        "subtitles_ass": 0.046,
+        "visual_analysis": 3.173,
+        "continuity": 0.0,
+        "segments": 449.487,
+        "sound_fx": 295.558,
+        "composition": 383.87,
+        "mux": 0.008,
+        "delivery": 4.593,
+        "total": 1840.861
+      },
+      "budget_seconds": 2129.457,
+      "budget_state": "met",
+      "budget_met": true,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 12,
+        "reused": 0
+      }
     }
   ]
 }

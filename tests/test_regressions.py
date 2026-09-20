@@ -559,6 +559,27 @@ class Regressions(unittest.TestCase):
         finally:
             app.JOBS.pop(job.id, None)
 
+    def test_watchdog_timeout_not_masked_as_no_valid_videos(self):
+        """Garante que se o watchdog estourar o orçamento de render durante a análise de vídeos,
+        o erro lançado especifica o estouro de orçamento e NÃO 'Nenhum video valido foi encontrado'."""
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            job = app.Job(id="test_watchdog_budget")
+            job.cancel_requested = True
+            job.render_budget_state = "exceeded"
+            job.render_budget_seconds = 1200.0
+
+            # Test filter_renderable_videos
+            with self.assertRaises(RuntimeError) as cm:
+                app.filter_renderable_videos(job, [work / "dummy.mp4"], work)
+            self.assertIn("Orçamento de render", str(cm.exception))
+            self.assertNotIn("Nenhum video valido", str(cm.exception))
+
+            # Test standard cancellation
+            job.render_budget_state = None
+            with self.assertRaises(app.RenderCancelled):
+                app.filter_renderable_videos(job, [work / "dummy.mp4"], work)
+
 
 if __name__ == '__main__':
     unittest.main()
