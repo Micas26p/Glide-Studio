@@ -86,7 +86,10 @@ const state = {
   renderShowcaseStage: '',
   renderShowcaseTick: 0,
   automator: {
-    srts: [], audios: [], folders: [],
+    srts: [],
+    audios: [],
+    scripts: [],
+    folders: [],
     sort: {},
   },
   automatorDrag: null,
@@ -321,6 +324,7 @@ const automatorSrtInput = $('#automatorSrtInput');
 const automatorAudioInput = $('#automatorAudioInput');
 const automatorScriptInput = $('#automatorScriptInput');
 const automatorVideoFolderInput = $('#automatorVideoFolderInput');
+const automatorVideoFileInput = $('#automatorVideoFileInput');
 const automatorSrtCount = $('#automatorSrtCount');
 const automatorAudioCount = $('#automatorAudioCount');
 const automatorScriptCount = $('#automatorScriptCount');
@@ -6263,13 +6267,33 @@ function automatorFolderGroups(fileList){
 function appendAutomatorFolders(fileList){
   const incoming = automatorFolderGroups(fileList);
   if(!incoming.length) return 0;
-  const existing = new Set(state.automator.folders.map(folder => folder.signature || `${folder.name}:${folder.files?.length || 0}`));
+  if(!state.automator.folders) state.automator.folders = [];
   let added = 0;
   annotateAutomatorItems(incoming, Date.now()).forEach(folder => {
-    const signature = folder.signature || `${folder.name}:${folder.files?.length || 0}`;
-    if(existing.has(signature)) return;
+    // Check if a folder with the same name or sourceName already exists
+    const existingFolder = state.automator.folders.find(f =>
+      (f.name && folder.name && f.name.toLowerCase() === folder.name.toLowerCase()) ||
+      (f.sourceName && folder.sourceName && f.sourceName.toLowerCase() === folder.sourceName.toLowerCase())
+    );
+    if(existingFolder){
+      // Merge unique files into the existing folder
+      const existingFileSigs = new Set((existingFolder.files || []).map(f => `${f.name}|${f.size || 0}`));
+      let filesMerged = 0;
+      (folder.files || []).forEach(f => {
+        const sig = `${f.name}|${f.size || 0}`;
+        if(!existingFileSigs.has(sig)){
+          existingFileSigs.add(sig);
+          existingFolder.files.push(f);
+          filesMerged++;
+        }
+      });
+      if(filesMerged > 0){
+        existingFolder.files.sort((a, b) => naturalCompare(a._autoRelativePath || a.webkitRelativePath || a.name, b._autoRelativePath || b.webkitRelativePath || b.name));
+        added += 1;
+      }
+      return;
+    }
     state.automator.folders.push(folder);
-    existing.add(signature);
     added += 1;
   });
   return added;
@@ -6327,24 +6351,44 @@ async function automatorFilesFromDrop(dataTransfer){
 }
 
 function automatorItems(type){
-  if(type === 'srt') return state.automator.srts;
-  if(type === 'audio') return state.automator.audios;
-  if(type === 'script') return state.automator.scripts;
-  if(type === 'folder') return state.automator.folders;
+  if(!state.automator) state.automator = { srts: [], audios: [], scripts: [], folders: [], sort: {} };
+  if(type === 'srt') return state.automator.srts || (state.automator.srts = []);
+  if(type === 'audio') return state.automator.audios || (state.automator.audios = []);
+  if(type === 'script') return state.automator.scripts || (state.automator.scripts = []);
+  if(type === 'folder') return state.automator.folders || (state.automator.folders = []);
   return [];
+}
+
+function appendAutomatorFiles(type, newFiles){
+  if(!newFiles || !newFiles.length) return 0;
+  if(type === 'folder'){
+    return appendAutomatorFolders(newFiles);
+  }
+  const list = automatorItems(type);
+  const existingSignatures = new Set(list.map(f => `${f.name}|${f.size || 0}`));
+  const toAdd = [];
+  for(const file of newFiles){
+    const sig = `${file.name}|${file.size || 0}`;
+    if(!existingSignatures.has(sig)){
+      existingSignatures.add(sig);
+      toAdd.push(file);
+    }
+  }
+  if(!toAdd.length) return 0;
+  const annotated = annotateAutomatorItems(toAdd, Date.now());
+  list.push(...annotated);
+  if(type === 'audio'){
+    hydrateAutomatorDurations('audio', toAdd);
+  }
+  return toAdd.length;
 }
 
 function removeAutomatorItem(type, index){
   const numIndex = Number(index);
   if(isNaN(numIndex) || numIndex < 0) return;
-  if(type === 'srt' && numIndex < state.automator.srts.length){
-    state.automator.srts.splice(numIndex, 1);
-  }else if(type === 'audio' && numIndex < state.automator.audios.length){
-    state.automator.audios.splice(numIndex, 1);
-  }else if(type === 'script' && numIndex < state.automator.scripts.length){
-    state.automator.scripts.splice(numIndex, 1);
-  }else if(type === 'folder' && numIndex < state.automator.folders.length){
-    state.automator.folders.splice(numIndex, 1);
+  const list = automatorItems(type);
+  if(numIndex < list.length){
+    list.splice(numIndex, 1);
   }
   updateAutomatorPreview();
 }
@@ -6367,6 +6411,13 @@ function renderAutomatorList(type, title, items){
   const empty = type === 'folder' ? 'Nenhuma pasta selecionada' : 'Nenhum ficheiro selecionado';
   const preference = automatorSortPreference(type);
   const selected = value => preference.criterion === value ? ' selected' : '';
+  let addButtonsHtml = `<button type="button" class="automation-sort-add" data-automator-add="${type}" title="Acrescentar mais ficheiros a esta lista">+ Adicionar</button>`;
+  if(type === 'folder'){
+    addButtonsHtml = `
+      <button type="button" class="automation-sort-add" data-automator-add="folder" title="Acrescentar pastas com vídeos">+ Pasta</button>
+      <button type="button" class="automation-sort-add" data-automator-add="video-files" title="Acrescentar ficheiros de vídeo/foto avulsos">+ Vídeos</button>
+    `;
+  }
   const clearBtnHtml = items.length ? `<button type="button" class="automation-sort-clear" data-automator-clear="${type}" title="Limpar todos os ${escapeHtml(title)}">Limpar</button>` : '';
   return `
     <section class="automation-sort-list" data-automator-list="${type}">
@@ -6375,6 +6426,7 @@ function renderAutomatorList(type, title, items){
           <h3>${escapeHtml(title)}</h3>
           <div class="automation-sort-head-actions">
             <span class="automation-sort-badge">${items.length}</span>
+            ${addButtonsHtml}
             ${clearBtnHtml}
           </div>
         </div>
@@ -6489,9 +6541,17 @@ function automatorRowHealth(row){
   const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
   const iCount = files.filter(f => kindOfFile(f, 'video') === 'image').length;
   const totalItems = vCount + iCount;
-  if(!row.audio && !totalItems) return {tag: '<span class="health-tag tag-neutral">Vazio</span>', ready: false};
-  if(!row.audio) return {tag: '<span class="health-tag tag-short">Sem áudio</span>', ready: false};
-  if(totalItems === 0) return {tag: '<span class="health-tag tag-short">Sem mídia</span>', ready: false};
+  if(!row.audio && !totalItems && !row.srt) return {tag: '<span class="health-tag tag-neutral">Vazio</span>', ready: false};
+  const missing = [];
+  if(!row.srt) missing.push('SRT');
+  if(!row.audio) missing.push('áudio');
+  if(!totalItems) missing.push('mídia');
+  if(missing.length){
+    return {tag: `<span class="health-tag tag-short" title="Faltam arquivos: ${missing.join(', ')}">🔴 Faltando ${missing.join(' e ')}</span>`, ready: false};
+  }
+  if(row.occupied){
+    return {tag: '<span class="health-tag tag-short">🚫 Projeto ocupado</span>', ready: false};
+  }
 
   probeAutomatorRowDurations(row);
   const audioDur = row._audioDuration || (row.audio && state.durations.get(rel(row.audio))) || (row.audio ? estimateAudioFileSeconds(row.audio) : 0);
@@ -6499,35 +6559,38 @@ function automatorRowHealth(row){
   const ratio = audioDur > 0 ? (mediaDur / audioDur) : 1;
 
   if(ratio >= 0.85){
-    return {tag: `<span class="health-tag tag-ready" title="Mídia suficiente com folga (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟢 Pronto</span>`, ready: true};
+    return {tag: `<span class="health-tag tag-ready" title="Mídia suficiente com folga (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟢 Pronto (${Math.round(mediaDur)}s)</span>`, ready: true};
   }
   if(ratio >= 0.45){
-    return {tag: `<span class="health-tag tag-auto" title="Ajuste automático: compensado suavemente pelo Auto-Healer (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟡 Ajuste Automático</span>`, ready: true};
+    return {tag: `<span class="health-tag tag-auto" title="Ajuste automático: compensado suavemente pelo Auto-Healer (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🟡 Ajuste Auto (${Math.round(mediaDur)}s)</span>`, ready: true};
   }
-  return {tag: `<span class="health-tag tag-short" title="Mídia curta: sugerido adicionar mais vídeos (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🔴 Mídia Curta</span>`, ready: false};
+  return {tag: `<span class="health-tag tag-short" title="Mídia curta: sugerido adicionar mais vídeos (${Math.round(mediaDur)}s de mídia para ${Math.round(audioDur)}s de voz)">🔴 Mídia Curta (${Math.round(mediaDur)}s/${Math.round(audioDur)}s)</span>`, ready: false};
 }
 
 function automatorTableRowsHtml(rows){
-  return rows.map(row => {
+  return rows.map((row, idx) => {
     const files = row.folder?.files || [];
     const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
     const iCount = files.filter(f => kindOfFile(f, 'video') === 'image').length;
-    let detail = `${files.length} arquivo(s)`;
-    if(vCount > 0 && iCount > 0){
-      detail = `${vCount} vídeo(s), ${iCount} imagem(ns)`;
-    }else if(iCount > 0){
-      detail = `${iCount} imagem(ns)`;
-    }else if(vCount > 0){
-      detail = `${vCount} vídeo(s)`;
+    let detail = '';
+    if(files.length){
+      if(vCount > 0 && iCount > 0) detail = ` <small>(${vCount} vídeos, ${iCount} imagens)</small>`;
+      else if(vCount > 0) detail = ` <small>(${vCount} vídeos)</small>`;
+      else if(iCount > 0) detail = ` <small>(${iCount} imagens)</small>`;
+      else detail = ` <small>(${files.length} arquivos)</small>`;
     }
     const health = automatorRowHealth(row);
+    const srtCell = row.srt ? escapeHtml(row.srt.name) : '<span class="automator-missing-item">Faltando</span>';
+    const audioCell = row.audio ? escapeHtml(row.audio.name) : '<span class="automator-missing-item">Faltando</span>';
+    const scriptCell = row.script ? escapeHtml(row.script.name) : '<span class="muted">-</span>';
+    const folderCell = row.folder ? `${escapeHtml(row.folder.name || 'Pasta')}${detail}` : '<span class="automator-missing-item">Faltando</span>';
     return `
     <tr class="${row.occupied ? 'automation-row-blocked' : ''}">
-      <td>${escapeHtml(row.project?.name || 'Projeto')}${row.occupied ? ' <small>ocupado</small>' : ''}</td>
-      <td>${escapeHtml(row.srt?.name || '-')}</td>
-      <td>${escapeHtml(row.audio?.name || '-')}</td>
-      <td>${escapeHtml(row.script?.name || '-')}</td>
-      <td>${escapeHtml(row.folder?.name || '-')} <small>${detail}</small></td>
+      <td><strong>${escapeHtml(row.project?.name || `Projeto #${idx + 1}`)}</strong>${row.occupied ? ' <small class="text-danger">(ocupado)</small>' : ''}</td>
+      <td>${srtCell}</td>
+      <td>${audioCell}</td>
+      <td>${scriptCell}</td>
+      <td>${folderCell}</td>
       <td>${health.tag}</td>
     </tr>
   `}).join('');
@@ -6730,6 +6793,7 @@ async function openAutomator(){
   automatorModal?.classList.add('show');
   automatorModal?.setAttribute('aria-hidden', 'false');
   await checkAndPromptAutomatorDraft();
+  updateAutomatorPreview();
 }
 
 function closeAutomator(){
@@ -6756,77 +6820,89 @@ async function cancelAutomator(){
 function automatorPlan(){
   const activeIndex = Math.max(0, state.projects.findIndex(project => project.id === state.activeProjectId));
   const startIndex = activeIndex >= 0 ? activeIndex : 0;
-  const requiredCounts = [
-    state.automator.srts.length,
-    state.automator.audios.length,
-    state.automator.folders.length,
-  ];
-  if(state.automator.scripts.length > 0) requiredCounts.push(state.automator.scripts.length);
+  const srtCount = state.automator.srts?.length || 0;
+  const audioCount = state.automator.audios?.length || 0;
+  const scriptCount = state.automator.scripts?.length || 0;
+  const folderCount = state.automator.folders?.length || 0;
+  const requiredCounts = [srtCount, audioCount, folderCount];
+  if(scriptCount > 0) requiredCounts.push(scriptCount);
   const targetCount = Math.max(...requiredCounts, 0);
   const available = Math.max(0, state.projects.length - startIndex);
   const warnings = [];
   if(!state.projects.length) warnings.push('Crie pelo menos um projeto na fila.');
-  if(!state.automator.srts.length) warnings.push('Selecione os Textos em SRT.');
-  if(!state.automator.audios.length) warnings.push('Selecione arquivos de áudio.');
-  if(!state.automator.folders.length) warnings.push('Selecione pastas com mídia (vídeos e imagens).');
-  if(targetCount && requiredCounts.some(count => count !== targetCount)){
-    warnings.push(`Quantidade diferente: ${state.automator.srts.length} Textos, ${state.automator.audios.length} áudio(s), ${state.automator.scripts.length} roteiro(s), ${state.automator.folders.length} pasta(s) de mídia.`);
+  if(!srtCount && !audioCount && !folderCount){
+    // Nenhum ficheiro selecionado ainda
+  }else{
+    if(!srtCount) warnings.push('Falta selecionar os Textos em SRT.');
+    if(!audioCount) warnings.push('Falta selecionar arquivos de áudio.');
+    if(!folderCount) warnings.push('Falta selecionar pastas ou arquivos de mídia.');
+  }
+  if(targetCount > 0 && requiredCounts.some(count => count !== targetCount)){
+    warnings.push(`Quantidades diferentes: ${srtCount} Texto(s), ${audioCount} áudio(s), ${scriptCount} roteiro(s), ${folderCount} pasta(s) de mídia.`);
   }
   if(targetCount > available){
-    warnings.push('Não existem projetos suficientes a partir do projeto selecionado para distribuir todos os ficheiros. Reduza a quantidade ou selecione outro projeto.');
+    warnings.push(`Projetos insuficientes na fila: são necessários ${targetCount} projetos, mas apenas ${available} estão disponíveis a partir do selecionado.`);
   }
   const rows = [];
-  const rowCount = warnings.length ? 0 : targetCount;
-  for(let i = 0; i < rowCount; i++){
-    const project = state.projects[startIndex + i];
+  const displayCount = targetCount;
+  for(let i = 0; i < displayCount; i++){
+    const project = state.projects[startIndex + i] || null;
     const occupied = Boolean(
       project?.files?.videos?.length
       || project?.files?.audios?.length
       || project?.files?.subtitles?.length
     );
-    if(occupied){
+    if(occupied && project){
       warnings.push(`Projeto ocupado: ${project?.name || `#${startIndex + i + 1}`}. O AUTO aceita somente projetos vazios.`);
     }
     rows.push({
       project,
-      srt: state.automator.srts[i],
-      audio: state.automator.audios[i],
-      script: state.automator.scripts[i],
-      folder: state.automator.folders[i],
+      srt: state.automator.srts?.[i] || null,
+      audio: state.automator.audios?.[i] || null,
+      script: state.automator.scripts?.[i] || null,
+      folder: state.automator.folders?.[i] || null,
       occupied,
     });
   }
-  return {startIndex, maxCount: targetCount, targetCount: rowCount, available, warnings, rows};
+  return {startIndex, maxCount: targetCount, targetCount: rows.length, available, warnings, rows};
 }
 
 function updateAutomatorPreview(){
-  if(automatorSrtCount) automatorSrtCount.textContent = `${state.automator.srts.length} selecionado(s)`;
-  if(automatorAudioCount) automatorAudioCount.textContent = `${state.automator.audios.length} selecionado(s)`;
-  if(automatorScriptCount) automatorScriptCount.textContent = `${state.automator.scripts.length} selecionado(s)`;
-  if(automatorFolderCount) automatorFolderCount.textContent = `${state.automator.folders.length} pasta(s) adicionada(s)`;
+  const srtLen = state.automator.srts?.length || 0;
+  const audioLen = state.automator.audios?.length || 0;
+  const scriptLen = state.automator.scripts?.length || 0;
+  const folderLen = state.automator.folders?.length || 0;
+  if(automatorSrtCount) automatorSrtCount.textContent = `${srtLen} selecionado(s)`;
+  if(automatorAudioCount) automatorAudioCount.textContent = `${audioLen} selecionado(s)`;
+  if(automatorScriptCount) automatorScriptCount.textContent = `${scriptLen} selecionado(s)`;
+  if(automatorFolderCount) automatorFolderCount.textContent = `${folderLen} pasta(s) adicionada(s)`;
   const plan = automatorPlan();
   if(automatorWarning){
     automatorWarning.hidden = !plan.warnings.length;
     automatorWarning.textContent = plan.warnings.join(' ');
   }
-  const hasHealthy = plan.rows.some(r => automatorRowHealth(r).ready);
-  if(automatorConfirmBtn) automatorConfirmBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
-  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || Boolean(plan.warnings.length);
-  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = Boolean(plan.warnings.length) || !plan.rows.length;
+  const hasHealthy = plan.rows.some(r => automatorRowHealth(r).ready && r.srt && r.audio && r.folder && !r.occupied);
+  const allReady = plan.rows.length > 0 && plan.rows.every(r => r.srt && r.audio && r.folder && !r.occupied && r.project);
+
+  if(automatorAutoHealBtn) automatorAutoHealBtn.disabled = !plan.rows.length;
+  if(automatorConfirmBtn) automatorConfirmBtn.disabled = !allReady || Boolean(plan.warnings.length);
+  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || (plan.available < plan.maxCount);
+  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = !allReady || Boolean(plan.warnings.length);
+
   if(!automatorPreview) return;
-  const hasAnySelection = state.automator.srts.length || state.automator.audios.length || state.automator.scripts.length || state.automator.folders.length;
+  const hasAnySelection = srtLen || audioLen || scriptLen || folderLen;
   if(!hasAnySelection){
     automatorPreview.innerHTML = '<p class="queue-report-empty">Selecione Textos, áudios, roteiros e pastas para ver a pré-visualização. Você também pode arrastar várias pastas de vídeos para o cartão de pastas.</p>';
     scheduleSaveAutomatorDraft();
     return;
   }
   const listsHtml = `
-    <p class="automation-sort-hint">Arraste itens dentro de cada lista para corrigir a ordem antes de confirmar.</p>
+    <p class="automation-sort-hint">Arraste itens dentro de cada lista para corrigir a ordem antes de confirmar. Use os botões [+ Adicionar] para acrescentar mais ficheiros sem perder os atuais.</p>
     <div class="automation-sort-grid">
-      ${renderAutomatorList('srt', 'TEXTOS (SRT)', state.automator.srts)}
-      ${renderAutomatorList('audio', 'ÁUDIO', state.automator.audios)}
-      ${renderAutomatorList('script', 'ROTEIROS', state.automator.scripts)}
-      ${renderAutomatorList('folder', 'PASTAS DE MÍDIA', state.automator.folders)}
+      ${renderAutomatorList('srt', 'TEXTOS (SRT)', state.automator.srts || [])}
+      ${renderAutomatorList('audio', 'ÁUDIO', state.automator.audios || [])}
+      ${renderAutomatorList('script', 'ROTEIROS', state.automator.scripts || [])}
+      ${renderAutomatorList('folder', 'PASTAS DE MÍDIA', state.automator.folders || [])}
     </div>
   `;
   if(!plan.rows.length){
@@ -6838,7 +6914,7 @@ function updateAutomatorPreview(){
     ${listsHtml}
     <div class="automation-table-wrap">
       <table class="automation-table">
-        <thead><tr><th>Projeto</th><th>Textos</th><th>Áudio</th><th>Roteiro</th><th>Pasta com vídeos e imagens</th><th>Saúde do Lote</th></tr></thead>
+        <thead><tr><th>Projeto</th><th>Textos (SRT)</th><th>Áudio</th><th>Roteiro</th><th>Pasta com vídeos e imagens</th><th>Saúde do Lote</th></tr></thead>
         <tbody>${automatorTableRowsHtml(plan.rows)}</tbody>
       </table>
     </div>
@@ -8838,20 +8914,19 @@ if(automatorPreview){
     }else if(targetType === 'srt'){
       const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
       if(srtFiles.length){
-        state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
+        appendAutomatorFiles('srt', srtFiles);
         sortAutomatorItems('srt');
       }
     }else if(targetType === 'audio'){
       const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
       if(audioFiles.length){
-        state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
+        appendAutomatorFiles('audio', audioFiles);
         sortAutomatorItems('audio');
-        hydrateAutomatorDurations('audio', state.automator.audios);
       }
     }else if(targetType === 'script'){
       const scriptFiles = files.filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
       if(scriptFiles.length){
-        state.automator.scripts = annotateAutomatorItems([...state.automator.scripts, ...scriptFiles]);
+        appendAutomatorFiles('script', scriptFiles);
         sortAutomatorItems('script');
       }
     }else{
@@ -8859,12 +8934,9 @@ if(automatorPreview){
       const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
       const scriptFiles = files.filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
       const folderAdded = appendAutomatorFolders(files);
-      if(srtFiles.length) state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
-      if(audioFiles.length){
-        state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
-        hydrateAutomatorDurations('audio', state.automator.audios);
-      }
-      if(scriptFiles.length) state.automator.scripts = annotateAutomatorItems([...state.automator.scripts, ...scriptFiles]);
+      if(srtFiles.length) appendAutomatorFiles('srt', srtFiles);
+      if(audioFiles.length) appendAutomatorFiles('audio', audioFiles);
+      if(scriptFiles.length) appendAutomatorFiles('script', scriptFiles);
       if(srtFiles.length) sortAutomatorItems('srt');
       if(audioFiles.length) sortAutomatorItems('audio');
       if(scriptFiles.length) sortAutomatorItems('script');
@@ -8874,6 +8946,20 @@ if(automatorPreview){
   });
 
   automatorPreview.addEventListener('click', event => {
+    // 0. Quick add buttons in list headers
+    const addBtn = event.target.closest('.automation-sort-add');
+    if(addBtn){
+      event.preventDefault();
+      event.stopPropagation();
+      const addType = addBtn.dataset.automatorAdd;
+      if(addType === 'srt') automatorSrtInput?.click();
+      else if(addType === 'audio') automatorAudioInput?.click();
+      else if(addType === 'script') automatorScriptInput?.click();
+      else if(addType === 'folder') automatorVideoFolderInput?.click();
+      else if(addType === 'video-files') automatorVideoFileInput?.click();
+      return;
+    }
+
     // 1. Move up or down button
     const moveBtn = event.target.closest('.automation-item-move-btn');
     if(moveBtn){
@@ -8954,7 +9040,7 @@ bindAutomatorPickerDrop(automatorPickFolders, files => {
 bindAutomatorPickerDrop(automatorPickSrt, files => {
   const srtFiles = files.filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
   if(srtFiles.length){
-    state.automator.srts = annotateAutomatorItems([...state.automator.srts, ...srtFiles]);
+    appendAutomatorFiles('srt', srtFiles);
     sortAutomatorItems('srt');
   }
 });
@@ -8962,42 +9048,57 @@ bindAutomatorPickerDrop(automatorPickSrt, files => {
 bindAutomatorPickerDrop(automatorPickAudio, files => {
   const audioFiles = files.filter(file => kindOfFile(file, 'audio') === 'audio');
   if(audioFiles.length){
-    state.automator.audios = annotateAutomatorItems([...state.automator.audios, ...audioFiles]);
+    appendAutomatorFiles('audio', audioFiles);
     sortAutomatorItems('audio');
-    hydrateAutomatorDurations('audio', state.automator.audios);
   }
 });
 
 bindAutomatorPickerDrop(automatorPickScript, files => {
   const scriptFiles = files.filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
   if(scriptFiles.length){
-    state.automator.scripts = annotateAutomatorItems([...state.automator.scripts, ...scriptFiles]);
+    appendAutomatorFiles('script', scriptFiles);
     sortAutomatorItems('script');
   }
 });
 
 if(automatorSrtInput) automatorSrtInput.addEventListener('change', event => {
-  state.automator.srts = annotateAutomatorItems(
-    Array.from(event.target.files || []).filter(file => kindOfFile(file, 'subtitle') === 'subtitle')
-  );
-  sortAutomatorItems('srt');
+  const files = Array.from(event.target.files || []).filter(file => kindOfFile(file, 'subtitle') === 'subtitle');
+  event.target.value = '';
+  if(files.length){
+    appendAutomatorFiles('srt', files);
+    sortAutomatorItems('srt');
+  }
 });
 if(automatorAudioInput) automatorAudioInput.addEventListener('change', event => {
-  state.automator.audios = annotateAutomatorItems(
-    Array.from(event.target.files || []).filter(file => kindOfFile(file, 'audio') === 'audio')
-  );
-  sortAutomatorItems('audio');
-  hydrateAutomatorDurations('audio', state.automator.audios);
+  const files = Array.from(event.target.files || []).filter(file => kindOfFile(file, 'audio') === 'audio');
+  event.target.value = '';
+  if(files.length){
+    appendAutomatorFiles('audio', files);
+    sortAutomatorItems('audio');
+  }
 });
 if(automatorScriptInput) automatorScriptInput.addEventListener('change', event => {
-  state.automator.scripts = annotateAutomatorItems(
-    Array.from(event.target.files || []).filter(file => kindOfFile(file, 'script_guide') === 'script_guide')
-  );
-  sortAutomatorItems('script');
+  const files = Array.from(event.target.files || []).filter(file => kindOfFile(file, 'script_guide') === 'script_guide');
+  event.target.value = '';
+  if(files.length){
+    appendAutomatorFiles('script', files);
+    sortAutomatorItems('script');
+  }
 });
 if(automatorVideoFolderInput) automatorVideoFolderInput.addEventListener('change', event => {
   const added = appendAutomatorFolders(event.target.files || []);
   if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
+  event.target.value = '';
+  if(added) sortAutomatorItems('folder');
+  else updateAutomatorPreview();
+});
+if(automatorVideoFileInput) automatorVideoFileInput.addEventListener('change', event => {
+  const files = Array.from(event.target.files || []).filter(file => {
+    const k = kindOfFile(file, 'video');
+    return k === 'video' || k === 'image';
+  });
+  const added = appendAutomatorFolders(files);
+  if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhum vídeo ou foto válido foi encontrado.';
   event.target.value = '';
   if(added) sortAutomatorItems('folder');
   else updateAutomatorPreview();
