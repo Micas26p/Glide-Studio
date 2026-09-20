@@ -987,7 +987,7 @@ def image_motion_for(path: Path | str, index: int = 0) -> str:
         return motion
     except Exception:
         return IMAGE_MOTION_ARCHETYPES[index % len(IMAGE_MOTION_ARCHETYPES)]
-VISUAL_CLEAN_CACHE_VERSION = 18
+VISUAL_CLEAN_CACHE_VERSION = 19
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -8058,8 +8058,8 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         )
         x = idx % w
         y = idx // w
-        if y >= int(h * 0.45):
-            if r > 130 and r > int(g * 1.55) and r > int(b * 1.55):
+        if y >= int(h * 0.58):
+            if r >= 155 and g <= 65 and b <= 65 and r >= int(g * 2.0) and r >= int(b * 2.0):
                 bottom_red_count += 1
                 bottom_red_cols[x] = 1
         if int(w * 0.24) <= x <= int(w * 0.76) and int(h * 0.08) <= y <= int(h * 0.90):
@@ -8077,7 +8077,7 @@ def _visual_frame_features(frame: bytes, gray_source: bytes | None = None) -> tu
         if is_skin:
             skin[idx] = 1
     active_red_cols = sum(bottom_red_cols)
-    has_red_subscribe_banner = 1.0 if (active_red_cols >= 10 and bottom_red_count >= 20) else 0.0
+    has_red_subscribe_banner = 1.0 if (active_red_cols >= 18 and bottom_red_count >= 50) else 0.0
     values = gray
     mean = sum(values) / total
     variance = sum((px - mean) * (px - mean) for px in values) / total
@@ -8720,53 +8720,51 @@ def _classify_visual_analysis(
 
     med_black = float(metrics.get("black_ratio") or 0.0)
     is_black_screen = (
-        med_mean <= 18.0
-        or med_black >= 0.40
-        or (med_mean <= 30.0 and (med_stdev <= 40.0 or med_black >= 0.35))
-        or (med_black >= 0.35 and med_mean <= 36.0)
+        med_mean <= 12.0
+        or med_black >= 0.65
+        or (med_mean <= 20.0 and med_black >= 0.45)
     )
     is_static_black = bool(
-        (med_diff <= 2.0 or is_image)
-        and (med_mean <= 30.0 or med_black >= 0.40 or is_black_screen)
+        (med_diff <= 1.0 or is_image)
+        and (med_mean <= 20.0 and med_black >= 0.45)
     )
 
     # Deteccao Rigorosa de Videos Estaticos (arquivos de video com movimento nulo ou congelado)
     is_static_video = bool(
         (not is_image)
         and (
-            med_diff <= 1.8
-            or (med_diff <= 2.8 and (text_score >= 0.30 or text_lines >= 2 or uniform_bg >= 0.28 or med_edge >= 0.06 or med_persistence >= 0.40))
+            med_diff <= 0.85
+            or (med_diff <= 1.5 and (text_score >= 0.40 or text_lines >= 2) and uniform_bg >= 0.30)
         )
     )
 
     # Deteccao Rigorosa de Telas de Subscribe, Agradecimento e Outros
     source_name = str(classified.get("source") or "").lower()
-    has_outro_name = any(tok in source_name for tok in (
-        "subscribe", "subscrib", "inscreva", "inscricao", "inscrição",
-        "thanks", "obrigado", "outro", "endcard", "end_card", "endscreen",
-        "end_screen", "watch_next", "like_share", "canal", "tela_final",
-        "final_card", "closing"
-    ))
+    has_outro_name = any(
+        re.search(rf"(?:^|[\W_]){tok}(?:[\W_]|$)", source_name)
+        for tok in (
+            "subscribe", "subscrib", "inscreva", "inscricao", "inscrição",
+            "endcard", "end_card", "endscreen", "end_screen", "watch_next",
+            "tela_final", "final_card"
+        )
+    )
     has_red_subscribe_banner = bool(metrics.get("has_red_subscribe_banner") or temporal.get("has_red_subscribe_banner"))
     has_subscribe_with_context = bool(
         has_red_subscribe_banner
         and (
-            text_lines >= 1
-            or text_score >= 0.25
-            or data_score >= 0.35
-            or is_static_content
-            or uniform_bg >= 0.15
-            or (not is_image and med_diff <= 3.5)
+            (text_lines >= 2 and text_score >= 0.40)
+            or (text_lines >= 1 and text_score >= 0.50 and med_bottom >= 0.30)
+            or has_outro_name
         )
     )
     is_outro_or_subscribe = bool(
         has_outro_name
         or has_subscribe_with_context
         or (
-            (text_lines >= 2 or text_score >= 0.42)
-            and (med_bottom >= 0.30 or bottom_band >= 0.20 or has_red_subscribe_banner)
-            and (med_persistence >= 0.32 or is_static_content)
-            and (uniform_bg >= 0.20 or med_top >= 0.16 or (not is_image and med_diff <= 3.5))
+            (text_lines >= 2 or text_score >= 0.50)
+            and (med_bottom >= 0.45 or bottom_band >= 0.35)
+            and med_persistence >= 0.45
+            and (uniform_bg >= 0.35 or med_top >= 0.30)
         )
     )
 
@@ -10634,20 +10632,20 @@ def apply_visual_clean_filter(
         # Hard Quality Gate para Imagens: Rejeição de baixa resolução e deduplicação perceptual (dHash)
         if media_kind == "image" and action != "hard_reject":
             img_w, img_h = probe_image_dimensions(source)
-            if img_w < 640 or img_h < 360:
+            if img_w < 320 or img_h < 240:
                 action = "hard_reject"
                 category = "low_resolution"
-                reason = f"resolucao de imagem criticamente baixa ({img_w}x{img_h} < 640x360)"
+                reason = f"resolucao de imagem criticamente baixa ({img_w}x{img_h} < 320x240)"
                 item.update({"action": action, "category": category, "reason": reason})
             else:
                 img_hash = compute_image_dhash(source, cwd=work)
                 if img_hash != 0:
                     for prev_hash, prev_path in seen_clean_image_hashes:
                         dist = dhash_distance(img_hash, prev_hash)
-                        if dist <= 6:
+                        if dist <= 1:
                             action = "hard_reject"
                             category = "perceptual_duplicate"
-                            reason = f"imagem duplicada ou quase identica a {prev_path.name} (dhash_dist={dist})"
+                            reason = f"imagem duplicada de {prev_path.name} (dhash_dist={dist})"
                             item.update({"action": action, "category": category, "reason": reason})
                             break
                     if action != "hard_reject":
@@ -19182,14 +19180,11 @@ def build_segment_plan(
             setpts_factor = 1.0
             max_achievable = (T_v * setpts_factor) + (N_i * img_dur)
             # Proteção Anti-Amputação e Guardrail de Mídia Insuficiente:
-            # 1. Se a mídia disponível for inferior a 15s OU a cobertura for menor que 20% em narrações de mais de 45s:
-            if max_achievable < 15.0 or (orig_audio_total >= 45.0 and (max_achievable < 20.0 or ratio < 0.20)):
+            if max_achievable < 8.0:
                 raise RuntimeError(
-                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração, apenas {ratio*100:.0f}% de cobertura). "
-                    "Para evitar a criação acidental de vídeos truncados ou stubs, o render foi bloqueado. "
-                    "Adicione mais mídias ou ative 'Forçar render curto (<15s)' nas opções avançadas para prosseguir."
+                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração). "
+                    "Adicione mídias válidas à timeline para prosseguir."
                 )
-            # 2. Se a narração for longa (>= 45s) e o corte descartaria mais de 40% da fala (ratio < 0.60):
             elif orig_audio_total >= 45.0 and ratio < 0.60:
                 # Não amputa silenciosamente a narração do usuário!
                 # Desvia para Camada 4 (Auto-Healing B-Roll Elastic Loop), repetindo mídias limpas para cobrir 100% da voz
@@ -19212,11 +19207,10 @@ def build_segment_plan(
             audio_trimmed = True
             ratio = 1.0
         else:
-            # Se a mídia total for criticamente insuficiente para uma narração longa, mesmo o Elastic Loop não deve prosseguir sem forçar
-            if not force_short and (T_total < 15.0 or (orig_audio_total >= 45.0 and ratio < 0.20)):
+            if not force_short and T_total < 8.0:
                 raise RuntimeError(
-                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração, apenas {ratio*100:.0f}% de cobertura). "
-                    "Adicione mais mídias ou ative 'Forçar render curto (<15s)' nas opções avançadas."
+                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração). "
+                    "Adicione mídias válidas para prosseguir."
                 )
             # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop com Permutação Mutante)
             # Em vez de interromper o render em lotes, expande a sequência de mídias de forma permutada e harmônica

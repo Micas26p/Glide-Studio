@@ -628,6 +628,45 @@ class Regressions(unittest.TestCase):
         self.assertEqual(approved_pairs[0][0].name, "broll_clean.mp4")
         self.assertEqual(summary.get("hard_rejected"), 3)
 
+    def test_normal_broll_with_red_elements_not_rejected_as_subscribe(self):
+        """Garante que filmagens ou fotos reais com elementos vermelhos (ex: robô Ameca, flores,
+        roupa vermelha) NÃO são falsamente classificadas como tela de subscribe."""
+        # Vídeo com movimento natural e elementos vermelhos/fundo homogêneo
+        broll_metrics = {
+            "source": "09_Ameca_expressions_with_GPT3_4_00m00s-00m07s.mp4",
+            "metrics": {
+                "mean": 110.0,
+                "stdev": 45.0,
+                "frame_diff": 4.5,
+                "edge_density": 0.05,
+                "has_red_subscribe_banner": 0.0,
+                "text_lines": 0,
+                "text_score": 0.0,
+                "uniform_bg": 0.22,
+            }
+        }
+        cl = app._classify_visual_analysis(broll_metrics, "normal", media_kind="video")
+        self.assertEqual(cl.get("category"), "clean")
+        self.assertEqual(cl.get("action"), "keep")
+
+        # Foto com fundo claro e sem texto
+        photo_metrics = {
+            "source": "428_SoftBank_Pepper_working_at_Heijo_Palace.jpg",
+            "metrics": {
+                "mean": 125.0,
+                "stdev": 50.0,
+                "frame_diff": 0.0,
+                "edge_density": 0.06,
+                "has_red_subscribe_banner": 0.0,
+                "text_lines": 0,
+                "text_score": 0.0,
+                "uniform_bg": 0.30,
+            }
+        }
+        cl_photo = app._classify_visual_analysis(photo_metrics, "normal", media_kind="image")
+        self.assertEqual(cl_photo.get("category"), "clean")
+        self.assertEqual(cl_photo.get("action"), "keep")
+
 
 if __name__ == '__main__':
     unittest.main()
