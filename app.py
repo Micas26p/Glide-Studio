@@ -5567,6 +5567,9 @@ def _windows_priority_flag(priority: str | None = None) -> int:
     value = str(priority or "balanced").strip().lower()
     if value in {"light", "leve", "idle"}:
         return getattr(subprocess, "IDLE_PRIORITY_CLASS", 0x00000040)
+    if value in {"max", "maximum", "speed", "fast"}:
+        # NORMAL_PRIORITY_CLASS: render rápido sem roubar prioridade da UI
+        return getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0x00000020)
     return getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
 
 
@@ -5795,6 +5798,25 @@ def command_for_render_priority(cmd: list[str], priority: str | None = None) -> 
                     pass
             return optimized
         return cmd
+    # Modo "max": impor limites inteligentes de threads para evitar saturação total da CPU.
+    # Antes: removíamos TODOS os flags de threads → cada FFmpeg usava 16 threads →
+    # com 2 workers = 32 threads competindo num CPU de 16 = PC travado.
+    # Agora: definimos caps que permitem render rápido sem sufocar o OS/WebView.
+    logical_cpus = max(2, int(os.cpu_count() or 4))
+    hw = hardware_profile()
+    is_laptop = any(
+        any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
+        for g in hw.get("gpus", [])
+    ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+    if is_laptop:
+        max_threads = max(4, logical_cpus - 4)           # 12 para i7-12650H (16 lógicos)
+        max_filter = max(3, int(logical_cpus * 0.50))    # 8
+        max_complex = max(2, int(logical_cpus * 0.38))   # 6
+    else:
+        max_threads = max(4, logical_cpus - 2)
+        max_filter = max(4, int(logical_cpus * 0.62))
+        max_complex = max(3, int(logical_cpus * 0.45))
+
     optimized: list[str] = []
     skip_next = False
     clean_next_x265_params = False
@@ -5816,6 +5838,14 @@ def command_for_render_priority(cmd: list[str], priority: str | None = None) -> 
             clean_next_x265_params = True
             continue
         optimized.append(item)
+    # Re-inserir flags de threads com caps inteligentes no início do comando (após o binário)
+    thread_flags = [
+        "-threads", str(max_threads),
+        "-filter_threads", str(max_filter),
+        "-filter_complex_threads", str(max_complex),
+    ]
+    if optimized:
+        optimized = [optimized[0]] + thread_flags + optimized[1:]
     return optimized
 
 
@@ -20170,6 +20200,10 @@ def make_segments_smart(
         segment_filter_threads = max(1, int(performance_budget.get("segment_filter_threads") or 1))
         segment_threads = max(1, int(performance_budget.get("segment_threads") or 2))
         segment_thread_args = ["-threads", str(segment_threads), "-filter_threads", str(segment_filter_threads)]
+        # Decodificação por hardware (NVDEC/QSV) libera CPU para filtros — sem impacto na qualidade
+        hwaccel_seg_args: list[str] = []
+        if performance_budget.get("hardware_active") and not bool(job.options.get("_force_cpu")):
+            hwaccel_seg_args = ["-hwaccel", "auto"]
         if plan.media_kind == "image" or is_image_path(plan.source):
             img_source = ensure_compatible_image_source(plan.source, work)
             img_w, img_h = probe_image_dimensions(img_source)
@@ -20249,6 +20283,7 @@ def make_segments_smart(
             seek_args.extend(["-t", f"{input_limit:.3f}"])
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
+                *hwaccel_seg_args,
                 *seek_args,
                 "-i", str(plan.source),
                 "-vf", vf,
