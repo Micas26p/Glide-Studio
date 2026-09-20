@@ -2767,44 +2767,8 @@ def scene_rhythm_profile_from_style(style: dict[str, Any] | None) -> dict[str, A
 
 
 def image_motion_graphics_filter(style: dict[str, Any] | None) -> tuple[str, str]:
-    style = style if isinstance(style, dict) else {}
-    package = style.get("package") if isinstance(style.get("package"), dict) else {}
-    motion_graphics = str(package.get("image_motion") or "auto_cinematic")
-    if bool(style.get("motionGraphicsPremium")):
-        return (
-            ",drawbox=x=34:y=34:w=iw-68:h=ih-68:color=white@0.095:t=2,"
-            "drawbox=x=iw*0.08:y=ih*0.78:w=iw*0.34:h=2:color=0x6fffe9@0.26:t=fill,"
-            "drawbox=x=iw*0.68:y=ih*0.16:w=iw*0.16:h=ih*0.08:color=white@0.075:t=fill,"
-            "drawbox=x=iw*0.72:y=ih*0.28:w=iw*0.14:h=ih*0.06:color=0x6fffe9@0.10:t=fill",
-            "motion premium: moldura, foco e camadas parallax",
-        )
-    if style.get("source") == "reference_dna":
-        motion_density = _safe_float((style.get("dna") or {}).get("motionDensity"), 0.0)
-        motion_graphics = "reference_dynamic" if motion_density >= 0.45 else "reference_clean"
-    if motion_graphics in {"documentary_scan", "slow_zoom_focus", "reference_clean"}:
-        return (
-            ",drawbox=x=36:y=36:w=iw-72:h=ih-72:color=white@0.10:t=2,"
-            "drawbox=x=iw*0.10:y=ih*0.82:w=iw*0.28:h=2:color=0x6fffe9@0.20:t=fill",
-            "moldura documental + linha de foco",
-        )
-    if motion_graphics in {"hud_scan", "reference_dynamic"}:
-        return (
-            ",drawgrid=w=iw/8:h=ih/8:t=1:c=0x6fffe9@0.075,"
-            "drawbox=x=iw*0.12:y=ih*0.16:w=iw*0.34:h=2:color=0x6fffe9@0.22:t=fill",
-            "scan HUD leve + grade sutil",
-        )
-    if motion_graphics == "data_focus":
-        return (
-            ",drawbox=x=iw*0.08:y=ih*0.72:w=iw*0.38:h=ih*0.13:color=black@0.16:t=fill,"
-            "drawbox=x=iw*0.08:y=ih*0.72:w=iw*0.38:h=2:color=0x6fffe9@0.26:t=fill",
-            "cartao documental para dados",
-        )
-    if motion_graphics == "parallax_cards":
-        return (
-            ",drawbox=x=iw*0.66:y=ih*0.16:w=iw*0.18:h=ih*0.10:color=white@0.09:t=fill,"
-            "drawbox=x=iw*0.70:y=ih*0.30:w=iw*0.16:h=ih*0.08:color=0x6fffe9@0.12:t=fill",
-            "camadas parallax discretas",
-        )
+    # Desativar sobreposicoes graficas artificiais (drawbox de molduras brancas/cinzas,
+    # linhas verdes/ciano retas e grades HUD) que poluiam visualmente fotos e imagens.
     return ("", "movimento cinematografico limpo")
 
 
@@ -6755,10 +6719,11 @@ def validate_final_output(job: Job, path: Path, expected_duration: float | None 
     return summary
 
 
-def _resolved_media_path(path: Path, cwd: Path | None = None) -> Path:
-    if path.is_absolute():
-        return path
-    return ((cwd or DATA_ROOT) / path).resolve()
+def _resolved_media_path(path: Path | str, cwd: Path | None = None) -> Path:
+    p = Path(path)
+    if p.is_absolute():
+        return p
+    return ((cwd or DATA_ROOT) / p).resolve()
 
 
 def video_file_size_mb(path: Path, cwd: Path | None = None) -> float:
@@ -18441,7 +18406,7 @@ def build_video_filter(
             zexpr = "min(1.000+0.00012*on,1.052)" if reused else "min(1.000+0.00010*on,1.045)"
         else:
             zexpr = "max(1.052-0.00012*on,1.000)" if reused else "max(1.045-0.00010*on,1.000)"
-        vf += f",zoompan=z='{zexpr}':x='trunc(iw/2-(iw/zoom/2))':y='trunc(ih/2-(ih/zoom/2))':d=1:s={w}x{h}:fps=30"
+        vf += f",zoompan=z='{zexpr}':x='(iw/2-(iw/zoom/2))':y='(ih/2-(ih/zoom/2))':d=1:s={w}x{h}:fps=30"
     if abs(setpts_factor - 1.0) > 0.01:
         vf += f",setpts={setpts_factor:.8f}*PTS"
     vf += f",trim=duration={target_duration:.4f},settb=AVTB,setpts=PTS-STARTPTS"
@@ -18513,62 +18478,62 @@ def build_image_filter_complex(
 
     m = str(motion or "").lower()
     if m in {"slow_zoom_in", "zoom_in", "zoom"}:
-        z_expr = f"min(1.000+0.042*{smooth},1.048)"
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+        z_expr = f"min(1.000+0.075*{smooth},1.080)"
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"slow_zoom_out", "zoom_out"}:
-        z_expr = f"max(1.045-0.045*{smooth},1.000)"
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+        z_expr = f"max(1.080-0.075*{smooth},1.000)"
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"subtle_pan_right", "pan_right"}:
-        z_expr = "1.040"
-        x0 = max(0.0, safe_fx - 0.22)
-        x1 = min(1.0, safe_fx + 0.22)
-        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
-        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+        z_expr = "1.075"
+        x0 = max(0.0, safe_fx - 0.25)
+        x1 = min(1.0, safe_fx + 0.25)
+        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
+        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"subtle_pan_left", "pan_left"}:
-        z_expr = "1.040"
-        x0 = min(1.0, safe_fx + 0.22)
-        x1 = max(0.0, safe_fx - 0.22)
-        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
-        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+        z_expr = "1.075"
+        x0 = min(1.0, safe_fx + 0.25)
+        x1 = max(0.0, safe_fx - 0.25)
+        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
+        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"micro_pan_up", "pan_up"}:
-        z_expr = "1.040"
-        y0 = min(1.0, safe_fy + 0.18)
-        y1 = max(0.0, safe_fy - 0.18)
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+        z_expr = "1.075"
+        y0 = min(1.0, safe_fy + 0.20)
+        y1 = max(0.0, safe_fy - 0.20)
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
     elif m in {"micro_pan_down", "pan_down"}:
-        z_expr = "1.040"
-        y0 = max(0.0, safe_fy - 0.18)
-        y1 = min(1.0, safe_fy + 0.18)
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+        z_expr = "1.075"
+        y0 = max(0.0, safe_fy - 0.20)
+        y1 = min(1.0, safe_fy + 0.20)
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
     elif m in {"diagonal_drift_up_right"}:
-        z_expr = f"1.018+0.024*{smooth}"
-        x0 = max(0.0, safe_fx - 0.15)
-        x1 = min(1.0, safe_fx + 0.15)
-        y0 = min(1.0, safe_fy + 0.12)
-        y1 = max(0.0, safe_fy - 0.12)
-        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
-        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+        z_expr = f"min(1.020+0.060*{smooth},1.080)"
+        x0 = max(0.0, safe_fx - 0.18)
+        x1 = min(1.0, safe_fx + 0.18)
+        y0 = min(1.0, safe_fy + 0.14)
+        y1 = max(0.0, safe_fy - 0.14)
+        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
+        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
     elif m in {"diagonal_drift_down_left"}:
-        z_expr = f"1.018+0.024*{smooth}"
-        x0 = min(1.0, safe_fx + 0.15)
-        x1 = max(0.0, safe_fx - 0.15)
-        y0 = max(0.0, safe_fy - 0.12)
-        y1 = min(1.0, safe_fy + 0.12)
-        x_expr = f"trunc((iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth}))"
-        y_expr = f"trunc((ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth}))"
+        z_expr = f"min(1.020+0.060*{smooth},1.080)"
+        x0 = min(1.0, safe_fx + 0.18)
+        x1 = max(0.0, safe_fx - 0.18)
+        y0 = max(0.0, safe_fy - 0.14)
+        y1 = min(1.0, safe_fy + 0.14)
+        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
+        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
     elif m in {"tall_document_crawl"}:
-        z_expr = "1.020"
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*(0.08+0.84*{smooth}))"
+        z_expr = "1.040"
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*(0.08+0.84*{smooth})"
     else:
         # scale_drift_stable ou padrão
-        z_expr = f"1.000+0.018*{smooth}"
-        x_expr = f"trunc((iw-iw/zoom)*{safe_fx:.3f})"
-        y_expr = f"trunc((ih-ih/zoom)*{safe_fy:.3f})"
+        z_expr = f"min(1.000+0.060*{smooth},1.065)"
+        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
+        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
 
     style_filter, _style_label = image_motion_graphics_filter(style_profile)
     filmic_chain = f",{filmic_grade}" if filmic_grade else ""
@@ -18598,8 +18563,8 @@ def build_image_filter_complex(
 
     needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
 
-    ss_w = int(round(w * 1.12 / 2.0) * 2)
-    ss_h = int(round(h * 1.12 / 2.0) * 2)
+    ss_w = int(round(w * 1.333 / 2.0) * 2)
+    ss_h = int(round(h * 1.333 / 2.0) * 2)
     flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
@@ -18614,7 +18579,7 @@ def build_image_filter_complex(
     return (
         f"[0:v]{crop_filter}{flip_prefix}scale=384:216:force_original_aspect_ratio=increase,crop=384:216,boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
         f"[0:v]{crop_filter}{flip_prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
-        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p,"
+        f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,scale={ss_w}:{ss_h},format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
         f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
