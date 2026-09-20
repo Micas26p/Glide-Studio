@@ -438,6 +438,110 @@
         "processed": 8,
         "reused": 0
       }
+    },
+    {
+      "at": "2026-09-20T00:31:58",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_mp9oifuh_1moc",
+      "project_name": "4",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1770.272,
+      "elapsed_seconds": 4704.637,
+      "realtime_factor": 2.6576,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "direction": 879.703,
+        "visual_analysis": 1082.13,
+        "continuity": 0.0,
+        "segments": 759.129,
+        "sound_fx": 481.099,
+        "composition": 806.16,
+        "mux": 0.01,
+        "delivery": 7.904,
+        "total": 4703.658
+      },
+      "budget_seconds": 3883.486,
+      "budget_state": "exceeded",
+      "budget_met": false,
+      "budget_fallbacks": [
+        "budget_auto_extended"
+      ],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 7,
+        "reused": 5
+      }
+    },
+    {
+      "at": "2026-09-20T01:49:59",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_drop_896ef69a",
+      "project_name": "5",
+      "priority": "max",
+      "mode": "fast",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1692.26,
+      "elapsed_seconds": 4679.108,
+      "realtime_factor": 2.765,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "audio": 59.755,
+        "direction": 1355.497,
+        "subtitles_ass": 0.072,
+        "visual_analysis": 2485.105,
+        "continuity": 0.0,
+        "total": 4679.107
+      },
+      "budget_seconds": 2199.938,
+      "budget_state": "exceeded",
+      "budget_met": false,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 6,
+        "reused": 0
+      }
+    },
+    {
+      "at": "2026-09-20T02:43:49",
+      "version": "1.40.0",
+      "pipeline": "performance_8_realtime_turbo",
+      "project_id": "p_mpg1f7nx_hdav",
+      "project_name": "6",
+      "priority": "max",
+      "mode": "standard",
+      "codec": "h264",
+      "gpu": true,
+      "duration_seconds": 1510.437,
+      "elapsed_seconds": 3228.022,
+      "realtime_factor": 2.1371,
+      "hardware_signature": "9a1dee47ce617958",
+      "hardware_acceleration": "NVIDIA NVENC",
+      "breakdown": {
+        "audio": 40.269,
+        "direction": 812.651,
+        "subtitles_ass": 0.078,
+        "visual_analysis": 1846.199,
+        "continuity": 0.0,
+        "total": 3228.018
+      },
+      "budget_seconds": 1963.568,
+      "budget_state": "exceeded",
+      "budget_met": false,
+      "budget_fallbacks": [],
+      "safe_render": false,
+      "render_graph": {
+        "processed": 6,
+        "reused": 0
+      }
     }
   ]
 }
