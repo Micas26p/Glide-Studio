@@ -8509,6 +8509,7 @@ def _classify_visual_analysis(
     med_rows = float(metrics.get("active_rows") or 0.0)
     med_cols = float(metrics.get("active_cols") or 0.0)
     med_bottom = float(metrics.get("bottom_edge_share") or 0.0)
+    med_top = float(metrics.get("top_edge_share") or 0.0)
     med_skin = float(metrics.get("center_skin_ratio") or 0.0)
     med_head_skin = float(metrics.get("head_skin_ratio") or 0.0)
     med_torso_skin = float(metrics.get("torso_skin_ratio") or 0.0)
