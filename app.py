@@ -4674,14 +4674,11 @@ def render_budget_for_duration(
     except Exception:
         duration = 1.0
     multiplier = render_budget_multiplier(priority, options)
-    # Overhead fixo: análise visual, semântica, abertura limpa, detecção de faces, etc.
-    base_budget = duration * multiplier + 60.0
+    base_budget = duration * multiplier + 180.0
     count = int(media_count or len((options or {}).get("videos") or (options or {}).get("videoOrder") or []))
-    # Projetos com muitos clipes (400+) precisam de tempo extra para análise por clipe
-    media_allowance = min(300.0, max(0.0, count * 0.5)) if count > 15 else 0.0
-    # Teto de segurança generoso: permite até 2.5x a duração do vídeo para projetos complexos
-    max_ceiling = max(300.0, duration * 2.50)
-    return min(max_ceiling, max(180.0, base_budget + media_allowance))
+    media_allowance = min(600.0, max(0.0, count * 0.75)) if count > 15 else 0.0
+    max_ceiling = max(600.0, duration * 3.50)
+    return min(max_ceiling, max(300.0, base_budget + media_allowance))
 
 
 class RenderBudgetWatchdog:
@@ -4720,9 +4717,9 @@ class RenderBudgetWatchdog:
             if now >= deadline:
                 is_active = self._is_actively_making_progress()
                 is_downstream = getattr(self.job, "percent", 0.0) >= 60.0
-                max_allowed_extensions = 3 if self.job.percent < 30.0 else (99 if is_downstream else 5)
-                if (is_downstream or is_active) and self.job.render_budget_extensions < max_allowed_extensions:
-                    grace = max(240.0, float(self.job.render_budget_seconds or 300.0) * 0.35)
+                # An active or progressing render must NEVER be terminated by an artificial timer!
+                if is_downstream or is_active or (self.job.status in {"running", "preparing"} and not self.job.cancel_requested):
+                    grace = max(300.0, float(self.job.render_budget_seconds or 600.0) * 0.40)
                     self.job.render_budget_extensions += 1
                     self.job.render_budget_seconds += grace
                     self.job.render_deadline_at += grace
@@ -4731,15 +4728,15 @@ class RenderBudgetWatchdog:
                         self.job.render_budget_fallbacks.append("budget_auto_extended")
                     _append_log(
                         self.job,
-                        f"Watchdog: Limite de tempo estendido (+{round(grace)}s) pois o processo está ativo e finalizando etapas essenciais. "
+                        f"Watchdog: Limite de tempo estendido (+{round(grace)}s) pois o processo está ativo na etapa '{self.job.stage}'. "
                         f"Extensão {self.job.render_budget_extensions}."
                     )
                     continue
 
                 _append_log(
                     self.job,
-                    f"Watchdog: Orçamento limite ({round(self.job.render_budget_seconds)}s) ultrapassado! "
-                    f"Interrompendo render imediatamente para liberar CPU, GPU e memória do sistema."
+                    f"Watchdog: Orçamento limite ({round(self.job.render_budget_seconds)}s) ultrapassado sem atividade detectada. "
+                    f"Interrompendo render para liberar recursos."
                 )
                 self.job.render_budget_state = "exceeded"
                 self.job.cancel_requested = True
@@ -4750,7 +4747,11 @@ class RenderBudgetWatchdog:
         with self.job.process_lock:
             procs = list(self.job.current_processes)
         any_alive = any(p and p.poll() is None for p in procs)
-        return any_alive and self.job.stage in {"rendering", "audio", "cta", "muxing"}
+        if any_alive:
+            return True
+        if self.job.status in {"running", "preparing"} and not self.job.cancel_requested:
+            return True
+        return False
 
 
 def render_hardware_signature(profile: dict[str, Any] | None = None) -> str:
@@ -4777,27 +4778,26 @@ def render_budget_elapsed(job: Job) -> float:
 def assert_render_budget(job: Job, stage: str) -> None:
     if not render_budget_enabled(job.options):
         return
-    # Salvaguarda de Conclusão: Se os clipes visuais já foram todos gerados (percentual >= 60%),
-    # NUNCA aborta o render nas etapas finais de áudio, master ou muxing.
     if getattr(job, "percent", 0.0) >= 60.0:
         return
     if job.render_deadline_at and time.time() >= job.render_deadline_at:
-        if job.render_budget_extensions >= 3:
-            job.render_budget_state = "exceeded"
-            raise RenderBudgetExceeded(
-                f"Orçamento de render excedido no modo {render_mode_label(render_priority(job))} durante {stage}."
+        if job.status in {"running", "preparing"} and not job.cancel_requested:
+            grace_extension = max(300.0, float(job.render_budget_seconds or 600.0) * 0.5)
+            job.render_budget_extensions += 1
+            job.render_budget_seconds += grace_extension
+            job.render_deadline_at += grace_extension
+            job.render_budget_state = "extended"
+            if "budget_auto_extended" not in job.render_budget_fallbacks:
+                job.render_budget_fallbacks.append("budget_auto_extended")
+            _append_log(
+                job,
+                f"Proteção de tempo: render ativo na etapa {stage}. "
+                f"Limite estendido automaticamente (+{round(grace_extension)}s) para garantir a entrega."
             )
-        grace_extension = max(120.0, float(job.render_budget_seconds or 300.0) * 0.5)
-        job.render_budget_extensions += 1
-        job.render_budget_seconds += grace_extension
-        job.render_deadline_at += grace_extension
-        job.render_budget_state = "extended"
-        if "budget_auto_extended" not in job.render_budget_fallbacks:
-            job.render_budget_fallbacks.append("budget_auto_extended")
-        _append_log(
-            job,
-            f"Proteção de tempo adaptativa: render em andamento durante {stage}. "
-            f"Limite estendido automaticamente em +{round(grace_extension)}s para garantir a conclusão do vídeo."
+            return
+        job.render_budget_state = "exceeded"
+        raise RenderBudgetExceeded(
+            f"Orçamento de render excedido no modo {render_mode_label(render_priority(job))} durante {stage}."
         )
 
 
@@ -5894,10 +5894,10 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     # Orçamento dinâmico de alta performance com auto-calibração térmica de hardware
     if priority == "max":
         if is_laptop:
-            # Em notebooks (RTX Laptop + Core i7/i9), 2 workers em paralelo previnem thermal throttle
+            # Em notebooks (RTX Laptop + Core i7/i9), 2 workers em paralelo previnem thermal throttle a 93C
             # permitindo que a CPU sustente turbo boost acima de 3.8-4.5GHz em vez de throttling a 1.59GHz
             workers = 2
-            cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.50)))
+            cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.60)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
@@ -10629,7 +10629,7 @@ def apply_visual_clean_filter(
             any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
             for g in hw.get("gpus", [])
         ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-        max_workers = min(6, logical_cpus) if _is_laptop else min(8, logical_cpus)
+        max_workers = min(8, logical_cpus) if _is_laptop else min(12, logical_cpus)
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -14349,8 +14349,9 @@ def compose_final_visuals(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-    comp_threads = max(4, min(12, int(logical_cpus * 0.75)))
-    comp_filter_threads = max(2, min(8, int(logical_cpus * 0.50)))
+    job.direct_audio_muxed = False
+    comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
+    comp_filter_threads = max(4, min(12, int(logical_cpus * 0.70)))
     filter_args = [
         "-threads", str(comp_threads),
         "-filter_threads", str(comp_filter_threads),
@@ -14537,7 +14538,7 @@ def compose_visual_chunks_parallel(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-    max_workers = max(1, min(2, len(chunks)))
+    max_workers = min(3, len(chunks)) if is_laptop else min(4, len(chunks))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
 
     comp_base = 65.0
@@ -18306,11 +18307,11 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
             encoder = str(turbo["encoder_effective"])
             if encoder.endswith("_nvenc"):
                 args = [
-                    "-c:v", encoder, "-preset", "p2", "-tune", "hq", "-rc", "vbr",
+                    "-c:v", encoder, "-preset", "p1", "-tune", "ll", "-rc", "vbr",
                     "-cq", "19",
                     "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
                     "-g", "60", "-keyint_min", "30", "-forced-idr", "1",
-                    "-threads", "4",
+                    "-threads", "6",
                 ]
             elif encoder.endswith("_qsv"):
                 args = [
@@ -20980,7 +20981,7 @@ def concat_segments_and_mux(
         else:
             _append_log(job, "Render Graph: mux final reutilizado.")
     if not mux_cached:
-        if getattr(job, "direct_audio_muxed", False) and video_resolved.exists() and video_resolved.stat().st_size > 0:
+        if getattr(job, "direct_audio_muxed", False) and video_resolved.exists() and video_resolved.stat().st_size > 0 and probe_has_audio(video_resolved):
             performance_start(job, "mux")
             _append_log(job, "Render Studio: áudio e vídeo já integrados na fusão de blocos. Movendo arquivo final sem recópia de disco.")
             if video_resolved.resolve() != out_resolved.resolve():
@@ -22343,7 +22344,7 @@ def apply_auto_director(
         video_items_tuples = list(enumerate(videos))
         total_items = len(video_items_tuples)
         if total_items > 1:
-            max_workers = min(8, max(2, os.cpu_count() or 4))
+            max_workers = min(12, max(4, os.cpu_count() or 4))
             video_items = [None] * total_items
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(_index_single_video, vt): vt[0] for vt in video_items_tuples}

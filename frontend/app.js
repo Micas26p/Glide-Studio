@@ -4902,8 +4902,8 @@ const RENDER_SHOWCASE = {
     title: 'Desenhando o áudio',
     text: 'Narração, música, CTA e efeitos entram no mesmo mapa de tempo.',
     art: [
-      '<div class="stage-art stage-audio"><span></span><span></span><span></span><span></span><span></span><i></i></div>',
-      '<div class="stage-art stage-audio stage-audio-alt"><span></span><span></span><span></span><span></span><span></span><i></i></div>',
+      '<div class="stage-art stage-audio"><b></b><span></span><span></span><span></span><span></span><span></span><span></span><i></i></div>',
+      '<div class="stage-art stage-audio stage-audio-alt"><b></b><span></span><span></span><span></span><span></span><span></span><span></span><i></i></div>',
     ],
   },
   rendering: {

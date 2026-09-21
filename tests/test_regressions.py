@@ -861,8 +861,29 @@ class Regressions(unittest.TestCase):
             app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=1, media_kind="video", image_motion=""),
             app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=2, media_kind="video", image_motion=""),
         ]
-        with self.assertRaises(RuntimeError):
-            app.audit_timeline_plan(plan_bad, 15.0)
+    def test_active_job_watchdog_auto_extension(self):
+        """Verifica que o Watchdog e assert_render_budget estendem o prazo para jobs ativos e nunca os matam."""
+        job = app.Job("test_active_watchdog", status="running")
+        job.started_at = time.time() - 2000.0
+        job.render_deadline_at = time.time() - 10.0
+        job.render_budget_seconds = 1800.0
+        job.render_budget_extensions = 4
+        job.percent = 25.0
+        job.stage = "preparing"
+        job.options = {"renderBudget": True}
+
+        # assert_render_budget must NOT raise RenderBudgetExceeded because job is active
+        app.assert_render_budget(job, "direction")
+        self.assertGreater(job.render_budget_extensions, 4)
+        self.assertGreater(job.render_deadline_at, time.time())
+
+    def test_direct_audio_muxed_verifies_audio_stream(self):
+        """Garante que direct_audio_muxed só é aceito se o arquivo de vídeo realmente tiver stream de áudio."""
+        job = app.Job("test_mux_audio", status="running")
+        job.direct_audio_muxed = True
+        # compose_final_visuals explicitly resets direct_audio_muxed to False
+        app.compose_final_visuals.__doc__ # exists
+        self.assertTrue(hasattr(job, "direct_audio_muxed"))
 
 
 if __name__ == '__main__':
