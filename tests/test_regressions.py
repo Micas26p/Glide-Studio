@@ -667,6 +667,58 @@ class Regressions(unittest.TestCase):
         self.assertEqual(cl_photo.get("category"), "clean")
         self.assertEqual(cl_photo.get("action"), "keep")
 
+    def test_tech_photo_with_clean_background_not_rejected_as_slide(self):
+        """Garante que fotos de robôs/produtos com fundo de estúdio e nitidez alta
+        não sejam rejeitadas como slides de apresentação quando não contêm blocos de texto."""
+        metrics = {
+            "source": "423_SoftBank_Pepper_standing_alone.jpg",
+            "metrics": {
+                "mean": 130.0,
+                "stdev": 55.0,
+                "frame_diff": 0.0,
+                "edge_density": 0.07,
+                "has_red_subscribe_banner": 0.0,
+                "text_lines": 0,
+                "text_score": 0.0,
+                "uniform_bg": 0.42,
+                "black_ratio": 0.0,
+            }
+        }
+        cl = app._classify_visual_analysis(metrics, "normal", media_kind="image")
+        self.assertEqual(cl.get("category"), "clean")
+        self.assertEqual(cl.get("action"), "keep")
+
+    def test_visual_clean_salvage_safeguard_prevents_video_underflow(self):
+        """Garante que se o filtro rejeitar mais mídias do que o áudio necessita,
+        o mecanismo de salvaguarda restaura os melhores clipes para evitar que o vídeo fique curto."""
+        job = app.Job(id="test_salvage", options={"mode": "standard", "ratio": "16:9", "visualCleanFilter": True})
+        # 10 mídias de 5s cada = 50s total. Áudio precisa de 40s.
+        pairs = [(Path(f"clip_{i}.mp4"), 5.0) for i in range(10)]
+        
+        # Simula classificador rejeitando 8 dos 10 clipes (apenas 2 passariam = 10s < 40s)
+        def mock_probe(path, *args, **kwargs):
+            idx = int(path.stem.split("_")[1])
+            if idx < 2:
+                return {"category": "clean", "action": "keep", "reason": "clean broll", "score": 90}
+            else:
+                return {"category": "reused_slide", "action": "reject", "reason": "suspect slide", "score": 75}
+
+        with unittest.mock.patch("app.probe_visual_clean_health", side_effect=mock_probe):
+            approved_pairs, summary = app.apply_visual_clean_filter(job, pairs, 40.0, Path("."))
+
+        approved_dur = sum(d for _, d in approved_pairs)
+        self.assertGreaterEqual(approved_dur, 40.0, "A salvaguarda deve garantir duração suficiente para cobrir o áudio")
+        self.assertGreater(len(approved_pairs), 2)
+
+    def test_build_segment_plan_guarantees_complete_audio_coverage(self):
+        """Garante que build_segment_plan gera planos cobrindo 100% da narração mesmo com poucas mídias."""
+        files = [Path("vid1.mp4"), Path("img1.jpg"), Path("vid2.mp4")]
+        durs = [5.0, 5.0, 5.0]
+        audio_dur = 120.0  # 2 minutos de áudio com apenas 15s de mídia única
+        plans, summary = app.build_segment_plan(files, durs, audio_dur)
+        total_planned = sum(p.target_duration for p in plans)
+        self.assertGreaterEqual(total_planned, audio_dur - 0.5)
+
 
 if __name__ == '__main__':
     unittest.main()

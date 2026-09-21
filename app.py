@@ -987,7 +987,7 @@ def image_motion_for(path: Path | str, index: int = 0) -> str:
         return motion
     except Exception:
         return IMAGE_MOTION_ARCHETYPES[index % len(IMAGE_MOTION_ARCHETYPES)]
-VISUAL_CLEAN_CACHE_VERSION = 19
+VISUAL_CLEAN_CACHE_VERSION = 20
 VISUAL_CLEAN_CACHE_LOCK = threading.RLock()
 VISUAL_CLEAN_CACHE: dict[str, dict[str, Any]] = {}
 VIDEO_TINY_FILE_MB = 0.22
@@ -5800,24 +5800,49 @@ def command_for_render_priority(cmd: list[str], priority: str | None = None) -> 
                     pass
             return optimized
         return cmd
-    # Modo "max": impor limites inteligentes de threads para evitar saturação total da CPU.
-    # Antes: removíamos TODOS os flags de threads → cada FFmpeg usava 16 threads →
-    # com 2 workers = 32 threads competindo num CPU de 16 = PC travado.
-    # Agora: definimos caps que permitem render rápido sem sufocar o OS/WebView.
+    # Modo "max": limites equilibrados para velocidade máxima na GPU mantendo o PC 100% leve.
+    # Em laptops com 2 workers simultâneos: 4 threads por processo = 8 threads total (50% de 16 threads).
+    # O chip NVENC na RTX 3050 faz o trabalho pesado de codificação, enquanto a CPU fica livre para o Windows/WebView.
     logical_cpus = max(2, int(os.cpu_count() or 4))
     hw = hardware_profile()
     is_laptop = any(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
+
+    # Ler se o comando ja continha limites menores definidos pelo performance_budget
+    orig_threads = None
+    orig_filter = None
+    orig_complex = None
+    for i, arg in enumerate(cmd):
+        if arg == "-threads" and i + 1 < len(cmd):
+            try:
+                orig_threads = int(cmd[i + 1])
+            except ValueError:
+                pass
+        elif arg == "-filter_threads" and i + 1 < len(cmd):
+            try:
+                orig_filter = int(cmd[i + 1])
+            except ValueError:
+                pass
+        elif arg == "-filter_complex_threads" and i + 1 < len(cmd):
+            try:
+                orig_complex = int(cmd[i + 1])
+            except ValueError:
+                pass
+
     if is_laptop:
-        max_threads = max(4, logical_cpus - 4)           # 12 para i7-12650H (16 lógicos)
-        max_filter = max(3, int(logical_cpus * 0.50))    # 8
-        max_complex = max(2, int(logical_cpus * 0.38))   # 6
+        cap_threads = max(3, min(6, logical_cpus // 3))     # 5 no i7-12650H (16 lógicos)
+        cap_filter = max(2, min(4, int(logical_cpus * 0.25))) # 4
+        cap_complex = max(2, min(3, int(logical_cpus * 0.20)))# 3
     else:
-        max_threads = max(4, logical_cpus - 2)
-        max_filter = max(4, int(logical_cpus * 0.62))
-        max_complex = max(3, int(logical_cpus * 0.45))
+        cap_threads = max(4, min(10, logical_cpus // 2))
+        cap_filter = max(3, min(6, int(logical_cpus * 0.38)))
+        cap_complex = max(2, min(4, int(logical_cpus * 0.25)))
+
+    final_threads = min(orig_threads, cap_threads) if (orig_threads and orig_threads > 0) else cap_threads
+    final_filter = min(orig_filter, cap_filter) if (orig_filter and orig_filter > 0) else cap_filter
+    final_complex = min(orig_complex, cap_complex) if (orig_complex and orig_complex > 0) else cap_complex
 
     optimized: list[str] = []
     skip_next = False
@@ -5842,9 +5867,9 @@ def command_for_render_priority(cmd: list[str], priority: str | None = None) -> 
         optimized.append(item)
     # Re-inserir flags de threads com caps inteligentes no início do comando (após o binário)
     thread_flags = [
-        "-threads", str(max_threads),
-        "-filter_threads", str(max_filter),
-        "-filter_complex_threads", str(max_complex),
+        "-threads", str(final_threads),
+        "-filter_threads", str(final_filter),
+        "-filter_complex_threads", str(final_complex),
     ]
     if optimized:
         optimized = [optimized[0]] + thread_flags + optimized[1:]
@@ -8572,7 +8597,7 @@ def _classify_visual_analysis(
         consecutive_presenter = yunet_consecutive
         max_presenter = max(yunet_talking_score, heuristic_max_presenter * 0.45)
     is_image = media_kind == "image"
-    level = "strict" if is_image else (level if level in {"strict", "normal", "light"} else "normal")
+    level = level if level in {"strict", "normal", "light"} else "normal"
     classified["level"] = level
 
     thresholds = {
@@ -8592,13 +8617,11 @@ def _classify_visual_analysis(
             or text_lines >= 3
         )
     )
-    data_confirmed = (
-        (max_data >= thresholds["data"] or (uniform_bg >= 0.35 and med_edge >= 0.08))
+    data_confirmed = bool(
+        max_data >= max(0.55, thresholds["data"])
         and (
-            data_ratio >= thresholds["ratio"]
-            or (level == "normal" and consecutive_data >= 1)
-            or (level == "strict" and data_ratio > 0.0)
-            or uniform_bg >= 0.35
+            data_ratio >= max(0.35, thresholds["ratio"])
+            or consecutive_data >= 2
         )
     )
     if yunet_analyzed:
@@ -8670,8 +8693,8 @@ def _classify_visual_analysis(
     is_historical = bool(metrics.get("is_historical_monochrome"))
     image_quality_low = bool(
         is_image and (
-            (med_stdev < 6.5 if is_historical else med_stdev < 8.0)
-            or float(metrics.get("quality_score") or 1.0) < (0.35 if is_historical else 0.42)
+            (med_stdev < 5.0 if is_historical else med_stdev < 6.0)
+            or float(metrics.get("quality_score") or 1.0) < (0.20 if is_historical else 0.28)
         )
     )
 
@@ -8692,29 +8715,20 @@ def _classify_visual_analysis(
     tl_edges = int(metrics.get("tl_edges") or 0)
     is_static_content = bool(is_image or med_diff <= 2.5)
 
-    # Detecção Rigorosa de Cartelas Corporativas, Logos em Fundo Plano e Slides (Hard Gate)
-    is_corporate_logo_or_plate = (
+    # Deteccao Calibrada de Cartelas Corporativas e Logos Isolados
+    is_corporate_logo_or_plate = bool(
         not is_historical and (
-            # 1. Fundo monocromático dominante (> 40%) com logo/texto central ou slide (mesmo com leve movimento de vídeo)
-            (uniform_bg >= 0.40 and (med_edge <= 0.08 or med_rows <= 0.25 or text_lines >= 2) and (med_diff <= 8.5 or is_image))
-            # 2. Fundo stark white / claro (>150) dominante com logotipo ou texto
-            or (med_mean >= 150.0 and (uniform_bg >= 0.35 or med_edge <= 0.08 or text_lines >= 2) and (med_diff <= 8.5 or is_image))
-            # 3. Fundo preto ou escuro dominante com logo centralizado
-            or (med_mean <= 45.0 and uniform_bg >= 0.45 and (med_edge <= 0.08 or text_lines >= 1) and (med_diff <= 8.5 or is_image))
+            (uniform_bg >= 0.65 and med_edge <= 0.035 and text_lines <= 2 and (med_mean <= 18.0 or med_mean >= 220.0))
         )
     )
-    is_presentation_slide = (
+    # Deteccao Calibrada de Slides de Apresentacao / Cartelas de Texto Documentais
+    is_presentation_slide = bool(
         is_corporate_logo_or_plate
         or (not is_historical and (
-            (text_score >= 0.28 and (med_rows >= 0.12 or med_cols >= 0.18) and (med_diff <= 8.5 or is_image))
-            or (data_score >= 0.35 and (med_diff <= 8.5 or is_image))
-            or (med_stdev >= 40.0 and med_edge >= 0.05 and (med_rows >= 0.12 or med_cols >= 0.18) and (med_diff <= 8.5 or is_image))
-            or (uniform_bg >= 0.35 and med_edge >= 0.04 and (med_diff <= 8.5 or is_image))
-            or (text_lines >= 2 and uniform_bg >= 0.35)
-            or (text_lines >= 3)
+            (text_lines >= 4 and text_score >= 0.48 and uniform_bg >= 0.40)
+            or (text_lines >= 3 and uniform_bg >= 0.60 and med_edge <= 0.06 and text_score >= 0.45)
+            or (text_score >= 0.65 and text_lines >= 3 and med_rows >= 0.25)
         ))
-        or (uniform_bg >= 0.40 and med_edge >= 0.05 and med_diff <= 6.0)
-        or (text_lines >= 3 and med_diff <= 6.0)
     )
 
     # Poluição por Banners Inferiores/Superiores (URLs comerciais, contatos, rodapés de sites)
@@ -8751,14 +8765,13 @@ def _classify_visual_analysis(
     )
 
     med_black = float(metrics.get("black_ratio") or 0.0)
-    is_black_screen = (
-        med_mean <= 12.0
-        or med_black >= 0.65
-        or (med_mean <= 20.0 and med_black >= 0.45)
+    is_black_screen = bool(
+        (med_mean <= 8.0 and med_stdev <= 10.0)
+        or (med_mean <= 12.0 and med_black >= 0.88)
     )
     is_static_black = bool(
         (med_diff <= 1.0 or is_image)
-        and (med_mean <= 20.0 and med_black >= 0.45)
+        and (med_mean <= 10.0 and med_black >= 0.80)
     )
 
     # Deteccao Rigorosa de Videos Estaticos (arquivos de video com movimento nulo ou congelado)
@@ -10788,6 +10801,41 @@ def apply_visual_clean_filter(
                 break
 
     if clean_raw < needed_raw:
+        # Salvaguarda de Integridade de Timeline:
+        # NUNCA deixa a timeline desprovida de midia (evita repeticao excessiva de poucos clipes e travamentos de duracao curta).
+        # Resgata os melhores itens do usuario, ordenados por menor presenca de texto e melhor qualidade.
+        selected_set = {str(p[0]) for p in selected_pairs}
+        salvage_pool: list[tuple[Path, float, float]] = []
+        for src, dur in valid_pairs:
+            if str(src) in selected_set:
+                continue
+            idx_in_valid = next((i for i, (s, _) in enumerate(valid_pairs) if str(s) == str(src)), None)
+            an = precomputed_probes.get(idx_in_valid) if idx_in_valid is not None else None
+            cat = str(an.get("category") or "") if isinstance(an, dict) else ""
+            if cat in {"invalid", "no_frames", "black_screen", "static_black_screen"}:
+                continue
+            m = an.get("metrics", {}) if isinstance(an, dict) else {}
+            score = float(m.get("quality_score") or 0.70) - (float(m.get("text_score") or 0.0) * 0.5)
+            salvage_pool.append((src, dur, score))
+
+        salvage_pool.sort(key=lambda x: x[2], reverse=True)
+        restored = 0
+        for src, dur, _ in salvage_pool:
+            selected_pairs.append((src, dur))
+            clean_raw += dur
+            restored += 1
+            if clean_raw >= needed_raw * 1.08:
+                break
+        if restored > 0:
+            summary["salvaged_for_coverage"] = restored
+            _append_log(
+                job,
+                f"Salvaguarda Visual: {restored} mídia(s) de apoio resgatadas por ordem de qualidade "
+                f"para cobrir integralmente a narração ({clean_raw:.1f}s/{needed_raw:.1f}s), "
+                f"evitando repetições forçadas ou falta de vídeo."
+            )
+
+    if clean_raw < needed_raw:
         summary["insufficient_clean_media"] = True
         summary["clean_deficit_seconds"] = round(needed_raw - clean_raw, 2)
         _append_log(
@@ -10800,9 +10848,9 @@ def apply_visual_clean_filter(
     summary["clean_clips"] = len(clean_pairs)
     summary["approved"] = len(clean_pairs)
     summary["selected_clips"] = len(selected_pairs)
-    summary["retained_used_in_timeline"] = 0
-    summary["pollution_retained_for_safety"] = 0
-    summary["safety_halt_triggered"] = False
+    summary["retained_used_in_timeline"] = summary.get("salvaged_for_coverage", 0)
+    summary["pollution_retained_for_safety"] = summary.get("salvaged_for_coverage", 0)
+    summary["safety_halt_triggered"] = bool(summary.get("salvaged_for_coverage", 0) > 0)
     summary["raw_seconds_after_filter"] = round(sum(duration for _, duration in selected_pairs), 3)
     summary["needed_raw_seconds"] = round(needed_raw, 3)
     summary["status"] = "clean_complete"
@@ -19204,8 +19252,8 @@ def build_segment_plan(
     auto_healing_applied: list[str] = []
     ordered_items: list[tuple[Path, float]] = list(pairs)
 
-    # CENÁRIO: Falta Crítica de Mídia (T_total < 65% da narração)
-    if ratio < 0.65 and T_total < (audio_total - 12.0):
+    # CENÁRIO: Déficit de Mídia (T_total < narração)
+    if (ratio < 0.98 or T_total < audio_total * 1.02):
         can_trim = allow_audio_trim
         if can_trim and not force_short:
             img_dur = base_img_dur
@@ -19245,13 +19293,13 @@ def build_segment_plan(
                     "Adicione mídias válidas para prosseguir."
                 )
             # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop com Permutação Mutante)
-            # Em vez de interromper o render em lotes, expande a sequência de mídias de forma permutada e harmônica
+            # Expande a sequência de mídias de forma permutada e harmônica para garantir 100% de cobertura da voz
             falta = max(0.0, audio_total - T_total)
             auto_healing_applied.append(f"camada_4_auto_broll_elastic_loop_deficit_{falta:.1f}s")
             initial_pairs = list(pairs)
             cycle_pass = 0
             last_pair_src = str(ordered_items[-1][0]) if ordered_items else None
-            while T_total < audio_total * 1.02 and cycle_pass < 20 and initial_pairs:
+            while T_total < audio_total * 1.05 and cycle_pass < 25 and initial_pairs:
                 cycle_pass += 1
                 permuted_pairs = generate_mutant_permutation(initial_pairs, cycle_pass, last_pair_src)
                 for src, orig_dur in permuted_pairs:
@@ -19259,7 +19307,7 @@ def build_segment_plan(
                     ordered_items.append((src, orig_dur))
                     last_pair_src = str(src)
                     T_total += dur_contrib
-                    if T_total >= audio_total * 1.05:
+                    if T_total >= audio_total * 1.08:
                         break
             ratio = min(1.0, T_total / max(1.0, audio_total))
 
@@ -19612,7 +19660,7 @@ def build_segment_plan(
             cycle = base_cycle + 1
             last_source_key = str(plans[-1].source) if plans else None
 
-            while remaining > 0.08 and cycle <= 30:
+            while remaining > 0.08 and cycle <= 35:
                 added = False
                 if unique_v:
                     permuted_v = generate_mutant_permutation(unique_v, cycle, last_source_key)
@@ -19651,7 +19699,7 @@ def build_segment_plan(
                             remaining -= seg_dur
                             last_source_key = str(cand.source)
                             added = True
-                elif unique_img:
+                if remaining > 0.08 and unique_img:
                     permuted_img = generate_mutant_permutation(unique_img, cycle, last_source_key)
                     for cand in permuted_img:
                         if remaining <= 0.08:
@@ -19683,13 +19731,36 @@ def build_segment_plan(
                                     clean_roi=getattr(cand, "clean_roi", None) or get_media_clean_roi(cand.source),
                                     focal_point=focal,
                                     safe_framing=safe_framing,
+                                    timeline_zone=getattr(cand, "timeline_zone", "body"),
                                 )
                             )
                             remaining -= seg_dur
                             last_source_key = str(cand.source)
                             added = True
                 if not added:
-                    break
+                    # Garantia de Cobertura Absoluta: utiliza o melhor clipe disponivel para fechar a timeline
+                    pool = unique_img + unique_v
+                    if pool and remaining > 0.08:
+                        cand = pool[(cycle - 1) % len(pool)]
+                        seg_dur = round(min(base_img_dur if cand.media_kind == "image" else 4.0, remaining), 3)
+                        if seg_dur >= 0.10:
+                            plans.append(
+                                SegmentPlan(
+                                    source=cand.source,
+                                    raw_duration=cand.raw_duration,
+                                    target_duration=seg_dur,
+                                    source_offset=0.0,
+                                    source_index=cand.source_index,
+                                    cycle=cycle,
+                                    media_kind=cand.media_kind,
+                                    image_motion="zoom_in" if cand.media_kind == "image" else "",
+                                    timeline_zone="outro",
+                                )
+                            )
+                            remaining = round(remaining - seg_dur, 3)
+                            added = True
+                    if not added:
+                        break
                 cycle += 1
             if remaining <= 0.08:
                 remaining = 0.0
@@ -20449,11 +20520,43 @@ def make_segments_smart(
 
     if not segments:
         raise RuntimeError("Nenhum segmento de video foi gerado.")
-    if rendered_duration < target_floor:
-        skipped = summary.get("skipped_segments", 0)
-        raise RuntimeError(
-            f"Vídeo renderizado ainda ficou curto: vídeo={rendered_duration:.2f}s, áudio={audio_total:.2f}s. "
-            f"{skipped} clipe(s) foram ignorados por falha de frames/decodificação. Remova esses clipes ou adicione mais vídeos."
+    if rendered_duration < target_floor and accepted_plans:
+        # Fechamento garantido de timeline: complementa qualquer diferenca restante com os clipes aprovados
+        missing_sec = target_floor - rendered_duration
+        _append_log(job, f"Fechamento de timeline: complementando {missing_sec:.2f}s para sincronia total com a voz.")
+        emergency_cycle = 99
+        while rendered_duration < target_floor and emergency_cycle < 115:
+            for p in list(accepted_plans):
+                if rendered_duration >= target_floor:
+                    break
+                rem = target_floor - rendered_duration
+                seg_dur = min(4.0 if p.media_kind == "image" else 5.0, rem)
+                if seg_dur < 0.10:
+                    break
+                fill_p = SegmentPlan(
+                    source=p.source,
+                    raw_duration=p.raw_duration,
+                    target_duration=seg_dur,
+                    source_offset=0.0,
+                    source_index=p.source_index,
+                    cycle=emergency_cycle,
+                    media_kind=p.media_kind,
+                    image_motion="zoom_in" if p.media_kind == "image" else "",
+                    sub_slice_index=emergency_cycle,
+                )
+                out, actual = render_one(fill_p, next_segment_no)
+                next_segment_no += 1
+                if out:
+                    segments.append(out)
+                    accepted_plans.append(fill_p)
+                    rendered_duration += actual
+            emergency_cycle += 1
+
+    if rendered_duration < audio_total:
+        _append_log(
+            job,
+            f"Aviso de timeline: duracao visual ({rendered_duration:.2f}s) ligeiramente menor que audio ({audio_total:.2f}s); "
+            f"prospera para masterizacao sem abortar o render."
         )
 
     used_first_cycle = {plan.source_index for plan in accepted_plans if plan.cycle == 0}
@@ -21531,7 +21634,8 @@ def plan_recovery_retry(job: Job, exc: Exception) -> dict[str, Any] | None:
         or job.timeline_summary.get("hardware_encoder")
         or job.timeline_summary.get("intermediate_hardware_encoder")
     )
-    if hardware_was_active and not bool(job.options.get("_force_cpu")):
+    gpu_crash_keywords = ("nvenc", "cuda", "device", "driver", "cuinit", "nv_enc", "hardware acceleration", "out of memory")
+    if hardware_was_active and not bool(job.options.get("_force_cpu")) and any(k in lowered for k in gpu_crash_keywords):
         return {"kind": "cpu_fallback", "label": "Trocar GPU por CPU", "gpu": False}
     if suspects:
         return {"kind": "skip_bad_clip", "label": "Pular clipe suspeito", "skip": suspects[:2]}
