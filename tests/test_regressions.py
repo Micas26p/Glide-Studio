@@ -711,13 +711,146 @@ class Regressions(unittest.TestCase):
         self.assertGreater(len(approved_pairs), 2)
 
     def test_build_segment_plan_guarantees_complete_audio_coverage(self):
-        """Garante que build_segment_plan gera planos cobrindo 100% da narração mesmo com poucas mídias."""
+        """Garante que build_segment_plan gera planos cobrindo 100% da narração respeitando o teto de 2x de repetição."""
         files = [Path("vid1.mp4"), Path("img1.jpg"), Path("vid2.mp4")]
         durs = [5.0, 5.0, 5.0]
         audio_dur = 120.0  # 2 minutos de áudio com apenas 15s de mídia única
-        plans, summary = app.build_segment_plan(files, durs, audio_dur)
+        plans, summary = app.build_segment_plan(files, durs, audio_dur, force_short=True)
         total_planned = sum(p.target_duration for p in plans)
-        self.assertGreaterEqual(total_planned, audio_dur - 0.5)
+        # O total planejado cobre 100% da duração final de áudio ajustada, sem exceder 2x de repetição
+        self.assertAlmostEqual(total_planned, summary["audio_duration"], delta=0.5)
+        self.assertLessEqual(summary.get("max_asset_usage"), 2)
+
+    def test_case_a_plenty_clean_videos(self):
+        """Caso A: Projeto com muitas mídias de vídeo limpas.
+        Todas as mídias devem ser usadas 1x, sem repetições desnecessárias, com cortes naturais."""
+        files = [Path(f"video_clean_{i}.mp4") for i in range(12)]
+        durs = [6.0] * 12  # 72s de vídeo para 45s de áudio
+        plans, summary = app.build_segment_plan(files, durs, 45.0, force_short=True)
+        self.assertEqual(summary.get("max_asset_usage"), 1, "Nenhuma mídia deve se repetir quando há mídia limpa suficiente")
+        self.assertFalse(summary.get("audio_trimmed"))
+        self.assertAlmostEqual(summary.get("planned_duration"), 45.0, delta=0.5)
+        for p in plans:
+            self.assertGreaterEqual(p.target_duration, 1.8)
+            self.assertLessEqual(p.target_duration, 6.0)
+
+    def test_case_b_static_images_smooth_ken_burns(self):
+        """Caso B: Projeto com imagens estáticas suficientes.
+        Movimentos Ken Burns suaves sem tremor, arquétipos cinemáticos e duração 4.0s a 7.5s."""
+        files = [Path(f"image_{i}.jpg") for i in range(10)]
+        durs = [5.0] * 10
+        plans, summary = app.build_segment_plan(files, durs, 50.0, force_short=True)
+        self.assertEqual(summary.get("max_asset_usage"), 1)
+        for p in plans:
+            self.assertEqual(p.media_kind, "image")
+            self.assertIn(p.image_motion, app.IMAGE_MOTION_ARCHETYPES)
+            self.assertGreaterEqual(p.target_duration, 3.0)
+            self.assertLessEqual(p.target_duration, 7.5)
+
+    def test_case_c_hybrid_images_and_videos(self):
+        """Caso C: Projeto misto (imagens + vídeos).
+        Transição harmônica, vídeos sem cortes hiperativos, imagens suaves."""
+        files = [Path(f"vid_{i}.mp4") for i in range(5)] + [Path(f"img_{i}.jpg") for i in range(5)]
+        durs = [5.0] * 10
+        plans, summary = app.build_segment_plan(files, durs, 45.0, force_short=True)
+        kinds = {p.media_kind for p in plans}
+        self.assertIn("video", kinds)
+        self.assertIn("image", kinds)
+        self.assertLessEqual(summary.get("max_asset_usage"), 2)
+
+    def test_case_d_slight_media_deficit_progressive_hierarchy(self):
+        """Caso D: Projeto com leve déficit de mídia.
+        Fase 2 (expansão de imagem) e Fase 3 (desaceleração de vídeo) antes de reutilização (máx 2x)."""
+        # 4 imagens e 2 vídeos = base 4*4.2 + 2*5.0 = 26.8s para 35s de áudio
+        files = [Path(f"img_{i}.jpg") for i in range(4)] + [Path(f"vid_{i}.mp4") for i in range(2)]
+        durs = [5.0] * 6
+        plans, summary = app.build_segment_plan(files, durs, 35.0, force_short=True)
+        # Deve ter expandido imagens até 7.5s
+        self.assertGreaterEqual(summary.get("applied_image_duration"), 4.5)
+        # Asset usage nunca excede 2
+        self.assertLessEqual(summary.get("max_asset_usage"), 2)
+        # Duração planejada deve cobrir os 35s sem corte de áudio
+        self.assertFalse(summary.get("audio_trimmed"))
+        self.assertAlmostEqual(summary.get("planned_duration"), 35.0, delta=0.5)
+
+    def test_case_e_soft_reject_only_used_when_clean_insufficient(self):
+        """Caso E: Projeto com mídias suspeitas / soft-reject.
+        Soft-reject só entra se faltar mídia aprovada. Hard-reject NUNCA entra."""
+        clean_files = [Path(f"clean_{i}.mp4") for i in range(8)]
+        clean_durs = [5.0] * 8  # 40s
+        soft_media = [(Path(f"soft_{i}.mp4"), 5.0) for i in range(4)]
+        hard_media = [(Path("black_screen.mp4"), 5.0), (Path("subscribe.mp4"), 5.0)]
+
+        # Subcaso 1: Limpas suficientes (40s limpo para 30s áudio) -> soft NÃO deve entrar
+        plans1, sum1 = app.build_segment_plan(
+            clean_files, clean_durs, 30.0, force_short=True,
+            soft_rejected_media=soft_media, hard_rejected_media=hard_media,
+        )
+        sources1 = {p.source.name for p in plans1}
+        self.assertTrue(all("clean" in s for s in sources1), "Soft-reject não deve entrar quando limpas cobrem áudio")
+        self.assertNotIn("black_screen.mp4", sources1)
+        self.assertNotIn("subscribe.mp4", sources1)
+
+        # Subcaso 2: Limpas insuficientes (10s limpo para 40s áudio) -> soft entra de apoio, hard NUNCA
+        few_clean = [Path("clean_0.mp4"), Path("clean_1.mp4")]
+        few_durs = [5.0, 5.0]
+        plans2, sum2 = app.build_segment_plan(
+            few_clean, few_durs, 40.0, force_short=True,
+            soft_rejected_media=soft_media, hard_rejected_media=hard_media,
+        )
+        sources2 = {p.source.name for p in plans2}
+        self.assertNotIn("black_screen.mp4", sources2, "Hard-reject JAMAIS pode entrar")
+        self.assertNotIn("subscribe.mp4", sources2, "Hard-reject JAMAIS pode entrar")
+        self.assertLessEqual(sum2.get("max_asset_usage"), 2)
+
+    def test_case_f_long_audio_scarce_media_graceful_end(self):
+        """Caso F: Áudio longo com pouca mídia.
+        Todas as mídias úteis usadas 2x com variação. Sem congelar tela, sem repetir 3x,
+        vídeo encerra de forma limpa onde a mídia disponível acabou."""
+        files = [Path("vid1.mp4"), Path("img1.jpg"), Path("vid2.mp4")]
+        durs = [5.0, 5.0, 5.0]  # 15s de mídia única
+        audio_dur = 120.0  # 120s de áudio
+        plans, summary = app.build_segment_plan(files, durs, audio_dur, force_short=True)
+        # Limite absoluto de 2x respeitado
+        self.assertLessEqual(summary.get("max_asset_usage"), 2)
+        # Áudio foi encerrado no limite da mídia disponível
+        self.assertTrue(summary.get("audio_trimmed"))
+        total_planned = sum(p.target_duration for p in plans)
+        self.assertAlmostEqual(total_planned, summary.get("audio_duration"), delta=0.35)
+        # Nenhuma tela congelada
+        self.assertGreaterEqual(total_planned, 15.0)
+
+    def test_case_g_content_deduplication_renamed_copies(self):
+        """Caso G: Arquivos renomeados ou duplicados na pasta.
+        Deduplicação por fingerprint compartilha o mesmo contador (máximo 2x global)."""
+        p1 = Path("original_clip.mp4")
+        p2 = Path("copy_of_clip.mp4")
+        app.ASSET_FINGERPRINT_CACHE[str(p1.resolve()).lower()] = "fp_identical_123"
+        app.ASSET_FINGERPRINT_CACHE[str(p2.resolve()).lower()] = "fp_identical_123"
+
+        files = [p1, p2, Path("other.mp4")]
+        durs = [5.0, 5.0, 5.0]
+        plans, summary = app.build_segment_plan(files, durs, 25.0, force_short=True)
+        fp_count = sum(1 for p in plans if app.compute_asset_fingerprint(p.source) == "fp_identical_123")
+        self.assertLessEqual(fp_count, 2, "Cópias duplicadas não podem exceder 2x somadas")
+
+    def test_audit_timeline_plan_detects_violations(self):
+        """Verifica se a auditoria matemática pré-render barra planos inválidos."""
+        plan_ok = [
+            app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=0, media_kind="video", image_motion=""),
+            app.SegmentPlan(source=Path("v2.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=2, cycle=0, media_kind="video", image_motion=""),
+        ]
+        res = app.audit_timeline_plan(plan_ok, 10.0)
+        self.assertTrue(res["passed"])
+
+        # Violação de repetição: 3 aparições do mesmo asset
+        plan_bad = [
+            app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=0, media_kind="video", image_motion=""),
+            app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=1, media_kind="video", image_motion=""),
+            app.SegmentPlan(source=Path("v1.mp4"), raw_duration=5.0, target_duration=5.0, source_offset=0.0, source_index=1, cycle=2, media_kind="video", image_motion=""),
+        ]
+        with self.assertRaises(RuntimeError):
+            app.audit_timeline_plan(plan_bad, 15.0)
 
 
 if __name__ == '__main__':

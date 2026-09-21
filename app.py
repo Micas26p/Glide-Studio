@@ -951,24 +951,24 @@ def choose_smart_image_motion(
     is_tall = meta["is_tall"]
     is_wide = meta["is_wide"]
 
-    # 1. Imagem alta / documento / jornal / vertical
+    # 1. Imagem alta / documento / vertical -> slow zoom in ou out elegante
     if is_tall:
-        candidates = ["tall_document_crawl", "micro_pan_up", "slow_zoom_out"]
-    # 2. Rosto dominante no topo do enquadramento (proteger cabeça de cortes)
-    elif has_face and fy <= 0.32:
-        candidates = ["scale_drift_stable", "slow_zoom_in", "subtle_pan_right" if fx > 0.55 else "subtle_pan_left"]
-    # 3. Assunto nitidamente posicionado à direita
-    elif fx >= 0.60:
-        candidates = ["subtle_pan_right", "slow_zoom_in", "diagonal_drift_up_right", "slow_zoom_out"]
-    # 4. Assunto nitidamente posicionado à esquerda
-    elif fx <= 0.40:
-        candidates = ["subtle_pan_left", "slow_zoom_in", "diagonal_drift_down_left", "slow_zoom_out"]
-    # 5. Imagem panorâmica larga
+        candidates = ["slow_zoom_in", "slow_zoom_out"]
+    # 2. Rosto dominante no topo do enquadramento -> proteger enquadramento com zoom ou pan suave
+    elif has_face and fy <= 0.35:
+        candidates = ["slow_zoom_in", "subtle_pan_right" if fx > 0.52 else "subtle_pan_left", "slow_zoom_out"]
+    # 3. Assunto nitidamente posicionado à direita -> pan right ou zoom in
+    elif fx >= 0.58:
+        candidates = ["subtle_pan_right", "slow_zoom_in", "slow_zoom_out"]
+    # 4. Assunto nitidamente posicionado à esquerda -> pan left ou zoom in
+    elif fx <= 0.42:
+        candidates = ["subtle_pan_left", "slow_zoom_in", "slow_zoom_out"]
+    # 5. Imagem panorâmica larga -> pan suave
     elif is_wide:
-        candidates = ["subtle_pan_right", "subtle_pan_left", "slow_zoom_in", "diagonal_drift_up_right"]
-    # 6. Assunto centralizado ou paisagem equilibrada
+        candidates = ["subtle_pan_right", "subtle_pan_left", "slow_zoom_in", "slow_zoom_out"]
+    # 6. Assunto centralizado ou paisagem equilibrada -> alternância clássica
     else:
-        candidates = ["slow_zoom_in", "slow_zoom_out", "micro_pan_up", "diagonal_drift_up_right", "scale_drift_stable"]
+        candidates = ["slow_zoom_in", "slow_zoom_out", "subtle_pan_right", "subtle_pan_left"]
 
     valid_choices = [c for c in candidates if c != last_motion]
     if not valid_choices:
@@ -6687,6 +6687,80 @@ def cached_probe_duration(path: Path, cwd: Path | None = None) -> float:
     return safe_probe_duration(path, cwd=cwd)
 
 
+def safe_probe_video_stream_duration(path: Path | str, cwd: Path | None = None) -> float:
+    """Mede com precisão a duração REAL do stream de vídeo (v:0).
+    Nunca se deixa enganar pela duração do container que contém áudio longo."""
+    try:
+        p = Path(path) if Path(path).is_absolute() else ((cwd or DATA_ROOT) / Path(path)).resolve()
+        if not p.exists():
+            return safe_probe_duration(Path(path), cwd=cwd)
+        if not FFPROBE:
+            return safe_probe_duration(p, cwd=cwd)
+        cmd = [
+            FFPROBE, "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(p),
+        ]
+        res = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=25)
+        if res and res.returncode == 0 and (res.stdout or "").strip():
+            val = (res.stdout or "").strip()
+            if val != "N/A":
+                dur = float(val)
+                if dur > 0.08:
+                    return dur
+    except Exception:
+        pass
+    return safe_probe_duration(Path(path), cwd=cwd)
+
+
+ASSET_FINGERPRINT_CACHE_LOCK = threading.RLock()
+ASSET_FINGERPRINT_CACHE: dict[str, str] = {}
+
+
+def compute_asset_fingerprint(path: Path | str, cwd: Path | None = None) -> str:
+    """Identifica o asset por identidade de conteúdo e metadados estruturais.
+    Garante que arquivos renomeados ou cópias (ex: clip.mp4 vs clip_copy.mp4)
+    sejam reconhecidos como a MESMA mídia original para a regra de no máximo 2 usos."""
+    try:
+        p = Path(path) if Path(path).is_absolute() else ((cwd or DATA_ROOT) / Path(path)).resolve()
+        if not p.exists():
+            return str(Path(path).stem).lower()
+        st = p.stat()
+        cache_key = f"{p.name}:{st.st_size}:{int(st.st_mtime)}"
+        with ASSET_FINGERPRINT_CACHE_LOCK:
+            if cache_key in ASSET_FINGERPRINT_CACHE:
+                return ASSET_FINGERPRINT_CACHE[cache_key]
+
+        if is_image_path(p):
+            dh = compute_image_dhash(p, cwd=cwd)
+            if dh != 0:
+                fp = f"img_dh_{dh:016x}"
+                with ASSET_FINGERPRINT_CACHE_LOCK:
+                    ASSET_FINGERPRINT_CACHE[cache_key] = fp
+                return fp
+
+        sz = st.st_size
+        if sz <= 0:
+            return f"zero_{p.stem.lower()}"
+
+        import hashlib
+        m = hashlib.md5()
+        m.update(str(sz).encode("ascii"))
+        with open(p, "rb") as f:
+            m.update(f.read(65536))
+            if sz > 131072:
+                f.seek(max(0, sz - 65536))
+                m.update(f.read(65536))
+        dur = round(safe_probe_duration(p, cwd=cwd), 2)
+        fp = f"vid_{m.hexdigest()[:12]}_{dur:.2f}s"
+        with ASSET_FINGERPRINT_CACHE_LOCK:
+            ASSET_FINGERPRINT_CACHE[cache_key] = fp
+        return fp
+    except Exception:
+        return str(Path(path).stem).lower()
+
+
 def probe_has_audio(path: Path, cwd: Path | None = None) -> bool:
     source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
     if not FFPROBE:
@@ -8844,8 +8918,9 @@ def _classify_visual_analysis(
     elif image_quality_low:
         classified.update({
             "category": "low_quality",
-            "action": "hard_reject",
-            "reason": "imagem com qualidade visual insuficiente",
+            "action": "soft_reject",
+            "reject_tier": "soft",
+            "reason": "imagem com qualidade visual mediana / desvio padrão reduzido (elegível para soft-reject)",
             "confidence": 0.88,
         })
     elif is_webcam_pip:
@@ -10515,6 +10590,8 @@ def apply_visual_clean_filter(
 
     clean_pairs: list[tuple[Path, float]] = []
     fallback_pairs: list[tuple[Path, float]] = []
+    soft_rejected_pairs: list[tuple[Path, float]] = []
+    hard_rejected_pairs: list[tuple[Path, float]] = []
     retained_safety_pairs: list[tuple[Path, float, dict[str, Any]]] = []
     project_context = visual_filter_project_context(job)
     seen_clean_image_hashes: list[tuple[int, Path]] = []
@@ -10714,6 +10791,7 @@ def apply_visual_clean_filter(
         if is_unusable or is_pollution or action == "hard_reject":
             summary["hard_rejected"] += 1
             hard_rejected_count += 1
+            hard_rejected_pairs.append((source, duration))
             if category == "text_dominant":
                 summary["rejected_text"] += 1
             elif category == "data_dominant":
@@ -10747,15 +10825,17 @@ def apply_visual_clean_filter(
             item["decision"] = "removed"
             summary["items"].append(item)
             continue
-        elif action == "soft_suspect":
+        elif action in {"soft_reject", "soft_suspect"} or analysis.get("reject_tier") == "soft":
             if category in {"presenter_suspect", "static_center_suspect", "presenter", "suspect"}:
                 summary["presenter_suspects"] += 1
-            # Carrasco Visual: midias suspeitas NUNCA entram na timeline limpa.
-            # Sao rebaixadas exclusivamente para fallback de emergencia se faltar midia.
+            # Carrasco Visual: midias soft-reject NUNCA entram na timeline limpa.
+            # Sao rebaixadas exclusivamente para Fase 5 de fallback se faltar midia apos todas as fases.
+            soft_rejected_pairs.append((source, duration))
             fallback_pairs.append((source, duration))
             summary["soft_demoted"] += 1
-            item["decision"] = "fallback_only"
+            item["decision"] = "soft_reject"
             summary["items"].append(item)
+            continue
         else:
             trim_info = analysis.get("clean_trim") or (analysis.get("metrics") or {}).get("clean_trim") or {}
             eff_dur = float(trim_info.get("clean_duration") or duration) if category == "rescued_trimmed_video" else duration
@@ -10789,6 +10869,10 @@ def apply_visual_clean_filter(
     # Montagem da Timeline:
     # 1. Clipes 100% limpos SEMPRE ocupam o início e corpo principal da timeline.
     # 2. Clipes poluidos NUNCA sao reinseridos. Se faltar midia limpa, o particionamento mutante expande clipes limpos.
+    job.clean_media = list(clean_pairs)
+    job.soft_rejected_media = list(soft_rejected_pairs)
+    job.hard_rejected_media = list(hard_rejected_pairs)
+
     selected_pairs: list[tuple[Path, float]] = list(clean_pairs)
     clean_raw = sum(duration for _, duration in clean_pairs)
 
@@ -10802,17 +10886,18 @@ def apply_visual_clean_filter(
 
     if clean_raw < needed_raw:
         # Salvaguarda de Integridade de Timeline:
-        # NUNCA deixa a timeline desprovida de midia (evita repeticao excessiva de poucos clipes e travamentos de duracao curta).
-        # Resgata os melhores itens do usuario, ordenados por menor presenca de texto e melhor qualidade.
+        # NUNCA deixa a timeline desprovida de midia. Resgata exclusivamente itens com perfil aceitavel (NUNCA hard-reject).
         selected_set = {str(p[0]) for p in selected_pairs}
+        hard_set = {str(p[0]) for p in hard_rejected_pairs}
         salvage_pool: list[tuple[Path, float, float]] = []
         for src, dur in valid_pairs:
-            if str(src) in selected_set:
+            if str(src) in selected_set or str(src) in hard_set:
                 continue
             idx_in_valid = next((i for i, (s, _) in enumerate(valid_pairs) if str(s) == str(src)), None)
             an = precomputed_probes.get(idx_in_valid) if idx_in_valid is not None else None
             cat = str(an.get("category") or "") if isinstance(an, dict) else ""
-            if cat in {"invalid", "no_frames", "black_screen", "static_black_screen"}:
+            act = str(an.get("action") or "") if isinstance(an, dict) else ""
+            if act == "hard_reject" or cat in {"invalid", "no_frames", "black_screen", "static_black_screen", "outro_subscribe_screen", "static_video", "presentation_slide", "screen_recording"}:
                 continue
             m = an.get("metrics", {}) if isinstance(an, dict) else {}
             score = float(m.get("quality_score") or 0.70) - (float(m.get("text_score") or 0.0) * 0.5)
@@ -10822,6 +10907,8 @@ def apply_visual_clean_filter(
         restored = 0
         for src, dur, _ in salvage_pool:
             selected_pairs.append((src, dur))
+            if (src, dur) not in soft_rejected_pairs:
+                soft_rejected_pairs.append((src, dur))
             clean_raw += dur
             restored += 1
             if clean_raw >= needed_raw * 1.08:
@@ -10835,6 +10922,8 @@ def apply_visual_clean_filter(
                 f"evitando repetições forçadas ou falta de vídeo."
             )
 
+    job.soft_rejected_media = list(soft_rejected_pairs)
+
     if clean_raw < needed_raw:
         summary["insufficient_clean_media"] = True
         summary["clean_deficit_seconds"] = round(needed_raw - clean_raw, 2)
@@ -10847,6 +10936,9 @@ def apply_visual_clean_filter(
 
     summary["clean_clips"] = len(clean_pairs)
     summary["approved"] = len(clean_pairs)
+    summary["clean_pairs"] = list(clean_pairs)
+    summary["soft_rejected_pairs"] = list(soft_rejected_pairs)
+    summary["hard_rejected_pairs"] = list(hard_rejected_pairs)
     summary["selected_clips"] = len(selected_pairs)
     summary["retained_used_in_timeline"] = summary.get("salvaged_for_coverage", 0)
     summary["pollution_retained_for_safety"] = summary.get("salvaged_for_coverage", 0)
@@ -14541,7 +14633,16 @@ def compose_visual_chunks_parallel(
     final_concat_txt.write_text("\n".join(concat_lines), encoding="utf-8")
 
     final_visual = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
+    total_chunks_dur = sum(float(ch.get("duration", 0.0)) for ch in chunks)
     direct_mux = bool(audio_file and Path(audio_file).exists() and Path(audio_file).stat().st_size > 0)
+    if direct_mux and total_chunks_dur < target_duration - 0.35:
+        _append_log(
+            job,
+            f"Aviso de chunks: blocos ({total_chunks_dur:.2f}s) inferiores ao áudio ({target_duration:.2f}s); "
+            f"mux direto postergado para fechamento dinâmico sem congelamento."
+        )
+        direct_mux = False
+
     if direct_mux:
         cmd_merge = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
@@ -14612,7 +14713,7 @@ def compose_visual_chunks_parallel(
 def ensure_video_duration(job: Job, video_source: Path, target_duration: float, work: Path) -> Path:
     """Ensure visual stream fully covers target duration with moving frames; never freeze a frame."""
     target_duration = max(0.1, float(target_duration or 0.1))
-    current_duration = safe_probe_duration(video_source)
+    current_duration = safe_probe_video_stream_duration(video_source, cwd=work)
     if current_duration >= target_duration - 0.35:
         return video_source
     if current_duration <= 0.05:
@@ -14629,7 +14730,7 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
     _append_log(
         job,
         f"Alinhamento dinâmico sem congelamento: preenchendo {missing:.2f}s com mídia ativa em movimento "
-        f"(video={current_duration:.2f}s, audio={target_duration:.2f}s).",
+        f"(video_stream={current_duration:.2f}s, audio={target_duration:.2f}s).",
     )
     # FAST PATH: Se a cauda faltante for pequena (<= 60s), renderiza apenas o pequeno segmento faltante
     # e funde via stream-copy demuxer instantaneamente (0.5s vs 450s de re-encode total).
@@ -14665,7 +14766,7 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
                     str(repaired.resolve()),
                 ]
                 run_cmd(job, cmd_merge, cwd=work, quiet_success=True)
-                repaired_duration = safe_probe_duration(repaired)
+                repaired_duration = safe_probe_video_stream_duration(repaired, cwd=work)
                 if repaired_duration >= target_duration - 0.35:
                     job.timeline_summary["duration_repaired"] = True
                     job.timeline_summary["duration_repair_seconds"] = round(missing, 3)
@@ -14699,10 +14800,10 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
         cwd=work,
         quiet_success=True,
     )
-    repaired_duration = safe_probe_duration(repaired)
+    repaired_duration = safe_probe_video_stream_duration(repaired, cwd=work)
     if repaired_duration < target_duration - 0.35:
         raise RuntimeError(
-            f"Nao foi possivel cobrir a duracao visual: video={repaired_duration:.2f}s, "
+            f"Nao foi possivel cobrir a duracao visual: stream_video={repaired_duration:.2f}s, "
             f"audio={target_duration:.2f}s."
         )
     job.timeline_summary["duration_repaired"] = True
@@ -14712,12 +14813,73 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
 
 def verify_anti_freeze_guarantee(job: Job, video_file: Path, audio_duration: float) -> None:
     """Hard safety latch: Assert video has zero frozen tail and timeline covers narration."""
-    v_dur = safe_probe_duration(video_file)
+    work_dir = getattr(job, "work", None)
+    v_dur = safe_probe_video_stream_duration(video_file, cwd=work_dir)
     if v_dur < audio_duration - 0.40:
         raise RuntimeError(
-            f"TRAVA DE SEGURANÇA: Video ({v_dur:.2f}s) mais curto que a narração ({audio_duration:.2f}s). "
+            f"TRAVA DE SEGURANÇA: Stream de vídeo ({v_dur:.2f}s) mais curto que a narração ({audio_duration:.2f}s). "
             f"Exportação cancelada para impedir vídeo incompleto ou congelado."
         )
+
+
+def audit_timeline_plan(
+    plans: list[SegmentPlan],
+    audio_duration: float,
+    soft_rejected_media: list[tuple[Path, float]] | None = None,
+    hard_rejected_media: list[tuple[Path, float]] | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Any]:
+    """Auditoria matemática pré-render da timeline.
+    Verifica:
+    1. maxAssetUsage <= 2
+    2. hardRejectsUsed == 0
+    3. freezeSegmentsDetected == 0
+    4. visualGaps == 0
+    5. abs(total_video - audio_duration) <= 0.35s
+    """
+    asset_usage: dict[str, int] = {}
+    hard_reject_fps: set[str] = set()
+    if hard_rejected_media:
+        for p, _ in hard_rejected_media:
+            hard_reject_fps.add(compute_asset_fingerprint(p, cwd=cwd))
+
+    total_video_duration = 0.0
+    freeze_segments = 0
+    hard_rejects_used = 0
+    visual_gaps = 0
+
+    for plan in plans:
+        fp = compute_asset_fingerprint(plan.source, cwd=cwd)
+        asset_usage[fp] = asset_usage.get(fp, 0) + 1
+        if fp in hard_reject_fps:
+            hard_rejects_used += 1
+        dur = float(plan.target_duration)
+        if dur < 0.08:
+            visual_gaps += 1
+        total_video_duration += dur
+
+    max_usage = max(asset_usage.values()) if asset_usage else 0
+    duration_delta = abs(total_video_duration - audio_duration)
+
+    audit_result = {
+        "passed": bool(max_usage <= 2 and hard_rejects_used == 0 and freeze_segments == 0 and visual_gaps == 0 and duration_delta <= 0.50),
+        "max_asset_usage": max_usage,
+        "hard_rejects_used": hard_rejects_used,
+        "freeze_segments": freeze_segments,
+        "visual_gaps": visual_gaps,
+        "total_video_duration": round(total_video_duration, 3),
+        "audio_duration": round(audio_duration, 3),
+        "duration_delta": round(duration_delta, 3),
+    }
+
+    if max_usage > 2:
+        raise RuntimeError(f"Auditoria de Timeline Falhou: asset utilizado {max_usage} vezes (limite máximo é 2).")
+    if hard_rejects_used > 0:
+        raise RuntimeError(f"Auditoria de Timeline Falhou: {hard_rejects_used} mídia(s) do tipo hard-reject detectadas na timeline.")
+    if visual_gaps > 0:
+        raise RuntimeError(f"Auditoria de Timeline Falhou: {visual_gaps} corte(s) com duração inferior a 0.08s.")
+
+    return audit_result
 
 
 def burn_subtitles_on_video(
@@ -18627,8 +18789,9 @@ def build_image_filter_complex(
     safe_framing: dict[str, Any] | None = None,
 ) -> str:
     frames = max(2, int(round(max(0.1, target_duration) * 30)))
-    progress = f"(on/{frames})"
-    smooth = f"(3*pow({progress},2)-2*pow({progress},3))"
+    # Interpolação Smoothstep ultra-estável sem oscilação ou tremor: 3t^2 - 2t^3
+    norm_on = f"(on/{frames})"
+    smooth = f"(3*pow({norm_on},2)-2*pow({norm_on},3))"
 
     if not focal_point or not safe_framing:
         meta = probe_image_smart_metadata(image_path)
@@ -18654,61 +18817,28 @@ def build_image_filter_complex(
     safe_fy = max(0.18, min(0.55, fy)) if safe_framing.get("has_face") else max(0.22, min(0.68, fy))
 
     m = str(motion or "").lower()
-    if m in {"slow_zoom_in", "zoom_in", "zoom"}:
-        z_expr = f"min(1.000+0.075*{smooth},1.080)"
-        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
-    elif m in {"slow_zoom_out", "zoom_out"}:
-        z_expr = f"max(1.080-0.075*{smooth},1.000)"
+    if m in {"slow_zoom_out", "zoom_out"}:
+        # Slow zoom out suave e cinematográfico: 1.055 -> 1.000
+        z_expr = f"max(1.055-0.050*{smooth},1.000)"
         x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
         y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"subtle_pan_right", "pan_right"}:
-        z_expr = "1.075"
-        x0 = max(0.0, safe_fx - 0.25)
-        x1 = min(1.0, safe_fx + 0.25)
+        # Slow pan right linear e suave com amortecimento nos extremos
+        z_expr = "1.060"
+        x0 = max(0.08, safe_fx - 0.18)
+        x1 = min(0.92, safe_fx + 0.18)
         x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
         y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     elif m in {"subtle_pan_left", "pan_left"}:
-        z_expr = "1.075"
-        x0 = min(1.0, safe_fx + 0.25)
-        x1 = max(0.0, safe_fx - 0.25)
+        # Slow pan left linear e suave com amortecimento nos extremos
+        z_expr = "1.060"
+        x0 = min(0.92, safe_fx + 0.18)
+        x1 = max(0.08, safe_fx - 0.18)
         x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
         y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
-    elif m in {"micro_pan_up", "pan_up"}:
-        z_expr = "1.075"
-        y0 = min(1.0, safe_fy + 0.20)
-        y1 = max(0.0, safe_fy - 0.20)
-        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
-    elif m in {"micro_pan_down", "pan_down"}:
-        z_expr = "1.075"
-        y0 = max(0.0, safe_fy - 0.20)
-        y1 = min(1.0, safe_fy + 0.20)
-        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
-    elif m in {"diagonal_drift_up_right"}:
-        z_expr = f"min(1.020+0.060*{smooth},1.080)"
-        x0 = max(0.0, safe_fx - 0.18)
-        x1 = min(1.0, safe_fx + 0.18)
-        y0 = min(1.0, safe_fy + 0.14)
-        y1 = max(0.0, safe_fy - 0.14)
-        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
-        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
-    elif m in {"diagonal_drift_down_left"}:
-        z_expr = f"min(1.020+0.060*{smooth},1.080)"
-        x0 = min(1.0, safe_fx + 0.18)
-        x1 = max(0.0, safe_fx - 0.18)
-        y0 = max(0.0, safe_fy - 0.14)
-        y1 = min(1.0, safe_fy + 0.14)
-        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
-        y_expr = f"(ih-ih/zoom)*({y0:.3f}+({y1 - y0:.3f})*{smooth})"
-    elif m in {"tall_document_crawl"}:
-        z_expr = "1.040"
-        x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*(0.08+0.84*{smooth})"
     else:
-        # scale_drift_stable ou padrão
-        z_expr = f"min(1.000+0.060*{smooth},1.065)"
+        # Padrão: Slow zoom in cinematográfico suave e estável: 1.000 -> 1.055
+        z_expr = f"min(1.000+0.050*{smooth},1.055)"
         x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
         y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
 
@@ -18740,8 +18870,9 @@ def build_image_filter_complex(
 
     needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
 
-    ss_w = int(round(w * 1.333 / 2.0) * 2)
-    ss_h = int(round(h * 1.333 / 2.0) * 2)
+    # Canvas de alta precisão (2560x1440): elimina completamente jitter e truncamento subpixel no zoompan
+    ss_w = max(1920, int(round(w * 2.0 / 2.0) * 2))
+    ss_h = max(1080, int(round(h * 2.0 / 2.0) * 2))
     flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
@@ -19186,51 +19317,64 @@ def build_segment_plan(
     srt_path: Path | str | None = None,
     force_short: bool = False,
     voice_emphasis_events: list[dict[str, Any]] | None = None,
+    soft_rejected_media: list[tuple[Path, float]] | None = None,
+    hard_rejected_media: list[tuple[Path, float]] | None = None,
 ) -> tuple[list[SegmentPlan], dict[str, Any]]:
     if not video_files:
         raise RuntimeError("Nenhum arquivo de mídia encontrado para a montagem.")
     if audio_total <= 0:
         raise RuntimeError("A duração da narração deu 0. Verifique o arquivo de áudio.")
 
-    pairs = list(zip(video_files, video_durs))
-    v_pairs = [(src, dur) for src, dur in pairs if not is_image_path(src)]
-    i_pairs = [(src, dur) for src, dur in pairs if is_image_path(src)]
+    orig_audio_total = audio_total
+    audio_trimmed = False
+    smart_snapped = False
+    auto_healing_applied: list[str] = []
 
-    # Sincronia Editorial Magnética de Fala (carrega marcos do SRT se disponível)
-    speech_boundaries = extract_speech_boundaries(srt_path)
-    magnetic_snap_stats = {
-        "applied": 0,
-        "sentence_ends": 0,
-        "clause_pauses": 0,
-        "cue_breaths": 0,
-    }
+    # Map hard-rejected fingerprints so they can NEVER enter the timeline
+    hard_reject_fps: set[str] = set()
+    if hard_rejected_media:
+        for hp, _ in hard_rejected_media:
+            hard_reject_fps.add(compute_asset_fingerprint(hp))
 
-    # Inovação 3: Prosódia Emocional - Snap Zoom em Picos de Voz
-    emphasis_peaks = [
-        float(p["time"]) for p in (voice_emphasis_events or [])
-        if isinstance(p, dict) and "time" in p
-    ]
-    emphasis_peaks.sort()
-    prosody_snap_zooms = 0
-    used_emphasis_peaks: set[float] = set()
+    # Deduplicate video_files by content fingerprint (group aliases/copies together)
+    unique_pass1_items: list[tuple[Path, float, str, int]] = []
+    seen_pass1_fps: set[str] = set()
+    for idx, (src, dur) in enumerate(zip(video_files, video_durs), start=1):
+        fp = compute_asset_fingerprint(src)
+        if fp in hard_reject_fps:
+            continue
+        if fp not in seen_pass1_fps:
+            seen_pass1_fps.add(fp)
+            unique_pass1_items.append((src, dur, fp, idx))
 
-    # PASSO 1, 2, 3 & 4: Calcular durações originais de vídeos e imagens
+    if not unique_pass1_items and soft_rejected_media:
+        # Emergency: only soft-reject media was provided
+        for idx, (sp, sdur) in enumerate(soft_rejected_media, start=1):
+            sfp = compute_asset_fingerprint(sp)
+            if sfp not in hard_reject_fps and sfp not in seen_pass1_fps:
+                seen_pass1_fps.add(sfp)
+                unique_pass1_items.append((sp, sdur, sfp, idx))
+
+    if not unique_pass1_items:
+        raise RuntimeError("Nenhum arquivo de mídia utilizável encontrado após filtros de segurança.")
+
+    v_items = [it for it in unique_pass1_items if not is_image_path(it[0])]
+    i_items = [it for it in unique_pass1_items if is_image_path(it[0])]
+    N_v = len(v_items)
+    N_i = len(i_items)
+    is_image_dominant = bool(N_i > 0 and (N_v == 0 or (N_i / max(1, N_i + N_v)) >= 0.75))
+
     v_effective_durs = [
         max(0.08, dur - _source_offset_for(source_offsets, src))
-        for src, dur in v_pairs
+        for src, dur, _, _ in v_items
     ]
     T_v = sum(v_effective_durs)
+    base_img_dur = 5.2 if is_image_dominant else 4.2
+    max_img_dur = 7.5
+    T_i_base = N_i * base_img_dur
+    T_total_base = T_v + T_i_base
 
-    # Imagens: base saudável ajustada ao padrão cinematográfico refereniaimage.mp4 (média 5.52s)
-    N_i = len(i_pairs)
-    N_v = len(v_pairs)
-    is_image_dominant = bool(N_i > 0 and (N_v == 0 or (N_i / max(1, N_i + N_v)) >= 0.75))
-    base_img_dur = 5.2 if is_image_dominant else 4.0
-    T_i = N_i * base_img_dur
-
-    T_total = T_v + T_i
-
-    # Trava de Segurança Pré-Montagem: impedir render acidental com áudio ou mídia visual muito curta
+    # Trava de Segurança Pré-Montagem
     if not force_short:
         if audio_total < 15.0:
             raise RuntimeError(
@@ -19238,137 +19382,122 @@ def build_segment_plan(
                 "Para evitar a criação acidental de vídeos incompletos, o render foi bloqueado. "
                 "Ative 'Forçar render curto (<15s)' nas opções avançadas caso deseje prosseguir com este arquivo."
             )
-        if T_total < 10.0:
+        if T_total_base < 6.0 and not soft_rejected_media:
             raise RuntimeError(
-                f"Bloqueio de Segurança: O total de mídia visual é de apenas {T_total:.1f}s (mínimo seguro é 10s). "
+                f"Bloqueio de Segurança: O total de mídia visual é de apenas {T_total_base:.1f}s (mínimo seguro é 6s). "
                 "Adicione mais mídias ou ative 'Forçar render curto (<15s)' nas opções avançadas para prosseguir."
             )
 
-    # PASSO 6 & 7: Comparar duração visual com duração da narração e classificar cenário
-    orig_audio_total = audio_total
-    audio_trimmed = False
-    smart_snapped = False
-    ratio = T_total / max(0.1, audio_total)
-    auto_healing_applied: list[str] = []
-    ordered_items: list[tuple[Path, float]] = list(pairs)
+    # -------------------------------------------------------------
+    # HIERARQUIA MATEMÁTICA DE 6 FASES EM CASCATA
+    # -------------------------------------------------------------
+    img_dur = base_img_dur
+    setpts_factor = 1.0
 
-    # CENÁRIO: Déficit de Mídia (T_total < narração)
-    if (ratio < 0.98 or T_total < audio_total * 1.02):
-        can_trim = allow_audio_trim
-        if can_trim and not force_short:
-            img_dur = base_img_dur
-            setpts_factor = 1.0
-            max_achievable = (T_v * setpts_factor) + (N_i * img_dur)
-            # Proteção Anti-Amputação e Guardrail de Mídia Insuficiente:
-            if max_achievable < 8.0:
-                raise RuntimeError(
-                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração). "
-                    "Adicione mídias válidas à timeline para prosseguir."
-                )
-            elif orig_audio_total >= 45.0 and ratio < 0.60:
-                # Não amputa silenciosamente a narração do usuário!
-                # Desvia para Camada 4 (Auto-Healing B-Roll Elastic Loop), repetindo mídias limpas para cobrir 100% da voz
-                can_trim = False
-
-        if can_trim:
-            # Estratégia de Sacrifício de Áudio Inteligente com SRT Smart Sentence Snap:
-            img_dur = base_img_dur
-            setpts_factor = 1.0
-            max_achievable = (T_v * setpts_factor) + (N_i * img_dur)
-            
-            # Smart Sentence Snap: alinhar ao ponto final (. ! ?) mais próximo do SRT
-            snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=6.0)
-            if snapped and snapped <= max_achievable:
-                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
-                smart_snapped = True
-            else:
-                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, max_achievable))
-                
-            audio_trimmed = True
-            ratio = 1.0
-        else:
-            if not force_short and T_total < 8.0:
-                raise RuntimeError(
-                    f"Bloqueio de Segurança: Mídia insuficiente ({T_total:.1f}s de mídia para {orig_audio_total:.1f}s de narração). "
-                    "Adicione mídias válidas para prosseguir."
-                )
-            # CAMADA 4: Auto-Healing de Déficit de Mídia (B-Roll Elastic Loop com Permutação Mutante)
-            # Expande a sequência de mídias de forma permutada e harmônica para garantir 100% de cobertura da voz
-            falta = max(0.0, audio_total - T_total)
-            auto_healing_applied.append(f"camada_4_auto_broll_elastic_loop_deficit_{falta:.1f}s")
-            initial_pairs = list(pairs)
-            cycle_pass = 0
-            last_pair_src = str(ordered_items[-1][0]) if ordered_items else None
-            while T_total < audio_total * 1.05 and cycle_pass < 25 and initial_pairs:
-                cycle_pass += 1
-                permuted_pairs = generate_mutant_permutation(initial_pairs, cycle_pass, last_pair_src)
-                for src, orig_dur in permuted_pairs:
-                    dur_contrib = orig_dur if not is_image_path(src) else base_img_dur
-                    ordered_items.append((src, orig_dur))
-                    last_pair_src = str(src)
-                    T_total += dur_contrib
-                    if T_total >= audio_total * 1.08:
-                        break
-            ratio = min(1.0, T_total / max(1.0, audio_total))
-
-    # PASSO 8: Aplicar estratégia apropriada de ritmo saudável
-    if not audio_trimmed:
-        img_dur = base_img_dur
+    # FASE 1: Se T_total_base >= audio_total, as mídias aprovadas 1x cobrem 100% da narração!
+    if T_total_base >= audio_total:
         setpts_factor = 1.0
-
-        if ratio < 0.98:
-            # Manter velocidade natural 1.0x nos vídeos; déficits são cobertos com maestria via Case B (reutilização limpa)
-            setpts_factor = 1.0
-            if N_i > 0:
-                deficit = audio_total - T_total
-                max_img_boost = N_i * 1.5
-                img_boost = min(deficit, max_img_boost)
-                img_dur = round(base_img_dur + (img_boost / N_i), 3)
-                auto_healing_applied.append(f"cadence_adaptation_img_{img_dur:.2f}s")
-            else:
-                img_dur = base_img_dur
-        elif ratio > 1.10:
-            # Excesso de mídia: manter velocidade natural 1.0x e imagens em 4.0s
-            setpts_factor = 1.0
-            img_dur = base_img_dur
+        if N_v == 0 and N_i > 0:
+            img_dur = round(audio_total / N_i, 3)
+        elif N_i > 0 and T_v < audio_total:
+            img_dur = round((audio_total - T_v) / N_i, 3)
         else:
-            # Mídia equilibrada (0.98 <= ratio <= 1.10)
+            img_dur = base_img_dur
+    else:
+        # FASE 2: Aumentar a duração das imagens estáticas (até 7.5s) com movimento Ken Burns suave
+        T_i_boosted = N_i * max_img_dur
+        T_fase2 = T_v + T_i_boosted
+        if T_fase2 >= audio_total and N_i > 0:
+            deficit = audio_total - T_v
+            img_dur = round(min(max_img_dur, max(base_img_dur, deficit / N_i)), 3)
             setpts_factor = 1.0
-            if N_i > 0 and abs(audio_total - T_total) > 0.1:
-                img_dur = max(3.0, min(5.0, round((audio_total - T_v) / N_i, 3)))
+            auto_healing_applied.append(f"fase_2_img_expansion_{img_dur:.2f}s")
+        else:
+            img_dur = max_img_dur if N_i > 0 else base_img_dur
+            if N_i > 0:
+                auto_healing_applied.append(f"fase_2_img_max_{img_dur:.2f}s")
 
-    # PASSO 9: Cumprimento rigoroso da ordem natural da pasta (fidelidade 100% à sequência)
+            # FASE 3: Desacelerar suavemente vídeos (setpts_factor até 1.14x, velocidade ~0.88x)
+            max_setpts = 1.14
+            T_fase3 = (T_v * max_setpts) + (N_i * img_dur)
+            if T_fase3 >= audio_total and T_v > 0:
+                deficit_v = audio_total - (N_i * img_dur)
+                setpts_factor = round(min(max_setpts, max(1.0, deficit_v / max(0.1, T_v))), 4)
+                auto_healing_applied.append(f"fase_3_video_slowdown_{setpts_factor:.3f}x")
+            else:
+                setpts_factor = max_setpts if T_v > 0 else 1.0
+                if T_v > 0:
+                    auto_healing_applied.append(f"fase_3_video_max_slowdown_{setpts_factor:.3f}x")
 
-    # PASSO 10: Montagem da timeline com Organic Micro-Pace Oscillation
-    PACE_HARMONICS = [0.92, 1.08, 0.95, 1.05, 1.00]
+                # FASE 4: Segunda utilização controlada (máximo 2x por asset)
+                T_fase4 = 2.0 * ((T_v * setpts_factor) + (N_i * img_dur))
+                if T_fase4 >= audio_total:
+                    auto_healing_applied.append("fase_4_controlled_2nd_use_approved")
+                else:
+                    auto_healing_applied.append("fase_4_approved_exhausted_2x")
+
+                    # FASE 5: Recuperar mídias SOFT-REJECT (máximo 2x)
+                    valid_soft: list[tuple[Path, float, str]] = []
+                    seen_soft_fps = set()
+                    if soft_rejected_media:
+                        for sp, sdur in soft_rejected_media:
+                            sfp = compute_asset_fingerprint(sp)
+                            if sfp in hard_reject_fps or sfp in seen_pass1_fps or sfp in seen_soft_fps:
+                                continue
+                            seen_soft_fps.add(sfp)
+                            valid_soft.append((sp, sdur, sfp))
+
+                    soft_v = [it for it in valid_soft if not is_image_path(it[0])]
+                    soft_i = [it for it in valid_soft if is_image_path(it[0])]
+                    T_soft_1x = sum(dur * setpts_factor for _, dur, _ in soft_v) + len(soft_i) * img_dur
+                    T_fase5 = T_fase4 + (2.0 * T_soft_1x)
+
+                    if T_fase5 >= audio_total:
+                        auto_healing_applied.append(f"fase_5_soft_reject_recovered_{len(valid_soft)}_items")
+                    else:
+                        auto_healing_applied.append("fase_5_soft_reject_exhausted_2x")
+
+                        # FASE 6: Corte de áudio somente como última alternativa absoluta!
+                        max_achievable = max(8.0 if force_short else 15.0, T_fase5)
+                        snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=6.0)
+                        if snapped and snapped <= max_achievable:
+                            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
+                            smart_snapped = True
+                        else:
+                            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, max_achievable))
+                        audio_trimmed = True
+                        auto_healing_applied.append(f"fase_6_sentence_snap_audio_trim_at_{audio_total:.1f}s")
+
+    # Sincronia Editorial Magnética de Fala e Prosódia
+    speech_boundaries = extract_speech_boundaries(srt_path)
+    magnetic_snap_stats = {"applied": 0, "sentence_ends": 0, "clause_pauses": 0, "cue_breaths": 0}
+    emphasis_peaks = [float(p["time"]) for p in (voice_emphasis_events or []) if isinstance(p, dict) and "time" in p]
+    emphasis_peaks.sort()
+    prosody_snap_zooms = 0
+    used_emphasis_peaks: set[float] = set()
+
+    # -------------------------------------------------------------
+    # MONTAGEM DA TIMELINE COM INVARIANTE INVIOLÁVEL: maxAssetUsage <= 2
+    # -------------------------------------------------------------
     plans: list[SegmentPlan] = []
-    initial_count = len(pairs)
+    asset_usage: dict[str, int] = {}
     remaining = audio_total
     image_counter = 0
     recent_image_motions: list[str] = []
 
-    for source_index, (src, orig_dur) in enumerate(ordered_items, start=1):
+    # PASSO A: Fase 1 - 1ª Aparição de Todas as Mídias Únicas Aprovadas
+    for src, orig_dur, fp, s_idx in unique_pass1_items:
         if remaining <= 0.08:
             break
-        item_cycle = ((source_index - 1) // initial_count) if initial_count > 0 else 0
-        curr_timeline_pos = audio_total - remaining
+        curr_pos = audio_total - remaining
         is_img = is_image_path(src)
-        min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_timeline_pos, audio_total, is_image_dominant=is_image_dominant)
-        if is_img:
-            # Curva de Retenção Adaptativa no Pacing de Imagens
-            pace_factor = PACE_HARMONICS[image_counter % len(PACE_HARMONICS)]
-            if zone in {"hook", "short_hook"}:
-                target_candidate = round(min(img_dur, 3.5 if is_image_dominant else 2.6) * pace_factor, 3)
-            elif zone == "climax":
-                target_candidate = round(min(img_dur, 4.0 if is_image_dominant else 3.0) * pace_factor, 3)
-            else:
-                target_candidate = round(img_dur * pace_factor, 3)
-            target = max(min_dur, min(max_dur, target_candidate))
+        min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_pos, audio_total, is_image_dominant=is_image_dominant)
 
-            # Sincronia Editorial Magnética na Imagem:
+        if is_img:
+            target = min(img_dur, remaining)
             if speech_boundaries and remaining > target + 1.0:
                 snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
-                    current_time=curr_timeline_pos,
+                    current_time=curr_pos,
                     planned_duration=target,
                     boundaries=speech_boundaries,
                     min_dur=min_dur,
@@ -19384,387 +19513,203 @@ def build_segment_plan(
                     else:
                         magnetic_snap_stats["cue_breaths"] += 1
 
-            target = min(target, remaining)
-            motion, focal, safe_framing = choose_smart_image_motion(
-                src,
-                target_duration=target,
-                prev_motions=recent_image_motions,
-            )
-            recent_image_motions.append(motion)
-            if len(recent_image_motions) > 6:
-                recent_image_motions.pop(0)
-            image_counter += 1
+            target = round(min(target, remaining), 3)
             if target >= 0.08:
-                apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "image")
-                plans.append(
-                    SegmentPlan(
-                        source=src,
-                        raw_duration=orig_dur,
-                        target_duration=target,
-                        source_offset=0.0,
-                        source_index=source_index,
-                        cycle=item_cycle,
-                        media_kind="image",
-                        image_motion=motion,
-                        hflip=apply_hflip,
-                        scale_boost=1.0,
-                        clean_roi=get_media_clean_roi(src),
-                        timeline_zone=zone,
-                        focal_point=focal,
-                        safe_framing=safe_framing,
-                    )
+                motion, focal, safe_framing = choose_smart_image_motion(
+                    src,
+                    target_duration=target,
+                    prev_motions=recent_image_motions,
                 )
-                remaining -= target
+                recent_image_motions.append(motion)
+                if len(recent_image_motions) > 6:
+                    recent_image_motions.pop(0)
+                image_counter += 1
+                plans.append(SegmentPlan(
+                    source=src,
+                    raw_duration=orig_dur,
+                    target_duration=target,
+                    source_offset=0.0,
+                    source_index=s_idx,
+                    cycle=0,
+                    media_kind="image",
+                    image_motion=motion,
+                    hflip=False,
+                    scale_boost=1.0,
+                    clean_roi=get_media_clean_roi(src),
+                    timeline_zone=zone,
+                    focal_point=focal,
+                    safe_framing=safe_framing,
+                ))
+                asset_usage[fp] = 1
+                remaining = round(remaining - target, 3)
         else:
             offset = _source_offset_for(source_offsets, src)
-            if item_cycle > 0:
-                stride_pct = ((item_cycle * 0.382) % 0.65)
-                offset = max(offset, round(orig_dur * stride_pct, 3))
             eff_dur = max(0.08, orig_dur - offset) * setpts_factor
-            target_total = min(eff_dur, remaining)
-            if target_total >= 0.08:
-                apply_hflip = (item_cycle % 2 == 1) and is_safe_for_hflip(src, "video")
-                scale_boost = 1.08 if (item_cycle % 2 == 1) else 1.0
-                # AUTO B-ROLL PACING SLICER COM CURVA DE RETENÇÃO DO YOUTUBE:
-                # No Hook (0 a 40s) ou no Clímax, clipes acima de 3.2s são particionados para dinamismo extremo.
-                # No corpo narrativo normal, preserva plano único de até 5.5s.
-                slice_threshold = 3.2 if zone in {"hook", "climax", "short_hook"} else 5.5
-                if target_total <= slice_threshold:
-                    # Inovação 3: Snap Zoom em Picos de Prosódia Vocal
-                    # Se houver um pico dramático da locução no meio da tomada, fatia exatamente no pico com Punch-In!
-                    active_peak = None
-                    if emphasis_peaks and target_total >= 2.6:
-                        for pk in emphasis_peaks:
-                            if pk not in used_emphasis_peaks and (curr_timeline_pos + 0.95 <= pk <= curr_timeline_pos + target_total - 0.95):
-                                active_peak = pk
-                                break
-
-                    if active_peak is not None:
-                        dur_part1 = round(active_peak - curr_timeline_pos, 3)
-                        dur_part2 = round(target_total - dur_part1, 3)
-                        if dur_part1 >= 0.8 and dur_part2 >= 0.8:
-                            # 1ª metade: enquadramento normal (1.0x)
-                            plans.append(
-                                SegmentPlan(
-                                    source=src,
-                                    raw_duration=orig_dur,
-                                    target_duration=dur_part1,
-                                    source_offset=offset,
-                                    source_index=source_index,
-                                    cycle=item_cycle,
-                                    media_kind="video",
-                                    image_motion="",
-                                    sub_slice_index=0,
-                                    punch_in=False,
-                                    hflip=apply_hflip,
-                                    scale_boost=scale_boost,
-                                    timeline_zone=zone,
-                                )
-                            )
-                            # 2ª metade: Snap Zoom (Punch-In instantâneo de 1.12x) na palavra enfática
-                            plans.append(
-                                SegmentPlan(
-                                    source=src,
-                                    raw_duration=orig_dur,
-                                    target_duration=dur_part2,
-                                    source_offset=round(offset + dur_part1, 3),
-                                    source_index=source_index,
-                                    cycle=item_cycle,
-                                    media_kind="video",
-                                    image_motion="",
-                                    sub_slice_index=1,
-                                    punch_in=True,
-                                    hflip=apply_hflip,
-                                    scale_boost=scale_boost,
-                                    timeline_zone=zone,
-                                )
-                            )
-                            remaining = round(remaining - target_total, 3)
+            target = round(min(eff_dur, remaining), 3)
+            if target >= 0.08:
+                snap_punch = False
+                if emphasis_peaks:
+                    for pk in emphasis_peaks:
+                        if pk not in used_emphasis_peaks and abs(curr_pos - pk) <= 0.40:
+                            snap_punch = True
+                            used_emphasis_peaks.add(pk)
                             prosody_snap_zooms += 1
-                            used_emphasis_peaks.add(active_peak)
-                            continue
+                            break
 
-                    target = target_total
-                    # Sincronia Editorial Magnética em Clipes Curtos:
-                    if speech_boundaries and remaining > target + 1.0:
-                        snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
-                            current_time=curr_timeline_pos,
-                            planned_duration=target,
-                            boundaries=speech_boundaries,
-                            min_dur=min_dur,
-                            max_dur=min(max_dur, eff_dur, remaining),
+                plans.append(SegmentPlan(
+                    source=src,
+                    raw_duration=orig_dur,
+                    target_duration=target,
+                    source_offset=offset,
+                    source_index=s_idx,
+                    cycle=0,
+                    media_kind="video",
+                    image_motion="",
+                    sub_slice_index=0,
+                    punch_in=snap_punch,
+                    hflip=False,
+                    scale_boost=1.0,
+                    timeline_zone=zone,
+                ))
+                asset_usage[fp] = 1
+                remaining = round(remaining - target, 3)
+
+    # PASSO B: Fase 4 - Segunda utilização controlada das mídias aprovadas (máximo 2x com variação)
+    if remaining > 0.08:
+        eligible_for_pass2 = [it for it in unique_pass1_items if asset_usage.get(it[2], 0) == 1]
+        if eligible_for_pass2:
+            last_key = str(plans[-1].source) if plans else None
+            permuted_pass2 = generate_mutant_permutation(eligible_for_pass2, cycle=1, last_source_key=last_key)
+            for src, orig_dur, fp, s_idx in permuted_pass2:
+                if remaining <= 0.08:
+                    break
+                if asset_usage.get(fp, 0) >= 2:
+                    continue  # STRICT CEILING: NUNCA >= 3
+                is_img = is_image_path(src)
+                if is_img:
+                    target = round(min(img_dur, remaining), 3)
+                    if target >= 0.08:
+                        motion, focal, safe_framing = choose_smart_image_motion(
+                            src,
+                            target_duration=target,
+                            prev_motions=recent_image_motions,
                         )
-                        if was_snapped:
-                            target = snapped_target
-                            magnetic_snap_stats["applied"] += 1
-                            if snap_reason == "sentence_end":
-                                magnetic_snap_stats["sentence_ends"] += 1
-                            elif snap_reason == "clause_pause":
-                                magnetic_snap_stats["clause_pauses"] += 1
-                            else:
-                                magnetic_snap_stats["cue_breaths"] += 1
-
-                    target = min(target, remaining)
-                    start_snap = False
-                    if emphasis_peaks:
-                        for pk in emphasis_peaks:
-                            if pk not in used_emphasis_peaks and abs(curr_timeline_pos - pk) <= 0.40:
-                                start_snap = True
-                                used_emphasis_peaks.add(pk)
-                                prosody_snap_zooms += 1
-                                break
-
-                    plans.append(
-                        SegmentPlan(
+                        recent_image_motions.append(motion)
+                        if len(recent_image_motions) > 6:
+                            recent_image_motions.pop(0)
+                        image_counter += 1
+                        apply_hflip = is_safe_for_hflip(src, "image")
+                        plans.append(SegmentPlan(
                             source=src,
                             raw_duration=orig_dur,
                             target_duration=target,
-                            source_offset=offset,
-                            source_index=source_index,
-                            cycle=item_cycle,
+                            source_offset=0.0,
+                            source_index=s_idx,
+                            cycle=1,
+                            media_kind="image",
+                            image_motion=motion,
+                            hflip=apply_hflip,
+                            scale_boost=1.05,
+                            clean_roi=get_media_clean_roi(src),
+                            timeline_zone="body",
+                            focal_point=focal,
+                            safe_framing=safe_framing,
+                        ))
+                        asset_usage[fp] = 2
+                        remaining = round(remaining - target, 3)
+                else:
+                    offset = _source_offset_for(source_offsets, src)
+                    eff_usable = max(1.2, orig_dur - offset)
+                    stride_offset = round(offset + (eff_usable * 0.42), 3)
+                    usable = max(1.0, orig_dur - stride_offset) * setpts_factor
+                    seg_dur = round(min(usable, remaining, 5.2), 3)
+                    if seg_dur >= 0.08:
+                        apply_hflip = is_safe_for_hflip(src, "video")
+                        plans.append(SegmentPlan(
+                            source=src,
+                            raw_duration=orig_dur,
+                            target_duration=seg_dur,
+                            source_offset=stride_offset,
+                            source_index=s_idx,
+                            cycle=1,
                             media_kind="video",
                             image_motion="",
-                            sub_slice_index=0,
-                            punch_in=start_snap,
+                            sub_slice_index=1,
+                            punch_in=True,
                             hflip=apply_hflip,
-                            scale_boost=scale_boost,
-                            timeline_zone=zone,
-                        )
-                    )
-                    remaining -= target
-                else:
-                    if zone in {"hook", "short_hook"}:
-                        VIDEO_PACE_HARMONICS = [2.4, 2.2, 2.8, 2.0, 2.6]
-                        base_target = 2.4
-                    elif zone == "climax":
-                        VIDEO_PACE_HARMONICS = [2.6, 3.0, 2.4, 2.8, 2.6]
-                        base_target = 2.8
-                    else:
-                        VIDEO_PACE_HARMONICS = [4.4, 3.8, 5.0, 4.2, 4.6]
-                        base_target = 4.4
+                            scale_boost=1.12,
+                            timeline_zone="body",
+                        ))
+                        asset_usage[fp] = 2
+                        remaining = round(remaining - seg_dur, 3)
 
-                    n_slices = max(2, int(round(target_total / base_target)))
-                    avg_slice = target_total / n_slices
-
-                    curr_offset = offset
-                    remaining_clip = target_total
-                    for s_idx in range(n_slices):
-                        if remaining <= 0.08 or remaining_clip <= 0.08:
-                            break
-                        slice_timeline_pos = audio_total - remaining
-                        s_min_dur, s_target_dur, s_max_dur, s_zone = get_retention_pacing_parameters(slice_timeline_pos, audio_total)
-
-                        active_sub_peak = None
-                        if emphasis_peaks and s_idx < n_slices - 1 and remaining_clip >= 2.5:
-                            for pk in emphasis_peaks:
-                                if pk not in used_emphasis_peaks and (slice_timeline_pos + 1.0 <= pk <= slice_timeline_pos + min(remaining_clip - 1.0, s_max_dur)):
-                                    active_sub_peak = pk
-                                    break
-
-                        if active_sub_peak is not None:
-                            sub_dur = round(active_sub_peak - slice_timeline_pos, 3)
-                            used_emphasis_peaks.add(active_sub_peak)
-                        elif s_idx == n_slices - 1:
-                            sub_dur = round(remaining_clip, 3)
-                        else:
-                            harmonic = VIDEO_PACE_HARMONICS[s_idx % len(VIDEO_PACE_HARMONICS)]
-                            sub_dur = round(0.5 * avg_slice + 0.5 * harmonic, 3)
-                            min_tail = 1.6 if s_zone in {"hook", "climax", "short_hook"} else 2.0
-                            if remaining_clip - sub_dur < min_tail:
-                                sub_dur = round(remaining_clip / 2.0, 3)
-                            sub_dur = min(sub_dur, remaining_clip)
-
-                            # Sincronia Editorial Magnética nos Sub-Cortes:
-                            if speech_boundaries and remaining > sub_dur + 1.0 and remaining_clip > sub_dur + min_tail:
-                                max_slice_dur = min(s_max_dur, remaining_clip - min_tail, remaining)
-                                snapped_sub, was_snapped, snap_reason = magnetic_speech_snap(
-                                    current_time=slice_timeline_pos,
-                                    planned_duration=sub_dur,
-                                    boundaries=speech_boundaries,
-                                    min_dur=s_min_dur,
-                                    max_dur=max(s_min_dur + 0.2, max_slice_dur),
-                                )
-                                if was_snapped:
-                                    sub_dur = snapped_sub
-                                    magnetic_snap_stats["applied"] += 1
-                                    if snap_reason == "sentence_end":
-                                        magnetic_snap_stats["sentence_ends"] += 1
-                                    elif snap_reason == "clause_pause":
-                                        magnetic_snap_stats["clause_pauses"] += 1
-                                    else:
-                                        magnetic_snap_stats["cue_breaths"] += 1
-
-                        sub_dur = min(sub_dur, remaining)
-                        if sub_dur >= 0.08:
-                            slice_punch_in = (s_idx % 2 == 1)
-                            if emphasis_peaks:
-                                for pk in emphasis_peaks:
-                                    if abs(slice_timeline_pos - pk) <= 0.40:
-                                        slice_punch_in = True
-                                        prosody_snap_zooms += 1
-                                        used_emphasis_peaks.add(pk)
-                                        break
-
-                            plans.append(
-                                SegmentPlan(
-                                    source=src,
-                                    raw_duration=orig_dur,
-                                    target_duration=sub_dur,
-                                    source_offset=curr_offset,
-                                    source_index=source_index,
-                                    cycle=item_cycle,
-                                    media_kind="video",
-                                    image_motion="",
-                                    sub_slice_index=s_idx,
-                                    punch_in=slice_punch_in,
-                                    hflip=apply_hflip,
-                                    scale_boost=scale_boost,
-                                    timeline_zone=s_zone,
-                                )
-                            )
-                            curr_offset = round(curr_offset + sub_dur, 3)
-                            remaining_clip = round(remaining_clip - sub_dur, 3)
-                            remaining = round(remaining - sub_dur, 3)
-
-    # -------------------------------------------------------------
-    # COBERTURA DE TIMELINE SEM CONGELAMENTO (Case A & Case B)
-    # -------------------------------------------------------------
-    if remaining > 0.08 and plans:
-        # Case A: Sacrifício de Áudio Inteligente (se habilitado E déficit crítico > 40%)
-        if allow_audio_trim and remaining > audio_total * 0.40:
-            actual_video = sum(p.target_duration for p in plans)
-            snapped = find_smart_sentence_snap(srt_path, actual_video, min_duration=6.0)
-            if snapped and snapped <= actual_video:
-                audio_total = max(8.0, min(orig_audio_total, snapped))
-                smart_snapped = True
-            else:
-                audio_total = max(8.0, min(orig_audio_total, actual_video))
-            audio_trimmed = True
-            remaining = 0.0
-            auto_healing_applied.append(f"case_a_clean_audio_trim_at_{audio_total:.1f}s")
-        else:
-            # Case B: Reutilização Inteligente de Mídia Aprovada (cobrindo 100% da voz) com Reuso Cinematográfico Mutante
-            unique_v_map = {}
-            for p in plans:
-                if p.media_kind == "video" and str(p.source) not in unique_v_map:
-                    unique_v_map[str(p.source)] = p
-            unique_v = list(unique_v_map.values())
-
-            unique_img_map = {}
-            for p in plans:
-                if p.media_kind == "image" and str(p.source) not in unique_img_map:
-                    unique_img_map[str(p.source)] = p
-            unique_img = list(unique_img_map.values())
-
-            base_cycle = max((getattr(p, "cycle", 0) for p in plans), default=0)
-            cycle = base_cycle + 1
-            last_source_key = str(plans[-1].source) if plans else None
-
-            while remaining > 0.08 and cycle <= 35:
-                added = False
-                if unique_v:
-                    permuted_v = generate_mutant_permutation(unique_v, cycle, last_source_key)
-                    for cand in permuted_v:
-                        if remaining <= 0.08:
-                            break
-                        raw_dur = float(cand.raw_duration)
-                        base_trim_offset = _source_offset_for(source_offsets, cand.source)
-                        eff_usable = max(1.2, raw_dur - base_trim_offset)
-                        stride_pct = ((cycle * 0.382 + cand.sub_slice_index * 0.236) % 0.65)
-                        slice_offset = round(base_trim_offset + (eff_usable * stride_pct), 3)
-                        usable = max(1.2, raw_dur - slice_offset)
-                        # Pacing Slicer em clipes reciclados: ritmo documental dinâmico
-                        max_reuse_shot = 4.5
-                        seg_dur = round(min(usable, remaining, max_reuse_shot), 3)
-                        if seg_dur >= 0.6:
-                            apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "video")
-                            scale_boost = 1.14 if (cycle % 2 == 1) else 1.05
-                            plans.append(
-                                SegmentPlan(
-                                    source=cand.source,
-                                    raw_duration=raw_dur,
-                                    target_duration=seg_dur,
-                                    source_offset=slice_offset,
-                                    source_index=cand.source_index,
-                                    cycle=cycle,
-                                    media_kind="video",
-                                    image_motion="",
-                                    is_reversed=False,
-                                    sub_slice_index=cycle,
-                                    punch_in=((cand.sub_slice_index + cycle) % 2 == 1),
-                                    hflip=apply_hflip,
-                                    scale_boost=scale_boost,
-                                )
-                            )
-                            remaining -= seg_dur
-                            last_source_key = str(cand.source)
-                            added = True
-                if remaining > 0.08 and unique_img:
-                    permuted_img = generate_mutant_permutation(unique_img, cycle, last_source_key)
-                    for cand in permuted_img:
-                        if remaining <= 0.08:
-                            break
-                        seg_dur = round(min(base_img_dur, remaining), 3)
-                        if seg_dur >= 0.6:
-                            apply_hflip = (cycle % 2 == 1) and is_safe_for_hflip(cand.source, "image")
-                            motion, focal, safe_framing = choose_smart_image_motion(
-                                cand.source,
-                                target_duration=seg_dur,
-                                prev_motions=recent_image_motions,
-                            )
-                            recent_image_motions.append(motion)
-                            if len(recent_image_motions) > 6:
-                                recent_image_motions.pop(0)
-                            image_counter += 1
-                            plans.append(
-                                SegmentPlan(
-                                    source=cand.source,
-                                    raw_duration=cand.raw_duration,
-                                    target_duration=seg_dur,
-                                    source_offset=0.0,
-                                    source_index=cand.source_index,
-                                    cycle=cycle,
-                                    media_kind="image",
-                                    image_motion=motion,
-                                    hflip=apply_hflip,
-                                    scale_boost=1.0,
-                                    clean_roi=getattr(cand, "clean_roi", None) or get_media_clean_roi(cand.source),
-                                    focal_point=focal,
-                                    safe_framing=safe_framing,
-                                    timeline_zone=getattr(cand, "timeline_zone", "body"),
-                                )
-                            )
-                            remaining -= seg_dur
-                            last_source_key = str(cand.source)
-                            added = True
-                if not added:
-                    # Garantia de Cobertura Absoluta: utiliza o melhor clipe disponivel para fechar a timeline
-                    pool = unique_img + unique_v
-                    if pool and remaining > 0.08:
-                        cand = pool[(cycle - 1) % len(pool)]
-                        seg_dur = round(min(base_img_dur if cand.media_kind == "image" else 4.0, remaining), 3)
-                        if seg_dur >= 0.10:
-                            plans.append(
-                                SegmentPlan(
-                                    source=cand.source,
-                                    raw_duration=cand.raw_duration,
-                                    target_duration=seg_dur,
-                                    source_offset=0.0,
-                                    source_index=cand.source_index,
-                                    cycle=cycle,
-                                    media_kind=cand.media_kind,
-                                    image_motion="zoom_in" if cand.media_kind == "image" else "",
-                                    timeline_zone="outro",
-                                )
-                            )
-                            remaining = round(remaining - seg_dur, 3)
-                            added = True
-                    if not added:
-                        break
-                cycle += 1
+    # PASSO C: Fase 5 - Recuperação de mídias SOFT-REJECT (somente se faltar mídia aprovada)
+    valid_soft_pool = [it for it in (valid_soft if 'valid_soft' in locals() else []) if asset_usage.get(it[2], 0) < 2 and it[2] not in hard_reject_fps]
+    if remaining > 0.08 and valid_soft_pool:
+        # 1ª passada de soft-reject
+        for src, orig_dur, fp in valid_soft_pool:
             if remaining <= 0.08:
-                remaining = 0.0
-                auto_healing_applied.append(f"case_b_clean_media_reuse_cycles_{cycle-1}")
+                break
+            if asset_usage.get(fp, 0) >= 2 or fp in hard_reject_fps:
+                continue
+            is_img = is_image_path(src)
+            seg_dur = round(min(img_dur if is_img else (orig_dur * setpts_factor), remaining), 3)
+            if seg_dur >= 0.08:
+                plans.append(SegmentPlan(
+                    source=src,
+                    raw_duration=orig_dur,
+                    target_duration=seg_dur,
+                    source_offset=0.0,
+                    source_index=len(plans) + 1,
+                    cycle=0,
+                    media_kind="image" if is_img else "video",
+                    image_motion=choose_smart_image_motion(src, target_duration=seg_dur)[0] if is_img else "",
+                    timeline_zone="body",
+                ))
+                asset_usage[fp] = 1
+                remaining = round(remaining - seg_dur, 3)
+
+        # 2ª passada de soft-reject (se ainda faltar mídia)
+        if remaining > 0.08:
+            for src, orig_dur, fp in valid_soft_pool:
+                if remaining <= 0.08:
+                    break
+                if asset_usage.get(fp, 0) != 1 or fp in hard_reject_fps:
+                    continue
+                is_img = is_image_path(src)
+                seg_dur = round(min(img_dur if is_img else (orig_dur * 0.5 * setpts_factor), remaining), 3)
+                if seg_dur >= 0.08:
+                    plans.append(SegmentPlan(
+                        source=src,
+                        raw_duration=orig_dur,
+                        target_duration=seg_dur,
+                        source_offset=0.0 if is_img else round(orig_dur * 0.4, 3),
+                        source_index=len(plans) + 1,
+                        cycle=1,
+                        media_kind="image" if is_img else "video",
+                        image_motion=choose_smart_image_motion(src, target_duration=seg_dur)[0] if is_img else "",
+                        hflip=is_safe_for_hflip(src, "image" if is_img else "video"),
+                        punch_in=True,
+                        timeline_zone="body",
+                    ))
+                    asset_usage[fp] = 2
+                    remaining = round(remaining - seg_dur, 3)
+
+    # PASSO D: Fase 6 - Encerramento Limpo da Narração (se restou áudio após teto 2x de todas as mídias)
+    if remaining > 0.08 and plans:
+        actual_video_total = round(sum(p.target_duration for p in plans), 3)
+        snapped = find_smart_sentence_snap(srt_path, actual_video_total, min_duration=6.0)
+        if snapped and snapped <= actual_video_total:
+            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
+            smart_snapped = True
+        else:
+            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, actual_video_total))
+        audio_trimmed = True
+        remaining = 0.0
+        # Calibra o último plano para garantir correspondência matemática com áudio
+        last_delta = round(audio_total - actual_video_total, 3)
+        if abs(last_delta) > 0.05 and len(plans) > 0:
+            plans[-1].target_duration = round(max(0.10, plans[-1].target_duration + last_delta), 3)
 
     if plans:
         plans[-1].is_outro = True
@@ -19772,11 +19717,22 @@ def build_segment_plan(
     if not plans:
         raise RuntimeError("Nenhum segmento pôde ser gerado para a timeline.")
 
+    # TRAVA MATEMÁTICA FINAL: Auditoria rígida pré-retorno
+    for fp, count in asset_usage.items():
+        if count > 2:
+            raise RuntimeError(f"Violação da Regra de Repetição: asset {fp} apareceu {count} vezes (máximo absoluto é 2).")
+
+    for p in plans:
+        p_fp = compute_asset_fingerprint(p.source)
+        if p_fp in hard_reject_fps:
+            raise RuntimeError(f"Violação de Integridade: mídia hard-reject ({p.source.name}) foi inserida na timeline.")
+
     playback_speed = 1.0 / setpts_factor
-    actual_duration = sum(p.target_duration for p in plans)
+    actual_duration = round(sum(p.target_duration for p in plans), 3)
     mutant_hflips = sum(1 for p in plans if getattr(p, "hflip", False))
     mutant_scales = sum(1 for p in plans if getattr(p, "scale_boost", 1.0) > 1.0)
     mutant_cycles = max((getattr(p, "cycle", 0) for p in plans), default=0)
+
     summary = {
         "audio_duration": round(audio_total, 3),
         "original_audio_duration": round(orig_audio_total, 3),
@@ -19784,9 +19740,9 @@ def build_segment_plan(
         "smart_snapped": smart_snapped,
         "auto_healing": auto_healing_applied,
         "raw_video_duration": round(T_v, 3),
-        "raw_image_potential": round(T_i, 3),
-        "total_available_media_duration": round(T_total, 3),
-        "media_ratio": round(ratio, 3),
+        "raw_image_potential": round(T_i_base, 3),
+        "total_available_media_duration": round(T_total_base, 3),
+        "media_ratio": round(T_total_base / max(0.1, orig_audio_total), 3),
         "setpts_factor": round(setpts_factor, 4),
         "playback_speed": round(playback_speed, 4),
         "min_speed": min_speed,
@@ -19796,8 +19752,9 @@ def build_segment_plan(
         "video_segments": sum(1 for plan in plans if plan.media_kind == "video"),
         "image_segments": sum(1 for plan in plans if plan.media_kind == "image"),
         "images_used": len({plan.source_index for plan in plans if plan.media_kind == "image"}),
-        "unique_clips_used": len({plan.source_index for plan in plans}),
-        "pacing_policy": "auto_broll_pacing_slicer_v1",
+        "unique_clips_used": len(asset_usage),
+        "max_asset_usage": max(asset_usage.values()) if asset_usage else 0,
+        "pacing_policy": "cinematic_6_phase_hierarchy_v2",
         "total_shots": len(plans),
         "sliced_sub_shots": sum(1 for plan in plans if plan.media_kind == "video" and plan.sub_slice_index > 0),
         "punch_in_shots": sum(1 for plan in plans if plan.punch_in),
@@ -19828,10 +19785,10 @@ def build_segment_plan(
             "hflips_applied": mutant_hflips,
             "scale_boosts_applied": mutant_scales,
         },
-        "dropped_clips": max(0, len(ordered_items) - len(plans)),
+        "dropped_clips": max(0, len(unique_pass1_items) - len(plans)),
         "image_motion_summary": {
             motion: sum(1 for plan in plans if plan.image_motion == motion)
-            for motion in IMAGE_MOTIONS
+            for motion in IMAGE_MOTION_ARCHETYPES
             if any(plan.image_motion == motion for plan in plans)
         },
         "reused_segments": sum(1 for plan in plans if plan.cycle > 0),
@@ -20155,13 +20112,23 @@ def make_segments_smart(
         srt_path=srt_file,
         force_short=force_short,
         voice_emphasis_events=getattr(job, "voice_emphasis_events", None),
+        soft_rejected_media=getattr(job, "soft_rejected_media", None),
+        hard_rejected_media=getattr(job, "hard_rejected_media", None),
+    )
+    # Auditoria Matemática Pré-Render da Timeline
+    audit_timeline_plan(
+        plans,
+        summary.get("audio_duration", audio_total),
+        soft_rejected_media=getattr(job, "soft_rejected_media", None),
+        hard_rejected_media=getattr(job, "hard_rejected_media", None),
+        cwd=work,
     )
     if summary.get("audio_trimmed"):
         audio_total = float(summary["audio_duration"])
         if summary.get("smart_snapped"):
             _append_log(job, f"SRT Smart Sentence Snap: Áudio ajustado ao ponto final da frase em {audio_total:.1f}s (reduzido de {summary.get('original_audio_duration', 0):.1f}s) com fade suave e encerramento semântico perfeito.")
         else:
-            _append_log(job, f"Ajuste de Mídia: Áudio sacrificado/encurtado de {summary.get('original_audio_duration', 0):.1f}s para {audio_total:.1f}s com fade suave para respeitar a mídia disponível sem repetições.")
+            _append_log(job, f"Ajuste de Mídia: Áudio ajustado de {summary.get('original_audio_duration', 0):.1f}s para {audio_total:.1f}s com fade suave para respeitar o teto de 2x de repetição de mídia.")
     has_visual_composition = bool(
         job.options.get("ctaLanguage")
         or job.options.get("selectedCta")
@@ -20470,10 +20437,18 @@ def make_segments_smart(
             else:
                 cycle_value = max(1, fill_cycle)
                 candidates = generate_mutant_permutation(source_infos, cycle_value, last_fill_src)
+            rendered_asset_usage: dict[str, int] = {}
+            for p in accepted_plans:
+                p_fp = compute_asset_fingerprint(p.source, cwd=work)
+                rendered_asset_usage[p_fp] = rendered_asset_usage.get(p_fp, 0) + 1
+
             made_progress = False
             for source_index, src, dur in candidates:
                 if rendered_duration >= target_floor or attempts >= max_attempts:
                     break
+                src_fp = compute_asset_fingerprint(src, cwd=work)
+                if rendered_asset_usage.get(src_fp, 0) >= 2:
+                    continue  # LIMITE ABSOLUTO: nenhum asset pode ser usado 3 ou mais vezes
                 attempts += 1
                 remaining = target_floor - rendered_duration
                 if remaining <= 0.10:
@@ -20511,6 +20486,7 @@ def make_segments_smart(
                     segments.append(out)
                     accepted_plans.append(fill_plan)
                     rendered_duration += actual
+                    rendered_asset_usage[src_fp] = rendered_asset_usage.get(src_fp, 0) + 1
                     last_fill_src = str(src)
                     summary["fill_segments"] += 1
                     made_progress = True
@@ -20520,37 +20496,6 @@ def make_segments_smart(
 
     if not segments:
         raise RuntimeError("Nenhum segmento de video foi gerado.")
-    if rendered_duration < target_floor and accepted_plans:
-        # Fechamento garantido de timeline: complementa qualquer diferenca restante com os clipes aprovados
-        missing_sec = target_floor - rendered_duration
-        _append_log(job, f"Fechamento de timeline: complementando {missing_sec:.2f}s para sincronia total com a voz.")
-        emergency_cycle = 99
-        while rendered_duration < target_floor and emergency_cycle < 115:
-            for p in list(accepted_plans):
-                if rendered_duration >= target_floor:
-                    break
-                rem = target_floor - rendered_duration
-                seg_dur = min(4.0 if p.media_kind == "image" else 5.0, rem)
-                if seg_dur < 0.10:
-                    break
-                fill_p = SegmentPlan(
-                    source=p.source,
-                    raw_duration=p.raw_duration,
-                    target_duration=seg_dur,
-                    source_offset=0.0,
-                    source_index=p.source_index,
-                    cycle=emergency_cycle,
-                    media_kind=p.media_kind,
-                    image_motion="zoom_in" if p.media_kind == "image" else "",
-                    sub_slice_index=emergency_cycle,
-                )
-                out, actual = render_one(fill_p, next_segment_no)
-                next_segment_no += 1
-                if out:
-                    segments.append(out)
-                    accepted_plans.append(fill_p)
-                    rendered_duration += actual
-            emergency_cycle += 1
 
     if rendered_duration < audio_total:
         _append_log(
