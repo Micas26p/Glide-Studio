@@ -4811,6 +4811,13 @@ function formatEtaSummary(eta, status = 'running', currentPercent = 0){
   if(stateName === 'warming_up' || stateName === 'unknown'){
     return `Decorrido ${elapsed} · calculando tempo restante...${limitText}`;
   }
+  if(stateName === 'preparing'){
+    let rem = Number(eta.estimated_remaining_seconds || 0);
+    if(rem > 0){
+      return `Decorrido ${elapsed} · restante aprox. ${formatTime(rem)} · preparando mídias (GPU aguardando)${limitText}`;
+    }
+    return `Decorrido ${elapsed} · preparando mídias (GPU aguardando largada)${limitText}`;
+  }
 
   let rem = Number(eta.estimated_remaining_seconds || 0);
   if(pct >= 98){

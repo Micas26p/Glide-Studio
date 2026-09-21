@@ -4927,8 +4927,9 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
         if str(item.get("codec") or codec).lower() != codec:
             continue
         value = item.get("realtime_factor")
+        max_rtf = 1.30 if gpu_effective else 2.00
         try:
-            if 0.05 <= float(value) <= 2.80:
+            if 0.05 <= float(value) <= max_rtf:
                 matching.append(float(value))
         except Exception:
             continue
@@ -10628,7 +10629,7 @@ def apply_visual_clean_filter(
             any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
             for g in hw.get("gpus", [])
         ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-        max_workers = min(3, logical_cpus) if _is_laptop else min(4, logical_cpus)
+        max_workers = min(6, logical_cpus) if _is_laptop else min(8, logical_cpus)
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -22952,7 +22953,7 @@ def render_worker(job_id: str):
         if not job.started_at:
             job.started_at = time.time()
         initial_duration = max(0.0, float(job.options.get("estimatedDurationSeconds") or 0.0))
-        initial_estimate = render_time_estimate(initial_duration, job.options) if initial_duration > 0 else {}
+        initial_estimate = render_time_estimate(initial_duration, job.options, media_count=len(job.manifest)) if initial_duration > 0 else {}
         if initial_duration > 0 and not bool(initial_estimate.get("budget_feasible", True)):
             _append_log(
                 job,
@@ -22984,7 +22985,7 @@ def render_worker(job_id: str):
         if initial_duration > 0 and initial_estimate:
             preliminary_est = dict(initial_estimate)
             preliminary_est["confidence"] = "preliminary"
-            preliminary_est["stage_forecast"] = {}
+            preliminary_est["stage_forecast"] = dict(initial_estimate.get("stage_forecast") or {})
             job.preflight_summary["active_render_estimate"] = preliminary_est
             if not job.estimated_total_seconds:
                 job.estimated_total_seconds = float(initial_estimate.get("seconds") or 0.0)
@@ -24545,6 +24546,27 @@ def status(job_id: str):
         eta_state = "warming_up"
         eta_confidence = "low"
         eta_reason = "preparando o plano e medindo as etapas"
+    elif rendered_sec <= 0.0 and pct < 28.0:
+        # Pre-encoding phase: audio mix, visual analysis, director indexing are running,
+        # but the GPU encoder hasn't started yet. Use stage_forecast to show a realistic
+        # preparation-aware estimate instead of the inflated crude fallback.
+        sf = (active_estimate or {}).get("stage_forecast") or {}
+        if sf:
+            prep_stages = ("audio", "direction", "subtitles_ass", "visual_analysis")
+            est_prep_total = max(10.0, sum(float(sf.get(k, 0)) for k in prep_stages))
+            prep_remaining_sec = max(3.0, est_prep_total - elapsed)
+            est_encode_and_post = max(25.0, float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 60.0) - est_prep_total)
+            remaining = round(prep_remaining_sec + est_encode_and_post, 1)
+            estimated_total = elapsed + remaining
+            eta_state = "preparing"
+            eta_confidence = "medium"
+            eta_reason = "preparando mídias — motor GPU NVENC aguardando largada"
+        else:
+            remaining = 0.0
+            estimated_total = 0.0
+            eta_state = "warming_up"
+            eta_confidence = "low"
+            eta_reason = "preparando o plano e medindo as etapas"
     else:
         has_comp = bool(getattr(job, "has_visual_composition", False))
         stage_forecast = (active_estimate or {}).get("stage_forecast") or {}

@@ -209,9 +209,21 @@ class Regressions(unittest.TestCase):
         job.started_at = 1000.0
         job.estimated_total_seconds = 600.0
         job.percent = 15.0
+        job.rendered_timeline_duration = 0.0
+        job.total_timeline_duration = 900.0
         job.preflight_summary['active_render_estimate'] = {
             'seconds': 600.0,
             'confidence': 'historical',
+            'stage_forecast': {
+                'audio': 15.0,
+                'direction': 25.0,
+                'subtitles_ass': 5.0,
+                'visual_analysis': 30.0,
+                'segments': 350.0,
+                'composition': 120.0,
+                'mux': 10.0,
+                'delivery': 2.0,
+            },
         }
         app.JOBS[job.id] = job
 
