@@ -4649,13 +4649,14 @@ def render_budget_multiplier(priority: str | None, options: dict[str, Any] | Non
     if not render_budget_enabled(options):
         return 0.0
     gpu_active = bool((options or {}).get("gpu", True))
-    # Para o Render Studio na GPU NVIDIA: teto de segurança rigoroso (1.10x a 1.25x do tempo do vídeo)
+    # Orçamento realista: análise visual + semântica + abertura limpa + segmentos + composição
+    # Para projetos grandes (400+ clipes), o overhead de pré-processamento é significativo.
     if priority in {"max", "balanced", "quality"}:
-        base_mult = 1.15 if gpu_active else 1.45
+        base_mult = 1.80 if gpu_active else 2.20
     else:
-        base_mult = 1.25
+        base_mult = 2.00
     configured = float((options or {}).get("renderBudgetTurboMultiplier") or 0.0)
-    if 0.5 <= configured <= 2.0:
+    if 0.5 <= configured <= 4.0:
         return configured
     return base_mult
 
@@ -4673,13 +4674,14 @@ def render_budget_for_duration(
     except Exception:
         duration = 1.0
     multiplier = render_budget_multiplier(priority, options)
-    # Com o diretor e áudio paralelizados, o overhead fixo inicial é de apenas ~45s
-    base_budget = duration * multiplier + 45.0
+    # Overhead fixo: análise visual, semântica, abertura limpa, detecção de faces, etc.
+    base_budget = duration * multiplier + 60.0
     count = int(media_count or len((options or {}).get("videos") or (options or {}).get("videoOrder") or []))
-    media_allowance = min(90.0, max(0.0, count * 0.12)) if count > 15 else 0.0
-    # Trava fundamental: o orçamento de segurança nunca excede 1.30x a duração do vídeo em mídias longas
-    max_ceiling = max(180.0, duration * 1.30)
-    return min(max_ceiling, max(120.0, base_budget + media_allowance))
+    # Projetos com muitos clipes (400+) precisam de tempo extra para análise por clipe
+    media_allowance = min(300.0, max(0.0, count * 0.5)) if count > 15 else 0.0
+    # Teto de segurança generoso: permite até 2.5x a duração do vídeo para projetos complexos
+    max_ceiling = max(300.0, duration * 2.50)
+    return min(max_ceiling, max(180.0, base_budget + media_allowance))
 
 
 class RenderBudgetWatchdog:
@@ -4718,9 +4720,9 @@ class RenderBudgetWatchdog:
             if now >= deadline:
                 is_active = self._is_actively_making_progress()
                 is_downstream = getattr(self.job, "percent", 0.0) >= 60.0
-                max_allowed_extensions = 1 if self.job.percent < 30.0 else (99 if is_downstream else 3)
+                max_allowed_extensions = 3 if self.job.percent < 30.0 else (99 if is_downstream else 5)
                 if (is_downstream or is_active) and self.job.render_budget_extensions < max_allowed_extensions:
-                    grace = max(180.0, float(self.job.render_budget_seconds or 300.0) * 0.25)
+                    grace = max(240.0, float(self.job.render_budget_seconds or 300.0) * 0.35)
                     self.job.render_budget_extensions += 1
                     self.job.render_budget_seconds += grace
                     self.job.render_deadline_at += grace
@@ -4780,7 +4782,7 @@ def assert_render_budget(job: Job, stage: str) -> None:
     if getattr(job, "percent", 0.0) >= 60.0:
         return
     if job.render_deadline_at and time.time() >= job.render_deadline_at:
-        if job.render_budget_extensions >= 1:
+        if job.render_budget_extensions >= 3:
             job.render_budget_state = "exceeded"
             raise RenderBudgetExceeded(
                 f"Orçamento de render excedido no modo {render_mode_label(render_priority(job))} durante {stage}."
@@ -6475,7 +6477,7 @@ def run_cmd(
                 raise RenderCancelled("Render cancelado pelo usuario.")
             if job.render_deadline_at and time.time() >= job.render_deadline_at:
                 is_active = (time.time() - last_output_time < 90.0)
-                if is_active and job.render_budget_extensions < 3:
+                if is_active and job.render_budget_extensions < 5:
                     grace = max(300.0, float(job.render_budget_seconds or 300.0) * 0.35)
                     job.render_budget_extensions += 1
                     job.render_budget_seconds += grace
@@ -6487,9 +6489,9 @@ def run_cmd(
                         job,
                         f"Tempo de render estendido (+{round(grace)}s): "
                         f"processo ativo e codificando normalmente ({round(job.stage_progress_seconds, 1)}s/{round(job.stage_progress_total, 1)}s). "
-                        f"Extensão {job.render_budget_extensions}/3."
+                        f"Extensão {job.render_budget_extensions}/5.",
                     )
-                elif time.time() - last_output_time >= 180.0 or job.render_budget_extensions >= 3:
+                elif time.time() - last_output_time >= 180.0 or job.render_budget_extensions >= 5:
                     job.render_budget_state = "exceeded"
                     _terminate_process(proc)
                     raise RenderBudgetExceeded(
