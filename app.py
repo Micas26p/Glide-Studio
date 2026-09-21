@@ -70,7 +70,7 @@ from glide_sound_design import write_sound_design_map
 
 APP_VERSION = "1.40.0"
 RENDER_PIPELINE_VERSION = "render_graph_11_editorial_engine"
-RENDER_PERFORMANCE_VERSION = "performance_8_realtime_turbo"
+RENDER_PERFORMANCE_VERSION = "performance_10_extreme_turbo"
 
 SOURCE_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", SOURCE_ROOT)).resolve()
@@ -4917,7 +4917,7 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     stage_samples: dict[str, list[float]] = {}
     for item in _read_render_performance():
         pipeline = str(item.get("pipeline") or "")
-        if not (pipeline == RENDER_PERFORMANCE_VERSION or pipeline.startswith("performance_")):
+        if pipeline != RENDER_PERFORMANCE_VERSION:
             continue
         if str(item.get("priority")) != priority or str(item.get("mode")) != mode:
             continue
