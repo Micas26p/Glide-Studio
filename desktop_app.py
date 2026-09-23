@@ -95,6 +95,50 @@ def _cleanup_webview_caches_on_boot() -> None:
                 shutil.rmtree(target, ignore_errors=True)
 
 
+def _webview_origin_dirs(root: Path) -> list[tuple[int, Path]]:
+    base = root / "webview_profile" / "EBWebView" / "Default"
+    found: list[tuple[int, Path]] = []
+    for store in ("IndexedDB", "File System", "Service Worker"):
+        folder = base / store
+        try:
+            children = list(folder.iterdir())
+        except OSError:
+            continue
+        for item in children:
+            name = item.name
+            if not name.startswith("http_127.0.0.1_"):
+                continue
+            digits = name[len("http_127.0.0.1_"):].split(".", 1)[0].split("_", 1)[0]
+            if digits.isdigit():
+                found.append((int(digits), item))
+    return found
+
+
+def cleanup_stale_webview_origins() -> None:
+    """Apaga armazenamento WebView de portas antigas (cópias de rascunhos com GBs).
+
+    Só mantém a origem da porta fixa do app; sem porta conhecida não apaga nada.
+    """
+    root = default_data_root()
+    keep = None
+    try:
+        keep = int(json.loads((root / "desktop_port.json").read_text(encoding="utf-8")).get("port") or 0) or None
+    except Exception:
+        keep = _latest_webview_origin_port(root)
+    if not keep:
+        return
+    for port, path in _webview_origin_dirs(root):
+        if port == keep:
+            continue
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 def app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
@@ -434,6 +478,7 @@ def _safe_runtime_child(path: Path) -> Path | None:
 
 def cleanup_desktop_runtime_data() -> None:
     """Remove browser/runtime caches after WebView and FFmpeg released their files."""
+    cleanup_stale_webview_origins()
     root = data_root()
     profile = root / "webview_profile"
     if profile.exists():
@@ -679,6 +724,7 @@ def smoke_test(runtime: DesktopRuntime):
 
 def main():
     _cleanup_webview_caches_on_boot()
+    cleanup_stale_webview_origins()
     runtime: DesktopRuntime | None = None
     smoke = smoke_requested()
     write_smoke_trace("main:start")

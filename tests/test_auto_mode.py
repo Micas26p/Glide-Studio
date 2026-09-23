@@ -124,6 +124,41 @@ class AutoModeRegressions(unittest.TestCase):
         self.assertGreater(first / 120.0, 0.6)
         self.assertEqual(job.cta_summary["smart_position_preset"], "bottom_left")
 
+    def test_stale_webview_origins_are_removed_but_active_kept(self):
+        import json
+        from unittest.mock import patch
+        import desktop_app
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            idb = root / "webview_profile" / "EBWebView" / "Default" / "IndexedDB"
+            for port in (49278, 54320, 60853):
+                (idb / f"http_127.0.0.1_{port}.indexeddb.leveldb").mkdir(parents=True)
+                (idb / f"http_127.0.0.1_{port}.indexeddb.blob").mkdir(parents=True)
+            (root / "desktop_port.json").write_text(json.dumps({"port": 54320}), encoding="utf-8")
+            with patch.object(desktop_app, "default_data_root", return_value=root):
+                desktop_app.cleanup_stale_webview_origins()
+            left = sorted(item.name for item in idb.iterdir())
+            self.assertEqual(left, ["http_127.0.0.1_54320.indexeddb.blob", "http_127.0.0.1_54320.indexeddb.leveldb"])
+
+    def test_stale_origin_cleanup_is_noop_without_known_port(self):
+        from unittest.mock import patch
+        import desktop_app
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(desktop_app, "default_data_root", return_value=root):
+                desktop_app.cleanup_stale_webview_origins()  # não pode falhar nem apagar nada
+
+    def test_update_cleanup_runs_once_per_build(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / ".glide_build_marker"
+            with patch.object(app, "BUILD_MARKER_FILE", marker):
+                first = app.update_cleanup_if_needed()
+                second = app.update_cleanup_if_needed()
+            self.assertTrue(first["updated"])
+            self.assertFalse(second["updated"])
+            self.assertEqual(marker.read_text(encoding="utf-8"), app._current_build_id())
+
     def test_image_motion_is_continuous(self):
         for kind in ("zoom_in", "zoom_out", "pan"):
             spec = {"frames": 150, "kind": kind, "safe_fx": 0.5, "safe_fy": 0.4, "pan_x0": 0.3, "pan_x1": 0.7}

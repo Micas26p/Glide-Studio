@@ -312,6 +312,59 @@ def _cleanup_temp_files_inside(root: Path, cutoff: float, summary: dict[str, Any
             errors.append(f"{resolved_root.name}: {exc}")
 
 
+RENDER_CACHE_SHUTDOWN_BUDGET = 2 * 1024 * 1024 * 1024
+BUILD_MARKER_FILE = DATA_ROOT / ".glide_build_marker"
+
+
+def _current_build_id() -> str:
+    source = Path(sys.executable) if getattr(sys, "frozen", False) else Path(__file__)
+    try:
+        stamp = int(source.stat().st_mtime)
+    except OSError:
+        stamp = 0
+    return f"{APP_VERSION}|{RENDER_PIPELINE_VERSION}|{stamp}"
+
+
+def _trim_render_graph_cache(max_bytes: int) -> dict[str, Any]:
+    """Poda o cache de render (LRU, mais antigos primeiro) até max_bytes, incluindo pastas órfãs."""
+    graph = RenderGraph(
+        db=INTELLIGENCE_DB,
+        cache_root=RENDER_GRAPH_CACHE_ROOT,
+        job_id="maintenance",
+        project_id="",
+        max_bytes=max(0, int(max_bytes)),
+    )
+    return graph.cleanup(force=True)
+
+
+def update_cleanup_if_needed() -> dict[str, Any]:
+    """Após cada atualização, esvazia todos os caches regeneráveis (nunca projetos/mídia/exports)."""
+    build_id = _current_build_id()
+    try:
+        previous = BUILD_MARKER_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        previous = ""
+    if previous == build_id:
+        return {"updated": False}
+    summary: dict[str, Any] = {"updated": True, "removed": {"generated_caches": 0}, "bytes_recovered": 0, "errors": []}
+    try:
+        trimmed = _trim_render_graph_cache(0)
+        summary["bytes_recovered"] += int(trimmed.get("reclaimed_bytes") or 0)
+        summary["render_graph_cache"] = trimmed
+    except Exception as exc:
+        summary["errors"].append(f"render_graph_cache: {exc}")
+    # temp_uploads fica de fora: contém sessões AUTO que podem estar a começar agora
+    # (o arranque já apaga uploads antigos e o fecho do app esvazia a pasta).
+    for root in (RENDER_ROOT, CTA_CACHE_ROOT):
+        _empty_maintenance_root(root, summary, "generated_caches")
+    try:
+        atomic_write_text(BUILD_MARKER_FILE, build_id)
+    except Exception as exc:
+        summary["errors"].append(f"marker: {exc}")
+    summary["space_recovered"] = _maintenance_human_bytes(int(summary.get("bytes_recovered") or 0))
+    return summary
+
+
 def safe_startup_cleanup() -> dict[str, Any]:
     """Remove only whitelisted generated artifacts. Never delete projects, media or exports."""
     summary: dict[str, Any] = {
@@ -473,6 +526,15 @@ def safe_shutdown_cleanup() -> dict[str, Any]:
     for root in (UPLOAD_ROOT, CTA_CACHE_ROOT, RENDER_GRAPH_CACHE_ROOT):
         _cleanup_temp_files_inside(root, float("inf"), summary)
 
+    # Mantém o cache de render útil mas limitado: antes podia crescer até 8 GB.
+    try:
+        trimmed = _trim_render_graph_cache(RENDER_CACHE_SHUTDOWN_BUDGET)
+        summary["removed"]["generated_caches"] += int(trimmed.get("removed") or 0) + int(trimmed.get("orphaned") or 0)
+        summary["bytes_recovered"] = int(summary.get("bytes_recovered") or 0) + int(trimmed.get("reclaimed_bytes") or 0)
+    except Exception as exc:
+        if len(summary["errors"]) < 12:
+            summary["errors"].append(f"render_graph_cache: {exc}")
+
     summary["space_recovered"] = _maintenance_human_bytes(int(summary.get("bytes_recovered") or 0))
     summary["finished_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
     return summary
@@ -483,7 +545,13 @@ STARTUP_CLEANUP_SUMMARY: dict[str, Any] = {}
 
 def startup_maintenance_worker() -> None:
     global STARTUP_CLEANUP_SUMMARY
+    update_summary: dict[str, Any] = {}
+    try:
+        update_summary = update_cleanup_if_needed()
+    except Exception as exc:
+        update_summary = {"error": str(exc)}
     STARTUP_CLEANUP_SUMMARY = safe_startup_cleanup()
+    STARTUP_CLEANUP_SUMMARY["update_cleanup"] = update_summary
 
 
 threading.Thread(target=startup_maintenance_worker, daemon=True, name="glide-startup-maintenance").start()
@@ -16656,7 +16724,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
             )
     session_id = uuid.uuid4().hex
     folder = AUTOMATOR_STAGING_ROOT / session_id
-    folder.mkdir(parents=True, exist_ok=False)
+    folder.mkdir(parents=True, exist_ok=True)
     session = {
         "id": session_id,
         "created_at": time.time(),
