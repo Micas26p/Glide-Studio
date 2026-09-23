@@ -42,3 +42,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 .idea/
+
+# Local simulation / test scratch outputs
+work/

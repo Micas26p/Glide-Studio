@@ -5006,7 +5006,7 @@ function getShowcaseTone(){
 
 function setRenderStage(stage){
   const normalized = normalizeRenderStage(stage);
-  const STAGE_ORDER = ['preparing','uploading','audio','rendering','cta','muxing','done','queue_done'];
+  const STAGE_ORDER = ['preparing','uploading','rendering','audio','cta','muxing','done','queue_done'];
   const currentIdx = STAGE_ORDER.indexOf(normalized);
   renderSteps.querySelectorAll('span').forEach(item => {
     const itemStage = item.dataset.stage || '';
@@ -5681,8 +5681,16 @@ async function pollStatus(jobId, context = {}){
       renderMsg.textContent = cleanDisplayText(j.message || '');
       if(renderEta){
         if(j.eta_summary){
-          state._currentEta = {...j.eta_summary, _receivedAt: Date.now()};
-          renderEta.textContent = formatEtaSummary(j.eta_summary, j.status, pct);
+          const newEta = {...j.eta_summary};
+          if(state._currentEta && state._currentEta._receivedAt){
+            const localElapsed = Math.floor((Date.now() - state._currentEta._receivedAt) / 1000);
+            const liveRemaining = Math.max(0, (state._currentEta.estimated_remaining_seconds || 0) - localElapsed);
+            if(liveRemaining > 0 && Math.abs((newEta.estimated_remaining_seconds || 0) - liveRemaining) <= 4){
+              newEta.estimated_remaining_seconds = liveRemaining;
+            }
+          }
+          state._currentEta = {...newEta, _receivedAt: Date.now()};
+          renderEta.textContent = formatEtaSummary(newEta, j.status, pct);
           if(!state._etaLiveTimer && j.status === 'running'){
             state._etaLiveTimer = setInterval(() => {
               if(!state._currentEta || !modal.classList.contains('show')){

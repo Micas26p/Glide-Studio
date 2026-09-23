@@ -39,6 +39,15 @@ class IntelligenceDB:
             self._local.connection = connection
         return connection
 
+    def close(self) -> None:
+        conn = getattr(self._local, "connection", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            self._local.connection = None
+
     def _initialize(self) -> None:
         connection = self._connection()
         with self._write_lock:

@@ -105,6 +105,6 @@ def build_render_plan(
 def write_render_plan(export_dir: Path, plan: dict[str, Any]) -> None:
     export_dir.mkdir(parents=True, exist_ok=True)
     (export_dir / "render_plan.json").write_text(
-        json.dumps(plan, ensure_ascii=False, indent=2),
+        json.dumps(plan, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )

@@ -886,6 +886,159 @@ class Regressions(unittest.TestCase):
         self.assertTrue(hasattr(job, "direct_audio_muxed"))
 
 
+    def test_render_graph_commit_and_serialization_with_windowspath(self):
+        """Garante que RenderGraph.commit e _save_queue_projects serializam WindowsPath/Path sem TypeError."""
+        from glide_render_graph import RenderGraph
+        from glide_intelligence_db import IntelligenceDB
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db = IntelligenceDB(tmp_path / "test_intel.sqlite3")
+            graph = RenderGraph(db=db, cache_root=tmp_path / "cache", job_id="test_job")
+            dummy_artifact = tmp_path / "dummy.mp4"
+            dummy_artifact.write_bytes(b"content")
+            cache_key, _ = graph.begin("test_stage", {"key": "value"})
+            
+            # Metadata with nested Path / WindowsPath objects
+            manifest = graph.commit(
+                stage="test_stage",
+                cache_key=cache_key,
+                artifacts={"dummy.mp4": dummy_artifact},
+                metadata={
+                    "path_obj": tmp_path / "subfolder" / "file.txt",
+                    "nested": [{"file": Path("C:/videos/clip1.mp4")}],
+                },
+            )
+            self.assertIn("path_obj", manifest["metadata"])
+            # Verify manifest.json on disk was written cleanly
+            manifest_json = tmp_path / "cache" / "test_stage" / cache_key / "manifest.json"
+            self.assertTrue(manifest_json.exists())
+            loaded = json.loads(manifest_json.read_text(encoding="utf-8"))
+            self.assertEqual(loaded["stage"], "test_stage")
+            db.close()
+
+    def test_manifest_rel_for_path_o1_speed(self):
+        """Regression test: 500 media files must resolve in under 0.05s via O(1) cache without linear scanning."""
+        import time
+        manifest = [
+            {"name": f"clip_{i:04d}.mp4", "rel": f"folder/clip_{i:04d}.mp4", "size": 1000 + i, "lastModified": 1700000000}
+            for i in range(500)
+        ]
+        job = app.Job(id="test_o1_perf", manifest=manifest)
+        paths = [Path(f"C:/fake_media/stored_{i:04d}.mp4") for i in range(500)]
+        for i, p in enumerate(paths):
+            job.upload_paths[f"folder/clip_{i:04d}.mp4"] = p
+            job.upload_names[f"folder/clip_{i:04d}.mp4"] = f"clip_{i:04d}.mp4"
+
+        t0 = time.perf_counter()
+        for p in paths:
+            rel = app.manifest_rel_for_path(job, p)
+            self.assertTrue(rel.startswith("folder/clip_"))
+        dt = time.perf_counter() - t0
+        self.assertLess(dt, 0.05, f"500 path resolutions took {dt:.4f}s, expected < 0.05s")
+
+    def test_dynamic_eta_countdown_during_preflight(self):
+        """Regression test: ETA during preflight must count down dynamically and never freeze at a static value."""
+        job = app.Job(
+            id="test_dynamic_eta",
+            status="running",
+            percent=12.0,
+            started_at=time.time() - 90.0,  # 90 seconds elapsed
+        )
+        job.preflight_summary["active_render_estimate"] = {
+            "seconds": 600.0,
+            "stage_forecast": {
+                "audio": 15.0,
+                "direction": 20.0,
+                "subtitles_ass": 10.0,
+                "visual_analysis": 25.0,
+                "segments": 400.0,
+                "composition": 100.0,
+                "mux": 10.0,
+                "delivery": 2.0,
+            }
+        }
+        job.estimated_total_seconds = 600.0
+        app.JOBS[job.id] = job
+
+        # Call status at t=90s
+        resp1 = app.status(job.id)
+        eta1 = resp1["eta_summary"]["estimated_remaining_seconds"]
+        self.assertGreater(eta1, 0)
+        self.assertEqual(resp1["eta_summary"]["state"], "preparing")
+
+        # Advance elapsed time by 10 seconds
+        job.started_at -= 10.0
+        resp2 = app.status(job.id)
+        eta2 = resp2["eta_summary"]["estimated_remaining_seconds"]
+
+        # The remaining time MUST decrease as elapsed time increases, NOT freeze
+        self.assertLess(eta2, eta1, f"ETA froze or increased: eta1={eta1}, eta2={eta2}")
+
+    def test_post_processing_eta_not_frozen_at_one_second(self):
+        """Verifica se durante a composição visual (ex: 94% de progresso) o ETA é realista e não congela em 00:01."""
+        job = app.Job(
+            id="test-post-eta-smooth",
+            status="running",
+            percent=94.0,
+            options={"mode": "standard", "ctaLanguage": "pt"},
+            work=Path(tempfile.gettempdir()),
+        )
+        job.started_at = time.time() - 500.0
+        job.rendered_timeline_duration = 600.0
+        job.total_timeline_duration = 600.0
+        job.stage = "cta"
+        job.has_visual_composition = True
+        app.JOBS[job.id] = job
+        try:
+            status_data = app.status(job.id)
+            eta = status_data.get("eta_summary") or {}
+            rem = eta.get("estimated_remaining_seconds", 0)
+            # Must be realistic (e.g. > 10s), NOT 1 or 2 seconds
+            self.assertGreater(rem, 10.0, f"ETA congelou prematuramente em {rem}s no estágio CTA a 94%")
+            self.assertIn(eta.get("state"), ("composition", "cta"))
+        finally:
+            app.JOBS.pop(job.id, None)
+
+    def test_excess_media_policy_enforces_minimum_editorial_duration(self):
+        """Garante que com excesso de imagens a duração por tomada não caia abaixo de 4.5s (descarta o excedente)."""
+        # 40 imagens para apenas 60s de áudio
+        fake_images = [Path(f"img_{i}.jpg") for i in range(40)]
+        fake_durs = [0.0] * 40
+        audio_total = 60.0
+        plans, summary = app.build_segment_plan(
+            video_files=fake_images,
+            video_durs=fake_durs,
+            audio_total=audio_total,
+            force_short=True,
+        )
+        # Cada imagem deve durar pelo menos 4.5s (não ser espremida para fragmentos curtos)
+        for p in plans:
+            self.assertGreaterEqual(p.target_duration, 4.49, f"Tomada com duração excessivamente curta: {p.target_duration}s")
+        # Deve ter descartado o excedente (máximo ~14 imagens para 60s a 4.5s cada)
+        self.assertLessEqual(len(plans), 16)
+
+    def test_desktop_table_and_slide_detection(self):
+        """Verifica se tabelas de dados (ex: planilha de preços EC2) e slides são detectados e rejeitados."""
+        # Métricas típicas de tabela de dados / planilha de console web
+        table_metrics = {
+            "mean": 210.0,
+            "stdev": 28.0,
+            "edge_density": 0.08,
+            "active_rows": 0.28,
+            "active_cols": 0.28,
+            "active_cells": 0.22,
+            "text_lines": 5,
+            "text_score": 0.52,
+            "data_score": 0.58,
+            "uniform_bg_ratio": 0.45,
+            "frame_diff": 0.0,
+            "edge_persistence": 0.95,
+        }
+        res = app._classify_visual_analysis({"metrics": table_metrics}, "normal", media_kind="image")
+        self.assertIn(res["action"], ("hard_reject", "soft_reject", "soft_suspect"))
+        self.assertIn(res["category"], ("data_dominant", "presentation_slide", "ui_screenshot"))
+
+
 if __name__ == '__main__':
     unittest.main()
 

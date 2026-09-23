@@ -175,7 +175,7 @@ class RenderGraph:
             "metadata": metadata or {},
         }
         (temporary / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
+            json.dumps(manifest, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
         target.parent.mkdir(parents=True, exist_ok=True)

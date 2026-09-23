@@ -186,7 +186,7 @@ def smoke_marker_path() -> Path:
 def write_smoke_marker(payload: dict[str, Any]):
     marker = smoke_marker_path()
     marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    marker.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
 
 
 def write_smoke_trace(stage: str):

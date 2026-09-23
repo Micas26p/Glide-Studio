@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import threading
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
@@ -142,26 +143,40 @@ def categories_for_path(path: Path | str) -> list[dict[str, Any]]:
     ]
 
 
+_MEDIA_SIG_CACHE: dict[str, str] = {}
+_MEDIA_SIG_LOCK = threading.RLock()
+
+
 def media_signature(path: Path) -> str:
     try:
-        stat = path.stat()
+        p = Path(path)
+        stat = p.stat()
+        cache_key = f"{p.name}:{stat.st_size}:{stat.st_mtime_ns}"
+        with _MEDIA_SIG_LOCK:
+            if cache_key in _MEDIA_SIG_CACHE:
+                return _MEDIA_SIG_CACHE[cache_key]
         size = stat.st_size
-        sig = f"{path.name}:{size}"
+        sig = f"{p.name}:{size}"
         if size > 0:
             try:
-                with open(path, "rb") as f:
+                with open(p, "rb") as f:
                     head = f.read(2048)
                     tail = b""
                     if size > 4096:
                         f.seek(max(0, size - 2048))
                         tail = f.read(2048)
                     h = hashlib.md5(head + tail).hexdigest()[:16]
-                    sig = f"{path.name}:{size}:{h}"
+                    sig = f"{p.name}:{size}:{h}"
             except Exception:
-                sig = f"{path.name}:{size}:{stat.st_mtime_ns}"
-        return hashlib.sha256(sig.encode("utf-8", errors="ignore")).hexdigest()
+                sig = f"{p.name}:{size}:{stat.st_mtime_ns}"
+        res = hashlib.sha256(sig.encode("utf-8", errors="ignore")).hexdigest()
+        with _MEDIA_SIG_LOCK:
+            if len(_MEDIA_SIG_CACHE) > 5000:
+                _MEDIA_SIG_CACHE.clear()
+            _MEDIA_SIG_CACHE[cache_key] = res
+        return res
     except Exception:
-        return hashlib.sha256(str(path.name).encode("utf-8", errors="ignore")).hexdigest()
+        return hashlib.sha256(str(getattr(path, "name", path)).encode("utf-8", errors="ignore")).hexdigest()
 
 
 def clip_number_hint(path: Path | str) -> int | None:

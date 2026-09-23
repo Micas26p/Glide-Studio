@@ -48,6 +48,6 @@ def write_sound_design_map(export_dir: Path, events: list[dict[str, Any]], summa
         "note": "Mapa automatico dos efeitos sonoros usados no render.",
     }
     (export_dir / "sound_design_map.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )

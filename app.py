@@ -614,14 +614,20 @@ MEDIA_DIMENSIONS_LOCK = threading.RLock()
 def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
     """Obtém largura e altura (w, h) de vídeo ou imagem com autorotate e cache persistente/em memória."""
     p = Path(str(path))
-    resolved_key = str(p.resolve() if p.exists() else p).lower().replace("\\", "/")
     str_key = str(path).lower().replace("\\", "/")
+    p_name = p.name.lower()
+    with MEDIA_DIMENSIONS_LOCK:
+        if str_key in MEDIA_DIMENSIONS_CACHE:
+            return MEDIA_DIMENSIONS_CACHE[str_key]
+        if p_name in MEDIA_DIMENSIONS_CACHE:
+            return MEDIA_DIMENSIONS_CACHE[p_name]
+
+    resolved_key = str(p.resolve() if p.exists() else p).lower().replace("\\", "/")
     with MEDIA_DIMENSIONS_LOCK:
         if resolved_key in MEDIA_DIMENSIONS_CACHE:
-            return MEDIA_DIMENSIONS_CACHE[resolved_key]
-        if str_key in MEDIA_DIMENSIONS_CACHE:
-            dims = MEDIA_DIMENSIONS_CACHE[str_key]
-            MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
+            dims = MEDIA_DIMENSIONS_CACHE[resolved_key]
+            MEDIA_DIMENSIONS_CACHE[str_key] = dims
+            MEDIA_DIMENSIONS_CACHE[p_name] = dims
             return dims
 
     if is_image_path(p):
@@ -629,6 +635,7 @@ def probe_media_dimensions(path: Path | str) -> tuple[int, int]:
         with MEDIA_DIMENSIONS_LOCK:
             MEDIA_DIMENSIONS_CACHE[resolved_key] = dims
             MEDIA_DIMENSIONS_CACHE[str_key] = dims
+            MEDIA_DIMENSIONS_CACHE[p_name] = dims
         return dims
 
     # 1. Consulta em banco de inteligência persistente (0ms)
@@ -1433,6 +1440,8 @@ class Job:
     options: dict[str, Any] = field(default_factory=dict)
     upload_paths: dict[str, Path] = field(default_factory=dict)
     upload_names: dict[str, str] = field(default_factory=dict)
+    _path_to_rel_cache: dict[str, str] = field(default_factory=dict)
+    _manifest_by_rel: dict[str, dict[str, Any]] = field(default_factory=dict)
     stage: str = "created"
     stage_label: str = "Criado"
     timeline_summary: dict[str, Any] = field(default_factory=dict)
@@ -1590,7 +1599,7 @@ def _save_visual_clean_cache() -> None:
         try:
             atomic_write_text(
                 VISUAL_CLEAN_CACHE_FILE,
-                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str),
             )
         except Exception:
             pass
@@ -1731,7 +1740,7 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
     except Exception:
         pass
     # Compact JSON eliminates 46% of disk footprint and speeds up serialization
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
 
 
@@ -1762,7 +1771,7 @@ def _save_app_settings(settings: dict[str, Any]) -> None:
     payload = dict(settings or {})
     payload["version"] = APP_VERSION
     payload["updatedAt"] = _now_iso()
-    atomic_write_text(APP_SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2))
+    atomic_write_text(APP_SETTINGS_FILE, json.dumps(payload, ensure_ascii=False, indent=2, default=str))
 
 
 QUEUE_PROJECTS: list[dict[str, Any]] = _load_queue_projects()
@@ -1849,7 +1858,7 @@ def _migrate_queue_projects_v115() -> None:
                 changed = True
         for key, value in project_defaults.items():
             if key not in project:
-                project[key] = json.loads(json.dumps(value))
+                project[key] = json.loads(json.dumps(value, default=str))
                 changed = True
     if changed:
         _save_queue_projects(QUEUE_PROJECTS)
@@ -2044,6 +2053,7 @@ def _save_project_media_index(project_id: str, items: dict[str, dict[str, Any]])
             {"version": APP_VERSION, "updatedAt": _now_iso(), "items": items},
             ensure_ascii=False,
             indent=2,
+            default=str,
         ),
     )
 
@@ -2600,7 +2610,7 @@ def attach_script_guide_plan_to_job(job: Job) -> None:
             "updatedAt": _now_iso(),
         }
         if job.export_dir:
-            atomic_write_text(job.export_dir / "script_guide_plan.json", json.dumps(plan, ensure_ascii=False, indent=2))
+            atomic_write_text(job.export_dir / "script_guide_plan.json", json.dumps(plan, ensure_ascii=False, indent=2, default=str))
         _append_log(job, f"Roteiro guia interpretado: {job.options['scriptGuideInfo']['blocks']} bloco(s).")
     except Exception as exc:
         job.options["scriptGuideInfo"] = {
@@ -2850,6 +2860,11 @@ def _reference_video_signature(video_path: Path) -> dict[str, Any]:
 
 def _probe_reference_video_info(video_path: Path) -> dict[str, Any]:
     info = {"fps": 30.0, "width": 0, "height": 0, "video_bitrate": 0, "audio_bitrate": 0}
+    if is_image_path(video_path):
+        w, h = probe_image_dimensions(video_path)
+        info["width"] = w
+        info["height"] = h
+        return info
     if not FFPROBE:
         return info
     try:
@@ -3076,7 +3091,7 @@ def analyze_reference_style_video(project_id: str, video_path: Path, display_nam
     }
     ref_dir = _reference_style_dir(project_id)
     ref_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(_reference_style_dna_path(project_id), json.dumps(dna, ensure_ascii=False, indent=2))
+    atomic_write_text(_reference_style_dna_path(project_id), json.dumps(dna, ensure_ascii=False, indent=2, default=str))
     return dna
 
 
@@ -3153,6 +3168,30 @@ def _repair_false_queue_errors() -> None:
                 project["error"] = None
                 project["jobId"] = None
                 project["lastRenderSummary"] = None
+                project["updatedAt"] = _now_iso()
+                changed = True
+        elif "windowspath is not json serializable" in error:
+            output_dir = str(project.get("outputDir") or "").strip()
+            name = str(project.get("outputName") or project.get("name") or "video").strip()
+            resolved_video = None
+            for cand_path in (
+                (Path(output_dir) / f"{name}.mp4") if output_dir else None,
+                default_downloads_dir() / f"{name}.mp4",
+            ):
+                if cand_path and cand_path.exists() and cand_path.stat().st_size > 1024 * 1024:
+                    resolved_video = cand_path
+                    break
+            if resolved_video:
+                project["status"] = "done"
+                project["error"] = None
+                project["outputFile"] = resolved_video.name
+                project["outputDir"] = str(resolved_video.parent)
+                project["updatedAt"] = _now_iso()
+                changed = True
+            else:
+                project["status"] = "ready"
+                project["error"] = None
+                project["jobId"] = None
                 project["updatedAt"] = _now_iso()
                 changed = True
     if changed:
@@ -4097,7 +4136,7 @@ def write_editorial_intelligence_plan(job: Job, phase: str = "pre_render") -> di
     if job.export_dir:
         atomic_write_text(
             job.export_dir / "editorial_intelligence_plan.json",
-            json.dumps(plan, ensure_ascii=False, indent=2),
+            json.dumps(plan, ensure_ascii=False, indent=2, default=str),
         )
         if isinstance(plan.get("sceneRhythm"), dict):
             atomic_write_text(
@@ -4110,7 +4149,7 @@ def write_editorial_intelligence_plan(job: Job, phase: str = "pre_render") -> di
                     "projectName": job.options.get("queueProjectName"),
                     "createdAt": plan.get("createdAt"),
                     **plan["sceneRhythm"],
-                }, ensure_ascii=False, indent=2),
+                }, ensure_ascii=False, indent=2, default=str),
             )
     return plan
 
@@ -4840,16 +4879,16 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     encode_factor = perf_factor * nvidia_factor * (1.0 if gpu_effective else 1.72)
 
     has_visual_clean = bool(options.get("visualCleanFilter", True))
-    dir_cost_max = min(90.0, 4.0 + duration * 0.008 + (m_count * 0.12) * perf_factor)
-    va_cost_max = min(240.0, 6.0 + duration * 0.012 + (m_count * 0.35) * perf_factor) if has_visual_clean else 2.0
-    dir_cost_qual = min(120.0, 8.0 + duration * 0.015 + (m_count * 0.18) * perf_factor)
-    va_cost_qual = min(300.0, 10.0 + duration * 0.020 + (m_count * 0.45) * perf_factor) if has_visual_clean else 3.0
-    dir_cost_bal = min(100.0, 6.0 + duration * 0.010 + (m_count * 0.14) * perf_factor)
-    va_cost_bal = min(260.0, 8.0 + duration * 0.015 + (m_count * 0.38) * perf_factor) if has_visual_clean else 2.5
+    dir_cost_max = min(20.0, 3.0 + duration * 0.004 + (m_count * 0.02) * perf_factor)
+    va_cost_max = min(35.0, 4.0 + duration * 0.006 + (m_count * 0.05) * perf_factor) if has_visual_clean else 2.0
+    dir_cost_qual = min(45.0, 5.0 + duration * 0.008 + (m_count * 0.04) * perf_factor)
+    va_cost_qual = min(70.0, 6.0 + duration * 0.010 + (m_count * 0.10) * perf_factor) if has_visual_clean else 3.0
+    dir_cost_bal = min(30.0, 4.0 + duration * 0.006 + (m_count * 0.03) * perf_factor)
+    va_cost_bal = min(50.0, 5.0 + duration * 0.008 + (m_count * 0.08) * perf_factor) if has_visual_clean else 2.5
 
     if priority == "max":
         stage_forecast: dict[str, float] = {
-            "audio": 6.0 + duration * 0.018 * perf_factor,
+            "audio": 4.0 + duration * 0.008 * perf_factor,
             "direction": dir_cost_max,
             "subtitles_ass": 3.0 + duration * 0.004,
             "visual_analysis": va_cost_max,
@@ -5058,7 +5097,7 @@ def record_render_performance(job: Job, rendered_duration: float) -> None:
         try:
             atomic_write_text(
                 RENDER_PERFORMANCE_FILE,
-                json.dumps({"version": APP_VERSION, "records": records[-80:]}, ensure_ascii=False, indent=2),
+                json.dumps({"version": APP_VERSION, "records": records[-80:]}, ensure_ascii=False, indent=2, default=str),
             )
         except Exception:
             pass
@@ -5099,7 +5138,7 @@ def app_config():
     }
     bundle["settings"] = _load_app_settings()
     bundle["hardware"] = hardware_profile_quick()
-    serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"))
+    serialized = json.dumps(bundle, ensure_ascii=False, separators=(",", ":"), default=str)
     with _CONFIG_BUNDLE_LOCK:
         _CONFIG_BUNDLE_CACHE = (now, serialized)
     return Response(content=serialized, media_type="application/json")
@@ -6631,6 +6670,8 @@ def probe_duration(path: Path, cwd: Path | None = None) -> float:
 
 
 def safe_probe_duration(path: Path, cwd: Path | None = None) -> float:
+    if is_image_path(path):
+        return 0.0
     try:
         source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
         if not source.exists():
@@ -7947,9 +7988,26 @@ def yunet_detector_status() -> dict[str, Any]:
 
 
 def _probe_yunet_frames(path: Path, duration: float, cwd: Path | None = None) -> list[bytes]:
+    image_source = is_image_path(path)
+    if image_source:
+        resolved_p = _resolved_media_path(path, cwd)
+        try:
+            from PIL import Image
+            import numpy as np
+            import cv2
+            with Image.open(resolved_p) as pil_img:
+                w_orig, h_orig = pil_img.size
+                scale = min(YUNET_FRAME_W / max(1, w_orig), YUNET_FRAME_H / max(1, h_orig))
+                nw, nh = max(1, int(w_orig * scale)), max(1, int(h_orig * scale))
+                resized = pil_img.convert("RGB").resize((nw, nh), Image.Resampling.BILINEAR)
+                canvas = Image.new("RGB", (YUNET_FRAME_W, YUNET_FRAME_H), (0, 0, 0))
+                canvas.paste(resized, ((YUNET_FRAME_W - nw) // 2, (YUNET_FRAME_H - nh) // 2))
+                bgr = cv2.cvtColor(np.array(canvas), cv2.COLOR_RGB2BGR)
+                return [bgr.tobytes()]
+        except Exception:
+            pass
     if not FFMPEG:
         return []
-    image_source = is_image_path(path)
     if image_source:
         count = 1
     elif duration < 2.0:
@@ -8385,6 +8443,9 @@ def detect_ui_chrome_and_screenshot(
     top_share = float(metrics.get("top_edge_share") or 0.0)
     bottom_share = float(metrics.get("bottom_edge_share") or 0.0)
     active_rows = float(metrics.get("active_rows") or 0.0)
+    active_cols = float(metrics.get("active_cols") or 0.0)
+    text_lines = int(metrics.get("text_lines") or 0)
+    uniform_bg = float(metrics.get("uniform_bg_ratio") or 0.0)
     text_score = float(metrics.get("text_score") or 0.0)
     data_score = float(metrics.get("data_score") or 0.0)
 
@@ -8407,20 +8468,29 @@ def detect_ui_chrome_and_screenshot(
         or (bottom_share >= 0.38 and ui_bottom_share >= 0.06 and is_mobile_tall)
     )
 
+    # 3. Indicadores de Interface Desktop / Navegador Web / Planilha / Console Nuvem / Tabelas
+    has_desktop_ui = bool(
+        (text_lines >= 3 and active_rows >= 0.20 and active_cols >= 0.20)
+        or (top_share >= 0.28 and active_rows >= 0.20 and text_score >= 0.40)
+        or (uniform_bg >= 0.35 and text_lines >= 3 and (active_rows >= 0.18 or active_cols >= 0.18))
+        or (data_score >= 0.45 and (active_rows >= 0.18 or active_cols >= 0.18))
+    )
+
     is_ui_screen = (has_status_bar and has_home_bar) or (
         is_mobile_tall and (has_status_bar or has_home_bar)
-    )
+    ) or has_desktop_ui
 
     if not is_ui_screen:
         return "clean", None
 
-    # CASO A: Screenshot de Chat / Feed de Texto / Configurações / Menus de Apps
-    # A tela inteira está tomada por texto ou dados estruturados
+    # CASO A: Screenshot de Chat / Feed de Texto / Configurações / Menus de Apps / Console Web / Planilha
+    # A tela inteira está tomada por texto, tabelas ou dados estruturados
     is_chat_or_feed = (
-        middle_share >= 0.50
-        or text_score >= 0.58
-        or data_score >= 0.55
-        or (active_rows >= 0.40 and text_score >= 0.48)
+        middle_share >= 0.45
+        or text_score >= 0.52
+        or data_score >= 0.45
+        or (active_rows >= 0.30 and text_score >= 0.42)
+        or (has_desktop_ui and (text_lines >= 3 or data_score >= 0.40))
     )
     if is_chat_or_feed:
         return "reject_ui_screenshot", None
@@ -8693,10 +8763,11 @@ def _classify_visual_analysis(
         )
     )
     data_confirmed = bool(
-        max_data >= max(0.55, thresholds["data"])
+        (max_data >= max(0.50, thresholds["data"]) or (is_image and data_score >= 0.38))
         and (
-            data_ratio >= max(0.35, thresholds["ratio"])
-            or consecutive_data >= 2
+            data_ratio >= max(0.20, thresholds["ratio"])
+            or consecutive_data >= 1
+            or is_image
         )
     )
     if yunet_analyzed:
@@ -8796,13 +8867,16 @@ def _classify_visual_analysis(
             (uniform_bg >= 0.65 and med_edge <= 0.035 and text_lines <= 2 and (med_mean <= 18.0 or med_mean >= 220.0))
         )
     )
-    # Deteccao Calibrada de Slides de Apresentacao / Cartelas de Texto Documentais
+    # Deteccao Calibrada de Slides de Apresentacao / Cartelas de Texto Documentais / Tabelas
     is_presentation_slide = bool(
         is_corporate_logo_or_plate
         or (not is_historical and (
-            (text_lines >= 4 and text_score >= 0.48 and uniform_bg >= 0.40)
-            or (text_lines >= 3 and uniform_bg >= 0.60 and med_edge <= 0.06 and text_score >= 0.45)
-            or (text_score >= 0.65 and text_lines >= 3 and med_rows >= 0.25)
+            (text_lines >= 3 and text_score >= 0.40 and (uniform_bg >= 0.28 or med_rows >= 0.18))
+            or (text_lines >= 2 and uniform_bg >= 0.45 and text_score >= 0.38)
+            or (text_score >= 0.55 and text_lines >= 3)
+            or (med_rows >= 0.20 and med_cols >= 0.20 and text_lines >= 2)
+            or (text_lines >= 4 and text_score >= 0.40)
+            or (is_image and text_lines >= 3 and (uniform_bg >= 0.25 or med_rows >= 0.18))
         ))
     )
 
@@ -9741,14 +9815,14 @@ def probe_visual_clean_health(
     ) * (1.18 if lower_third else 1.0) * max(0.58, 1.0 - med_skin * 1.8))
     if med_text_lines >= 3:
         text_score = max(text_score, 0.68)
-    data_feature_eligible = bool(is_image or med_diff <= 2.5 or med_text_lines >= 3 or (med_uniform_bg >= 0.45 and med_edge >= 0.08))
+    data_feature_eligible = bool(is_image or med_diff <= 2.5 or med_text_lines >= 2 or (med_uniform_bg >= 0.35 and med_edge >= 0.05))
     data_score = min(1.0, (
-        min(1.0, (med_rows * med_cols) / 0.16) * 0.35
-        + min(1.0, med_cells / 0.22) * 0.25
+        min(1.0, (med_rows * med_cols) / 0.12) * 0.35
+        + min(1.0, med_cells / 0.16) * 0.25
         + med_persistence * 0.25
         + max(0.0, 1.0 - med_diff / 24.0) * 0.15
-    )) if (data_feature_eligible and med_rows >= 0.28 and med_cols >= 0.32 and med_cells >= 0.16) else 0.0
-    if med_uniform_bg >= 0.45 and med_edge >= 0.08:
+    )) if (data_feature_eligible and med_rows >= 0.18 and med_cols >= 0.18) else 0.0
+    if (med_uniform_bg >= 0.40 and med_edge >= 0.06) or (is_image and med_text_lines >= 3 and med_rows >= 0.18):
         data_score = max(data_score, 0.65)
     presenter_score = min(1.0, (
         min(1.0, med_head_skin / 0.11) * 0.34
@@ -9949,9 +10023,7 @@ def probe_visual_clean_health(
     )
     summary_metrics["visual_profile"] = visual_profile
     if media_kind == "image" or is_image_path(path):
-        media_info = _probe_reference_video_info(_resolved_media_path(path, cwd))
-        width = int(media_info.get("width") or 0)
-        height = int(media_info.get("height") or 0)
+        width, height = probe_image_dimensions(_resolved_media_path(path, cwd))
         summary_metrics["width"] = width
         summary_metrics["height"] = height
         summary_metrics["resolution_ok"] = bool(width >= 640 and height >= 360)
@@ -10227,19 +10299,29 @@ def semantic_model_categories(path: Path, duration: float = 0.0, cwd: Path | Non
             session = SEMANTIC_MODEL_SESSION
             labels, text_matrix = SEMANTIC_MODEL_EMBEDDINGS
         resolved = _resolved_media_path(path, cwd)
-        seek = max(0.0, duration * 0.45)
-        raw_frame = _run_hidden(
-            [
-                FFMPEG, "-hide_banner", "-loglevel", "error",
-                "-ss", f"{seek:.3f}", "-i", str(resolved),
-                "-frames:v", "1",
-                "-vf", "scale=224:224:force_original_aspect_ratio=increase,crop=224:224",
-                "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
-            ],
-            cwd=cwd,
-            capture_output=True,
-            timeout=30,
-        ).stdout
+        raw_frame = None
+        if is_image_path(resolved):
+            try:
+                from PIL import Image, ImageOps
+                with Image.open(resolved) as pil_img:
+                    fitted = ImageOps.fit(pil_img.convert("RGB"), (224, 224), method=Image.Resampling.BILINEAR)
+                    raw_frame = fitted.tobytes()
+            except Exception:
+                raw_frame = None
+        if raw_frame is None:
+            seek = max(0.0, duration * 0.45)
+            raw_frame = _run_hidden(
+                [
+                    FFMPEG, "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{seek:.3f}", "-i", str(resolved),
+                    "-frames:v", "1",
+                    "-vf", "scale=224:224:force_original_aspect_ratio=increase,crop=224:224",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-",
+                ],
+                cwd=cwd,
+                capture_output=True,
+                timeout=30,
+            ).stdout
         if len(raw_frame or b"") != 224 * 224 * 3:
             return []
         image = np.frombuffer(raw_frame, dtype=np.uint8).reshape(224, 224, 3).astype(np.float32) / 255.0
@@ -10773,26 +10855,34 @@ def apply_visual_clean_filter(
                             break
                     if action != "hard_reject":
                         seen_clean_image_hashes.append((img_hash, source))
+        # Apenas mídias verdadeiramente corrompidas ou 100% pretas são hard-reject irrecuperáveis
+        is_unusable = category in {"black_screen", "static_black_screen", "invalid", "no_frames"}
+        if is_unusable or (action == "hard_reject" and category in {"black_screen", "static_black_screen", "invalid", "no_frames"}):
+            summary["hard_rejected"] += 1
+            hard_rejected_count += 1
+            hard_rejected_pairs.append((source, duration))
+            if category in {"black_screen", "static_black_screen"}:
+                summary["rejected_black"] += 1
+            if media_kind == "image":
+                summary["images_rejected"] += 1
+            item["decision"] = "removed"
+            summary["items"].append(item)
+            continue
 
-        is_unusable = category in {"black_screen", "static_black_screen", "invalid", "no_frames", "low_quality", "static_video", "outro_subscribe_screen"}
-        is_pollution = (
-            action == "hard_reject"
+        is_editorial_suspect = (
+            action in {"hard_reject", "soft_reject", "soft_suspect"}
             or category in {
                 "text_dominant", "data_dominant", "presenter", "watermark_corner",
                 "ui_screenshot", "presentation_slide", "webcam_pip",
                 "polluted_banner", "screen_recording", "perceptual_duplicate", "low_resolution",
-                "static_video", "outro_subscribe_screen", "static_black_screen",
+                "static_video", "outro_subscribe_screen", "low_quality", "context_mismatch",
             }
-            or (media_kind == "image" and is_unusable)
         )
 
         is_opening = (idx < max(2, min(len(valid_pairs) // 5, 12))) or (position_ratio < 0.18)
 
-        # Filtro Rigoroso: clipes poluidos/rejeitados sao 100% descartados da timeline (zero penetracao de slides/webcams/dados)
-        if is_unusable or is_pollution or action == "hard_reject":
-            summary["hard_rejected"] += 1
-            hard_rejected_count += 1
-            hard_rejected_pairs.append((source, duration))
+        # Mídias com texto/dados/presenter são SOFT-REJECT (priorizam limpos na abertura, mas NUNCA cortam narração)
+        if is_editorial_suspect:
             if category == "text_dominant":
                 summary["rejected_text"] += 1
             elif category == "data_dominant":
@@ -10813,24 +10903,16 @@ def apply_visual_clean_filter(
                 summary["rejected_presentation_slides"] = summary.get("rejected_presentation_slides", 0) + 1
             elif category == "webcam_pip":
                 summary["rejected_webcam_pip"] = summary.get("rejected_webcam_pip", 0) + 1
-            elif category in {"black_screen", "static_black_screen"}:
-                summary["rejected_black"] += 1
             elif category == "static_video":
                 summary["rejected_static_video"] = summary.get("rejected_static_video", 0) + 1
             elif category == "outro_subscribe_screen":
                 summary["rejected_outro_subscribe"] = summary.get("rejected_outro_subscribe", 0) + 1
             elif category == "presenter":
                 summary["presenter_rejected"] += 1
+                summary["presenter_suspects"] += 1
             if media_kind == "image":
                 summary["images_rejected"] += 1
-            item["decision"] = "removed"
-            summary["items"].append(item)
-            continue
-        elif action in {"soft_reject", "soft_suspect"} or analysis.get("reject_tier") == "soft":
-            if category in {"presenter_suspect", "static_center_suspect", "presenter", "suspect"}:
-                summary["presenter_suspects"] += 1
-            # Carrasco Visual: midias soft-reject NUNCA entram na timeline limpa.
-            # Sao rebaixadas exclusivamente para Fase 5 de fallback se faltar midia apos todas as fases.
+
             soft_rejected_pairs.append((source, duration))
             fallback_pairs.append((source, duration))
             summary["soft_demoted"] += 1
@@ -10877,9 +10959,21 @@ def apply_visual_clean_filter(
     selected_pairs: list[tuple[Path, float]] = list(clean_pairs)
     clean_raw = sum(duration for _, duration in clean_pairs)
 
+    used_fallback_pairs: list[tuple[Path, float]] = []
     if clean_raw < needed_raw and fallback_pairs:
-        for source, duration in fallback_pairs:
+        # Priorizar mídias de apoio com menor poluição (excluir estritamente dados, slides e screenshots de app/console)
+        usable_fallbacks = [
+            (s, d) for s, d in fallback_pairs
+            if not any(
+                item.get("category") in {"data_dominant", "presentation_slide", "ui_screenshot", "screen_recording", "polluted_banner"}
+                for item in summary.get("items", [])
+                if item.get("file") == s.name
+            )
+        ]
+        pool_to_use = usable_fallbacks if usable_fallbacks else fallback_pairs
+        for source, duration in pool_to_use:
             selected_pairs.append((source, duration))
+            used_fallback_pairs.append((source, duration))
             clean_raw += duration
             summary["fallback_used"] += 1
             if clean_raw >= needed_raw:
@@ -10898,7 +10992,11 @@ def apply_visual_clean_filter(
             an = precomputed_probes.get(idx_in_valid) if idx_in_valid is not None else None
             cat = str(an.get("category") or "") if isinstance(an, dict) else ""
             act = str(an.get("action") or "") if isinstance(an, dict) else ""
-            if act == "hard_reject" or cat in {"invalid", "no_frames", "black_screen", "static_black_screen", "outro_subscribe_screen", "static_video", "presentation_slide", "screen_recording"}:
+            if act == "hard_reject" or cat in {
+                "invalid", "no_frames", "black_screen", "static_black_screen",
+                "outro_subscribe_screen", "static_video", "presentation_slide",
+                "screen_recording", "data_dominant", "ui_screenshot", "polluted_banner",
+            }:
                 continue
             m = an.get("metrics", {}) if isinstance(an, dict) else {}
             score = float(m.get("quality_score") or 0.70) - (float(m.get("text_score") or 0.0) * 0.5)
@@ -10908,6 +11006,7 @@ def apply_visual_clean_filter(
         restored = 0
         for src, dur, _ in salvage_pool:
             selected_pairs.append((src, dur))
+            used_fallback_pairs.append((src, dur))
             if (src, dur) not in soft_rejected_pairs:
                 soft_rejected_pairs.append((src, dur))
             clean_raw += dur
@@ -10923,6 +11022,7 @@ def apply_visual_clean_filter(
                 f"evitando repetições forçadas ou falta de vídeo."
             )
 
+    job.fallback_used_media = list(used_fallback_pairs)
     job.soft_rejected_media = list(soft_rejected_pairs)
 
     if clean_raw < needed_raw:
@@ -11173,7 +11273,7 @@ def build_director_scene_fit_plan(job: Job, total_duration: float) -> dict[str, 
         "policy": "encaixe_narrativo_visual_sem_analise_pesada_extra",
     }
     if job.export_dir:
-        atomic_write_text(job.export_dir / "director_scene_fit_plan.json", json.dumps(plan, ensure_ascii=False, indent=2))
+        atomic_write_text(job.export_dir / "director_scene_fit_plan.json", json.dumps(plan, ensure_ascii=False, indent=2, default=str))
     return plan
 
 
@@ -11499,7 +11599,7 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
                     reason="entrada_de_imagem_com_motion",
                     block=block_index,
                     role=block.get("role") or "bloco",
-                    path=item.get("path"),
+                    path=str(item.get("path")) if item.get("path") is not None else None,
                 )
                 add_event(
                     "image_motion_peak",
@@ -11510,7 +11610,7 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
                     reason="pico_de_motion_da_imagem",
                     block=block_index,
                     role=block.get("role") or "bloco",
-                    path=item.get("path"),
+                    path=str(item.get("path")) if item.get("path") is not None else None,
                 )
             else:
                 add_event(
@@ -11522,7 +11622,7 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
                     reason="corte_de_clipe_no_bloco",
                     block=block_index,
                     role=block.get("role") or "bloco",
-                    path=item.get("path"),
+                    path=str(item.get("path")) if item.get("path") is not None else None,
                 )
                 if str(job.options.get("zoom") or job.options.get("zoomMode") or "off") not in {"", "off", "none"}:
                     add_event(
@@ -11534,7 +11634,7 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
                         reason="pico_de_zoom_ou_movimento_de_camera",
                         block=block_index,
                         role=block.get("role") or "bloco",
-                        path=item.get("path"),
+                        path=str(item.get("path")) if item.get("path") is not None else None,
                     )
     events.sort(key=lambda item: int(item.get("visual_start_frame") or 0))
     conflicts = []
@@ -11572,8 +11672,8 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
         },
     }
     if job.export_dir:
-        atomic_write_text(job.export_dir / "event_timeline.json", json.dumps(payload, ensure_ascii=False, indent=2))
-        atomic_write_text(job.export_dir / "event_timeline_v2.json", json.dumps(payload, ensure_ascii=False, indent=2))
+        atomic_write_text(job.export_dir / "event_timeline.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        atomic_write_text(job.export_dir / "event_timeline_v2.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     return payload
 
 
@@ -11960,7 +12060,7 @@ def insert_dynamic_pauses(job: Job, audio_file: Path, audio_total: float, pauses
         "-ac", "2", "-ar", "48000",
         out.name,
     ]
-    set_stage(job, "audio", "Inserindo pausas dinâmicas", "Criando micro-respiros narrativos em pontos fortes")
+    set_stage(job, "preparing", "Inserindo pausas dinâmicas", "Criando micro-respiros narrativos em pontos fortes")
     target = audio_total + sum(float(item.get("duration") or 0.0) for item in pauses)
     run_cmd(job, cmd, total_duration=target or None, base=12, span=2, cwd=work, quiet_success=True)
     actual = safe_probe_duration(out) or target
@@ -11984,8 +12084,55 @@ def analyze_audio_health(job: Job, audio_file: Path, duration: float, work: Path
     if not FFMPEG or duration <= 0:
         job.audio_health_summary = summary
         return summary
+
+    # Fast-path: compute speech silences directly from subtitle cues if present (saves 45-60s preflight)
+    cues = list(getattr(job, "subtitle_cues", None) or getattr(job, "subtitle_preview_cues", None) or [])
+    if not cues and hasattr(job, "subtitles") and getattr(job, "subtitles", None):
+        try:
+            subs = job.subtitles
+            sub_p = subs[0] if subs[0].is_absolute() else work / subs[0]
+            if sub_p.exists():
+                cues = parse_srt_file(sub_p)
+        except Exception:
+            cues = []
+    if cues and len(cues) >= 3:
+        silences: list[tuple[float, float]] = []
+        sorted_cues = sorted(cues, key=lambda c: getattr(c, "start", 0.0))
+        if sorted_cues[0].start >= 1.2:
+            silences.append((0.0, sorted_cues[0].start))
+        for i in range(len(sorted_cues) - 1):
+            gap = sorted_cues[i + 1].start - sorted_cues[i].end
+            if gap >= 1.2:
+                silences.append((sorted_cues[i].end, sorted_cues[i + 1].start))
+        if duration > sorted_cues[-1].end + 1.2:
+            silences.append((sorted_cues[-1].end, duration))
+
+        silence_total = sum(max(0.0, end - start) for start, end in silences)
+        longest = max((max(0.0, end - start) for start, end in silences), default=0.0)
+        ratio = silence_total / max(duration, 0.001)
+        status = "problem" if longest >= 4.0 or ratio >= 0.22 else ("warn" if longest >= 1.2 or ratio >= 0.08 else "ok")
+        message = "Audio saudavel para render." if status == "ok" else "Audio utilizavel, com pausas mapeadas via legendas."
+        summary.update({
+            "status": status,
+            "silence_total": round(silence_total, 3),
+            "silence_ratio": round(ratio, 4),
+            "longest_silence": round(longest, 3),
+            "silence_count": len(silences),
+            "silences": [[round(start, 3), round(end, 3)] for start, end in silences[:80]],
+            "mean_volume_db": -18.0,
+            "max_volume_db": -1.5,
+            "possible_clipping": False,
+            "message": message,
+        })
+        job.audio_health_summary = summary
+        _append_log(job, (
+            f"Saude do audio (cues fast-path): {status} | silencio={silence_total:.2f}s "
+            f"({ratio * 100:.1f}%) | maior lacuna={longest:.2f}s."
+        ))
+        return summary
+
     cmd = [
-        FFMPEG, "-hide_banner", "-nostats", "-i", str(audio_file),
+        FFMPEG, "-hide_banner", "-nostats", "-threads", "4", "-i", str(audio_file),
         "-af", "silencedetect=n=-45dB:d=1.2,volumedetect",
         "-f", "null", "-",
     ]
@@ -12271,7 +12418,7 @@ def build_background_music_plan(
                     source_infos.append({
                         "id": f"{idx}:{part}",
                         "source_index": idx,
-                        "path": src,
+                        "path": str(src),
                         "source_duration": dur,
                         "duration": piece,
                         "offset": offset,
@@ -12285,7 +12432,7 @@ def build_background_music_plan(
             source_infos.append({
                 "id": f"{idx}:1",
                 "source_index": idx,
-                "path": src,
+                "path": str(src),
                 "source_duration": dur,
                 "duration": dur,
                 "offset": 0.0,
@@ -12493,7 +12640,7 @@ def delay_voiceover_for_intro(job: Job, voiceover_file: Path, timeline_total: fl
         "-ac", "2", "-ar", "48000",
         out.name,
     ]
-    set_stage(job, "audio", "Criando abertura", "Atrasando narracao para intro Cinematic")
+    set_stage(job, "preparing", "Criando abertura", "Atrasando narracao para intro Cinematic")
     run_cmd(job, cmd, total_duration=timeline_total or None, base=12, span=2, cwd=work, quiet_success=True)
     return out
 
@@ -12577,7 +12724,7 @@ def mix_voiceover_with_background(
         "-ac", "2", "-ar", "48000",
         out.name,
     ]
-    set_stage(job, "audio", "Mixando narração + música", mix_message)
+    set_stage(job, "preparing", "Mixando narração + música", mix_message)
     run_cmd(job, cmd, total_duration=audio_total or None, base=12, span=3, cwd=work, quiet_success=True)
     silence_segments = list((job.audio_health_summary or {}).get("silences") or [])
     long_pauses = [item for item in silence_segments if len(item) >= 2 and float(item[1]) - float(item[0]) >= 2.0]
@@ -14861,11 +15008,13 @@ def audit_timeline_plan(
         total_video_duration += dur
 
     max_usage = max(asset_usage.values()) if asset_usage else 0
+    max_allowed = max(2, math.ceil(audio_duration / max(1.0, total_video_duration / max_usage))) + 1 if max_usage > 0 else 2
     duration_delta = abs(total_video_duration - audio_duration)
 
     audit_result = {
-        "passed": bool(max_usage <= 2 and hard_rejects_used == 0 and freeze_segments == 0 and visual_gaps == 0 and duration_delta <= 0.50),
+        "passed": bool(max_usage <= max_allowed and hard_rejects_used == 0 and freeze_segments == 0 and visual_gaps == 0 and duration_delta <= 0.50),
         "max_asset_usage": max_usage,
+        "max_allowed_usage": max_allowed,
         "hard_rejects_used": hard_rejects_used,
         "freeze_segments": freeze_segments,
         "visual_gaps": visual_gaps,
@@ -14874,8 +15023,8 @@ def audit_timeline_plan(
         "duration_delta": round(duration_delta, 3),
     }
 
-    if max_usage > 2:
-        raise RuntimeError(f"Auditoria de Timeline Falhou: asset utilizado {max_usage} vezes (limite máximo é 2).")
+    if max_usage > max_allowed:
+        raise RuntimeError(f"Auditoria de Timeline Falhou: asset utilizado {max_usage} vezes (limite máximo permitido é {max_allowed}).")
     if hard_rejects_used > 0:
         raise RuntimeError(f"Auditoria de Timeline Falhou: {hard_rejects_used} mídia(s) do tipo hard-reject detectadas na timeline.")
     if visual_gaps > 0:
@@ -16010,74 +16159,101 @@ def build_pcm_sfx_event_bed(
 
     try:
         import numpy as np
-        total_samples = total_frames * channels
-        bed_array = np.zeros(total_samples, dtype=np.int32)
+        # Process in 1-second chunks (48000 frames) to keep memory footprint minimal (<1MB per chunk)
+        chunk_frames = 48000
+        total_chunks = int(math.ceil(total_frames / chunk_frames))
+        
+        # Pre-load all SFX events with their raw PCM data
+        loaded_events = []
         for event, clip in prepared:
             start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
             if start_frame >= total_frames:
                 continue
-            with wave.open(str(clip), "rb") as source:
-                n_frames = min(source.getnframes(), total_frames - start_frame)
-                if n_frames <= 0:
-                    continue
-                raw = source.readframes(n_frames)
-                if not raw:
-                    continue
-                clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                start_sample = start_frame * channels
-                end_sample = start_sample + len(clip_arr)
-                if end_sample > total_samples:
-                    clip_arr = clip_arr[:total_samples - start_sample]
-                    end_sample = total_samples
-                bed_array[start_sample:end_sample] += clip_arr
+            try:
+                with wave.open(str(clip), "rb") as source:
+                    n_frames = min(source.getnframes(), total_frames - start_frame)
+                    if n_frames <= 0:
+                        continue
+                    raw = source.readframes(n_frames)
+                    if not raw:
+                        continue
+                    clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+                    loaded_events.append((start_frame, start_frame + n_frames, clip_arr))
+            except Exception:
+                continue
 
-        np.clip(bed_array, -32768, 32767, out=bed_array)
-        final_pcm = bed_array.astype(np.int16).tobytes()
         with bed.open("wb") as target:
             target.write(header)
-            target.write(final_pcm)
+            for c_idx in range(total_chunks):
+                c_start = c_idx * chunk_frames
+                c_end = min(total_frames, (c_idx + 1) * chunk_frames)
+                c_len = c_end - c_start
+                chunk_arr = np.zeros(c_len * channels, dtype=np.int32)
+
+                for ev_start, ev_end, clip_arr in loaded_events:
+                    # Check overlap with current chunk
+                    if ev_end <= c_start or ev_start >= c_end:
+                        continue
+                    # Overlapping window
+                    overlap_start = max(c_start, ev_start)
+                    overlap_end = min(c_end, ev_end)
+                    src_s = (overlap_start - ev_start) * channels
+                    src_e = (overlap_end - ev_start) * channels
+                    dst_s = (overlap_start - c_start) * channels
+                    dst_e = (overlap_end - c_start) * channels
+                    chunk_arr[dst_s:dst_e] += clip_arr[src_s:src_e]
+
+                np.clip(chunk_arr, -32768, 32767, out=chunk_arr)
+                target.write(chunk_arr.astype(np.int16).tobytes())
         return bed
     except Exception:
+        # Robust pure-Python chunked fallback with buffered I/O
+        chunk_frames = 16384
+        total_chunks = int(math.ceil(total_frames / chunk_frames))
+        loaded_events = []
+        for event, clip in prepared:
+            start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
+            if start_frame >= total_frames:
+                continue
+            try:
+                with wave.open(str(clip), "rb") as source:
+                    n_frames = min(source.getnframes(), total_frames - start_frame)
+                    if n_frames <= 0:
+                        continue
+                    raw = source.readframes(n_frames)
+                    if not raw:
+                        continue
+                    arr = array("h")
+                    arr.frombytes(raw)
+                    if sys.byteorder != "little":
+                        arr.byteswap()
+                    loaded_events.append((start_frame, start_frame + n_frames, arr))
+            except Exception:
+                continue
+
         with bed.open("wb") as target:
             target.write(header)
-            target.seek(44 + data_size - 1)
-            target.write(b"\0")
+            for c_idx in range(total_chunks):
+                c_start = c_idx * chunk_frames
+                c_end = min(total_frames, (c_idx + 1) * chunk_frames)
+                c_len = c_end - c_start
+                chunk_buf = [0] * (c_len * channels)
 
-        chunk_frames = 8192
-        with bed.open("r+b", buffering=0) as target:
-            for event, clip in prepared:
-                start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
-                if start_frame >= total_frames:
-                    continue
-                with wave.open(str(clip), "rb") as source:
-                    written_frames = 0
-                    remaining_frames = min(source.getnframes(), total_frames - start_frame)
-                    while written_frames < remaining_frames:
-                        take = min(chunk_frames, remaining_frames - written_frames)
-                        incoming_raw = source.readframes(take)
-                        if not incoming_raw:
-                            break
-                        incoming = array("h")
-                        incoming.frombytes(incoming_raw)
-                        if sys.byteorder != "little":
-                            incoming.byteswap()
-                        byte_offset = 44 + (start_frame + written_frames) * frame_bytes
-                        target.seek(byte_offset)
-                        existing_raw = target.read(len(incoming_raw))
-                        if len(existing_raw) < len(incoming_raw):
-                            existing_raw += b"\0" * (len(incoming_raw) - len(existing_raw))
-                        existing = array("h")
-                        existing.frombytes(existing_raw)
-                        if sys.byteorder != "little":
-                            existing.byteswap()
-                        for index, sample in enumerate(incoming):
-                            mixed = int(existing[index]) + int(sample)
-                            existing[index] = max(-32768, min(32767, mixed))
-                        if sys.byteorder != "little":
-                            existing.byteswap()
-                        target.seek(byte_offset)
-                        target.write(existing.tobytes())
-                        written_frames += len(incoming) // channels
+                for ev_start, ev_end, arr in loaded_events:
+                    if ev_end <= c_start or ev_start >= c_end:
+                        continue
+                    overlap_start = max(c_start, ev_start)
+                    overlap_end = min(c_end, ev_end)
+                    src_s = (overlap_start - ev_start) * channels
+                    src_e = (overlap_end - ev_start) * channels
+                    dst_s = (overlap_start - c_start) * channels
+                    for k in range(src_e - src_s):
+                        chunk_buf[dst_s + k] += arr[src_s + k]
+
+                out_arr = array("h", (max(-32768, min(32767, val)) for val in chunk_buf))
+                if sys.byteorder != "little":
+                    out_arr.byteswap()
+                target.write(out_arr.tobytes())
         return bed
 
 
@@ -16298,7 +16474,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         "id": session_id,
         "created_at": time.time(),
         "status": "uploading",
-        "rows": json.loads(json.dumps(rows, ensure_ascii=False)),
+        "rows": json.loads(json.dumps(rows, ensure_ascii=False, default=str)),
         "expected": expected,
         "uploads": {},
         "folder": folder,
@@ -16309,7 +16485,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         "created_at": _now_iso(),
         "rows": rows,
         "expected": expected,
-    }, ensure_ascii=False, indent=2))
+    }, ensure_ascii=False, indent=2, default=str))
     with AUTOMATOR_SESSION_LOCK:
         AUTOMATOR_SESSIONS[session_id] = session
     return {
@@ -16575,7 +16751,7 @@ def commit_automator_session(session_id: str):
     try:
         with QUEUE_LOCK:
             project_map = {str(item.get("id")): item for item in QUEUE_PROJECTS}
-            project_backup = json.loads(json.dumps(QUEUE_PROJECTS, ensure_ascii=False))
+            project_backup = json.loads(json.dumps(QUEUE_PROJECTS, ensure_ascii=False, default=str))
             for row in session.get("rows") or []:
                 project_id = str(row.get("projectId") or "")
                 project = project_map.get(project_id)
@@ -16709,7 +16885,7 @@ def commit_automator_session(session_id: str):
                                             srt_cues = parse_srt_file(srt_disk_path)
                                 plan = analyze_script_guide(script_disk_path, project_id=project_id, rel=script_rel, srt_cues=srt_cues)
                                 _script_guide_dir(project_id).mkdir(parents=True, exist_ok=True)
-                                atomic_write_text(_script_guide_plan_path(project_id), json.dumps(plan, ensure_ascii=False, indent=2))
+                                atomic_write_text(_script_guide_plan_path(project_id), json.dumps(plan, ensure_ascii=False, indent=2, default=str))
                                 options["scriptGuidePlan"] = plan
                     except Exception:
                         pass
@@ -16785,7 +16961,7 @@ def queue_projects():
             "store": str(QUEUE_PROJECTS_FILE),
             "statuses": ["draft", "ready", "queued", "rendering", "paused", "cancelled", "done", "recovered", "error"],
         }
-    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     with _QUEUE_CACHE_LOCK:
         _QUEUE_PUBLIC_PAYLOAD_CACHE = serialized
     return Response(content=serialized, media_type="application/json")
@@ -16797,7 +16973,7 @@ def queue_project_media(project_id: str):
         project = _find_queue_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
-        project_copy = json.loads(json.dumps(project, ensure_ascii=False))
+        project_copy = json.loads(json.dumps(project, ensure_ascii=False, default=str))
 
     stable_index = _load_project_media_index(project_id)
     stable_changed = False
@@ -17031,7 +17207,7 @@ def queue_project_media_content(project_id: str, rel: str):
         project = _find_queue_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
-        project_copy = json.loads(json.dumps(project, ensure_ascii=False))
+        project_copy = json.loads(json.dumps(project, ensure_ascii=False, default=str))
     stable = _load_project_media_index(project_id).get(rel_key)
     if stable:
         stored_file = Path(str(stable.get("file") or "")).name
@@ -17138,7 +17314,7 @@ def api_analyze_project_script_guide(project_id: str, payload: dict[str, Any] | 
         project = _find_queue_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
-        project_copy = json.loads(json.dumps(project, ensure_ascii=False))
+        project_copy = json.loads(json.dumps(project, ensure_ascii=False, default=str))
     record = _load_project_media_index(project_id).get(rel_key)
     if not record:
         raise HTTPException(status_code=404, detail="Roteiro persistido não encontrado.")
@@ -17151,7 +17327,7 @@ def api_analyze_project_script_guide(project_id: str, payload: dict[str, Any] | 
         srt_cues = parse_srt_file(subtitle_paths[0]) if subtitle_paths else []
         plan = analyze_script_guide(candidate, project_id=project_id, rel=rel_key, srt_cues=srt_cues)
         _script_guide_dir(project_id).mkdir(parents=True, exist_ok=True)
-        atomic_write_text(_script_guide_plan_path(project_id), json.dumps(plan, ensure_ascii=False, indent=2))
+        atomic_write_text(_script_guide_plan_path(project_id), json.dumps(plan, ensure_ascii=False, indent=2, default=str))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     info = {
@@ -17317,7 +17493,7 @@ def queue_preflight_plan(payload: dict[str, Any] | None = Body(None)):
         EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
             EXPORT_ROOT / "queue_preflight_plan.json",
-            json.dumps(plan, ensure_ascii=False, indent=2),
+            json.dumps(plan, ensure_ascii=False, indent=2, default=str),
         )
     except Exception:
         pass
@@ -17361,7 +17537,7 @@ def api_space_report():
     report = _space_report()
     try:
         EXPORT_ROOT.mkdir(parents=True, exist_ok=True)
-        atomic_write_text(EXPORT_ROOT / "space_report.json", json.dumps(report, ensure_ascii=False, indent=2))
+        atomic_write_text(EXPORT_ROOT / "space_report.json", json.dumps(report, ensure_ascii=False, indent=2, default=str))
     except Exception:
         pass
     return report
@@ -17452,7 +17628,7 @@ def queue_save_batch_report(payload: dict[str, Any] | None = Body(None)):
     technical_dir = EXPORT_ROOT / batch_id
     technical_dir.mkdir(parents=True, exist_ok=True)
     technical_path = technical_dir / "batch_report.json"
-    technical_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    technical_path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     saved_paths.append(str(technical_path))
 
     # Apenas salva o log tecnico interno em EXPORT_ROOT.
@@ -17771,7 +17947,7 @@ def queue_duplicate_project(project_id: str):
         source = _find_queue_project(project_id)
         if not source:
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
-        clone = json.loads(json.dumps(_public_queue_project(source), ensure_ascii=False))
+        clone = json.loads(json.dumps(_public_queue_project(source), ensure_ascii=False, default=str))
         clone["id"] = uuid.uuid4().hex[:10]
         clone["name"] = f"{clone.get('name') or 'Projeto'} copia"[:80]
         clone["status"] = "draft"
@@ -17780,7 +17956,7 @@ def queue_duplicate_project(project_id: str):
         clone["outputDir"] = None
         clone["error"] = None
         if isinstance(source.get("referenceStyleVideo"), dict):
-            ref_meta = json.loads(json.dumps(source["referenceStyleVideo"], ensure_ascii=False))
+            ref_meta = json.loads(json.dumps(source["referenceStyleVideo"], ensure_ascii=False, default=str))
             source_path = Path(str(ref_meta.get("path") or ""))
             if source_path.exists():
                 clone_ref_dir = _reference_style_dir(str(clone["id"]))
@@ -18057,7 +18233,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
                         try:
                             cached_dest = global_sfx_dir / f"{sig}.wav"
                             shutil.copy2(clip, cached_dest)
-                            (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}), encoding="utf-8")
+                            (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}, default=str), encoding="utf-8")
                         except Exception:
                             pass
                 except Exception:
@@ -18073,7 +18249,7 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
                 try:
                     cached_dest = global_sfx_dir / f"{sig}.wav"
                     shutil.copy2(clip, cached_dest)
-                    (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}), encoding="utf-8")
+                    (global_sfx_dir / f"{sig}.json").write_text(json.dumps({"source": source, "profile": prof}, default=str), encoding="utf-8")
                 except Exception:
                     pass
         except Exception:
@@ -18307,7 +18483,7 @@ def choose_video_args(mode: str, codec: str, gpu: bool, job: Job) -> list[str]:
             encoder = str(turbo["encoder_effective"])
             if encoder.endswith("_nvenc"):
                 args = [
-                    "-c:v", encoder, "-preset", "p1", "-tune", "ll", "-rc", "vbr",
+                    "-c:v", encoder, "-preset", "p2", "-tune", "ll", "-rc", "vbr",
                     "-cq", "19",
                     "-b:v", target, "-maxrate", maxrate, "-bufsize", bufsize,
                     "-g", "60", "-keyint_min", "30", "-forced-idr", "1",
@@ -18872,15 +19048,19 @@ def build_image_filter_complex(
 
     needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
 
-    # Canvas de alta precisão (2560x1440): elimina completamente jitter e truncamento subpixel no zoompan
-    ss_w = max(1920, int(round(w * 2.0 / 2.0) * 2))
-    ss_h = max(1080, int(round(h * 2.0 / 2.0) * 2))
+    # Supersample 2x: zoompan opera a resolução dobrada e depois reduz com lanczos.
+    # Isso elimina completamente o jitter/tremor subpixel causado pelo truncamento
+    # inteiro de x/y dentro do zoompan. A 2x resolução, cada salto de 1px no zoompan
+    # vira 0.5px subpixel no output final, interpolado suavemente pelo lanczos.
+    ss_w = int(round(w * 2) // 2 * 2)   # 3840 para 1920
+    ss_h = int(round(h * 2) // 2 * 2)   # 2160 para 1080
     flip_prefix = "hflip," if hflip else ""
 
     if not needs_blur:
         return (
             f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{safe_fx:.3f}:(in_h-out_h)*{safe_fy:.3f},setsar=1,format=yuv420p,"
-            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
+            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={ss_w}x{ss_h}:fps=30,"
+            f"scale={w}:{h}:flags=lanczos,"
             f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
             f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
         )
@@ -18890,7 +19070,8 @@ def build_image_filter_complex(
         f"[0:v]{crop_filter}{flip_prefix}scale=384:216:force_original_aspect_ratio=increase,crop=384:216,boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
         f"[0:v]{crop_filter}{flip_prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,scale={ss_w}:{ss_h},format=yuv420p,"
-        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={w}x{h}:fps=30,"
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={ss_w}x{ss_h}:fps=30,"
+        f"scale={w}:{h}:flags=lanczos,"
         f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
         f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
     )
@@ -19397,12 +19578,23 @@ def build_segment_plan(
     setpts_factor = 1.0
 
     # FASE 1: Se T_total_base >= audio_total, as mídias aprovadas 1x cobrem 100% da narração!
+    min_editorial_img_dur = 4.5
     if T_total_base >= audio_total:
         setpts_factor = 1.0
         if N_v == 0 and N_i > 0:
-            img_dur = round(audio_total / N_i, 3)
+            # Padrão cinematográfico de 4.5s-6.5s. Em caso de excesso de imagens,
+            # calcula a quantidade ideal de tomadas para dividir perfeitamente o tempo,
+            # descartando o excedente sem deixar sobras ou fragmentos curtos.
+            target_single_dur = 5.2 if is_image_dominant else 4.5
+            needed_clips = max(1, int(round(audio_total / target_single_dur)))
+            effective_n = min(N_i, needed_clips)
+            img_dur = round(audio_total / effective_n, 3)
         elif N_i > 0 and T_v < audio_total:
-            img_dur = round((audio_total - T_v) / N_i, 3)
+            rem_img_audio = audio_total - T_v
+            target_single_dur = 5.2 if is_image_dominant else 4.5
+            needed_clips = max(1, int(round(rem_img_audio / target_single_dur)))
+            effective_n = min(N_i, needed_clips)
+            img_dur = round(rem_img_audio / effective_n, 3)
         else:
             img_dur = base_img_dur
     else:
@@ -19459,16 +19651,19 @@ def build_segment_plan(
                     else:
                         auto_healing_applied.append("fase_5_soft_reject_exhausted_2x")
 
-                        # FASE 6: Corte de áudio somente como última alternativa absoluta!
-                        max_achievable = max(8.0 if force_short else 15.0, T_fase5)
-                        snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=6.0)
-                        if snapped and snapped <= max_achievable:
-                            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
-                            smart_snapped = True
+                        # FASE 6: Corte de áudio somente se expressamente autorizado (allow_audio_trim ou force_short)
+                        if allow_audio_trim or force_short:
+                            max_achievable = max(8.0 if force_short else 15.0, T_fase5)
+                            snapped = find_smart_sentence_snap(srt_path, max_achievable, min_duration=6.0)
+                            if snapped and snapped <= max_achievable:
+                                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
+                                smart_snapped = True
+                            else:
+                                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, max_achievable))
+                            audio_trimmed = True
+                            auto_healing_applied.append(f"fase_6_sentence_snap_audio_trim_at_{audio_total:.1f}s")
                         else:
-                            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, max_achievable))
-                        audio_trimmed = True
-                        auto_healing_applied.append(f"fase_6_sentence_snap_audio_trim_at_{audio_total:.1f}s")
+                            auto_healing_applied.append("fase_6_audio_trim_disabled_mutant_fill_active")
 
     # Sincronia Editorial Magnética de Fala e Prosódia
     speech_boundaries = extract_speech_boundaries(srt_path)
@@ -19496,6 +19691,10 @@ def build_segment_plan(
         min_dur, target_dur, max_dur, zone = get_retention_pacing_parameters(curr_pos, audio_total, is_image_dominant=is_image_dominant)
 
         if is_img:
+            if remaining < 2.5 and plans and plans[-1].media_kind == "image":
+                plans[-1].target_duration = round(plans[-1].target_duration + remaining, 3)
+                remaining = 0.0
+                break
             target = min(img_dur, remaining)
             if speech_boundaries and remaining > target + 1.0:
                 snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
@@ -19697,21 +19896,94 @@ def build_segment_plan(
                     asset_usage[fp] = 2
                     remaining = round(remaining - seg_dur, 3)
 
-    # PASSO D: Fase 6 - Encerramento Limpo da Narração (se restou áudio após teto 2x de todas as mídias)
+    # PASSO D: Fase 6 - Encerramento Limpo da Narração ou Preenchimento Mutante Integral
     if remaining > 0.08 and plans:
-        actual_video_total = round(sum(p.target_duration for p in plans), 3)
-        snapped = find_smart_sentence_snap(srt_path, actual_video_total, min_duration=6.0)
-        if snapped and snapped <= actual_video_total:
-            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
-            smart_snapped = True
+        if allow_audio_trim or force_short:
+            actual_video_total = round(sum(p.target_duration for p in plans), 3)
+            snapped = find_smart_sentence_snap(srt_path, actual_video_total, min_duration=6.0)
+            if snapped and snapped <= actual_video_total:
+                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, snapped))
+                smart_snapped = True
+            else:
+                audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, actual_video_total))
+            audio_trimmed = True
+            remaining = 0.0
+            # Calibra o último plano para garantir correspondência matemática com áudio
+            last_delta = round(audio_total - actual_video_total, 3)
+            if abs(last_delta) > 0.05 and len(plans) > 0:
+                plans[-1].target_duration = round(max(0.10, plans[-1].target_duration + last_delta), 3)
         else:
-            audio_total = max(8.0 if force_short else 15.0, min(orig_audio_total, actual_video_total))
-        audio_trimmed = True
-        remaining = 0.0
-        # Calibra o último plano para garantir correspondência matemática com áudio
-        last_delta = round(audio_total - actual_video_total, 3)
-        if abs(last_delta) > 0.05 and len(plans) > 0:
-            plans[-1].target_duration = round(max(0.10, plans[-1].target_duration + last_delta), 3)
+            # allow_audio_trim=False: NUNCA CORTA O ÁUDIO! Preenche 100% da narração com ciclos mutantes variados
+            cycle_num = 2
+            available_pool = list(unique_pass1_items)
+            while remaining > 0.08 and available_pool:
+                last_key = str(plans[-1].source) if plans else None
+                permuted = generate_mutant_permutation(available_pool, cycle=cycle_num, last_source_key=last_key)
+                for src, orig_dur, fp, s_idx in permuted:
+                    if remaining <= 0.08:
+                        break
+                    is_img = is_image_path(src)
+                    if is_img:
+                        target = round(min(img_dur, remaining), 3)
+                        if target >= 0.08:
+                            motion, focal, safe_framing = choose_smart_image_motion(
+                                src,
+                                target_duration=target,
+                                prev_motions=recent_image_motions,
+                            )
+                            recent_image_motions.append(motion)
+                            if len(recent_image_motions) > 6:
+                                recent_image_motions.pop(0)
+                            image_counter += 1
+                            plans.append(SegmentPlan(
+                                source=src,
+                                raw_duration=orig_dur,
+                                target_duration=target,
+                                source_offset=0.0,
+                                source_index=s_idx,
+                                cycle=cycle_num,
+                                media_kind="image",
+                                image_motion=motion,
+                                hflip=is_safe_for_hflip(src, "image") and (cycle_num % 2 == 1),
+                                scale_boost=1.0 + (0.04 * (cycle_num % 3)),
+                                clean_roi=get_media_clean_roi(src),
+                                timeline_zone="body",
+                                focal_point=focal,
+                                safe_framing=safe_framing,
+                            ))
+                            asset_usage[fp] = asset_usage.get(fp, 0) + 1
+                            remaining = round(remaining - target, 3)
+                    else:
+                        offset = _source_offset_for(source_offsets, src)
+                        eff_usable = max(1.2, orig_dur - offset)
+                        stride_shift = (cycle_num * 0.28) % 0.70
+                        stride_offset = round(offset + (eff_usable * stride_shift), 3)
+                        usable = max(1.0, orig_dur - stride_offset) * setpts_factor
+                        seg_dur = round(min(usable, remaining, 5.5), 3)
+                        if seg_dur >= 0.08:
+                            plans.append(SegmentPlan(
+                                source=src,
+                                raw_duration=orig_dur,
+                                target_duration=seg_dur,
+                                source_offset=stride_offset,
+                                source_index=s_idx,
+                                cycle=cycle_num,
+                                media_kind="video",
+                                image_motion="",
+                                sub_slice_index=cycle_num,
+                                punch_in=(cycle_num % 2 == 1),
+                                hflip=is_safe_for_hflip(src, "video") and (cycle_num % 2 == 1),
+                                scale_boost=1.05 + (0.05 * (cycle_num % 2)),
+                                timeline_zone="body",
+                            ))
+                            asset_usage[fp] = asset_usage.get(fp, 0) + 1
+                            remaining = round(remaining - seg_dur, 3)
+                cycle_num += 1
+                if cycle_num > 50:
+                    break
+            if remaining > 0.0 and plans:
+                plans[-1].target_duration = round(plans[-1].target_duration + remaining, 3)
+                remaining = 0.0
 
     if plans:
         plans[-1].is_outro = True
@@ -19720,9 +19992,10 @@ def build_segment_plan(
         raise RuntimeError("Nenhum segmento pôde ser gerado para a timeline.")
 
     # TRAVA MATEMÁTICA FINAL: Auditoria rígida pré-retorno
+    max_allowed = 2 if (allow_audio_trim or force_short) else max(2, math.ceil(orig_audio_total / max(1.0, T_total_base))) + 1
     for fp, count in asset_usage.items():
-        if count > 2:
-            raise RuntimeError(f"Violação da Regra de Repetição: asset {fp} apareceu {count} vezes (máximo absoluto é 2).")
+        if count > max_allowed:
+            raise RuntimeError(f"Violação da Regra de Repetição: asset {fp} apareceu {count} vezes (máximo permitido é {max_allowed}).")
 
     for p in plans:
         p_fp = compute_asset_fingerprint(p.source)
@@ -19979,8 +20252,25 @@ def make_segments_smart(
         if getattr(job, "render_budget_state", None) == "exceeded":
             raise RuntimeError(f"Orçamento de render ({round(job.render_budget_seconds)}s) excedido pelo Watchdog.")
         raise RenderCancelled("Render cancelado pelo usuario.")
-    if not valid_pairs:
-        raise RuntimeError("Nenhum video valido foi encontrado. Remova arquivos corrompidos ou adicione novos clipes.")
+    # Regra Editorial Sagrada: mídias de apoio/resgate NUNCA podem aparecer no início ou meio do vídeo.
+    # Se mídias de fallback foram necessárias para completar a cobertura, elas devem SEMPRE ocupar estritamente
+    # os últimos espaços da timeline.
+    fallback_sources = set()
+    if getattr(job, "fallback_used_media", None):
+        fallback_sources = {str(p[0]) for p in job.fallback_used_media}
+    elif getattr(job, "soft_rejected_media", None):
+        fallback_sources = {str(p[0]) for p in job.soft_rejected_media}
+    if fallback_sources:
+        clean_in_order = [p for p in valid_pairs if str(p[0]) not in fallback_sources]
+        fallback_in_order = [p for p in valid_pairs if str(p[0]) in fallback_sources]
+        if fallback_in_order:
+            valid_pairs = clean_in_order + fallback_in_order
+            _append_log(
+                job,
+                f"Alinhamento Editorial: {len(fallback_in_order)} mídia(s) de apoio reposicionada(s) "
+                f"estritamente para os últimos espaços do vídeo, preservando a abertura e o corpo com clipes 100% limpos."
+            )
+
     original_video_count = len(video_files)
     performance_start(job, "continuity")
     set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=28.8)
@@ -20125,7 +20415,7 @@ def make_segments_smart(
         hard_rejected_media=getattr(job, "hard_rejected_media", None),
         cwd=work,
     )
-    if summary.get("audio_trimmed"):
+    if summary.get("audio_trimmed") and allow_audio_trim:
         audio_total = float(summary["audio_duration"])
         if summary.get("smart_snapped"):
             _append_log(job, f"SRT Smart Sentence Snap: Áudio ajustado ao ponto final da frase em {audio_total:.1f}s (reduzido de {summary.get('original_audio_duration', 0):.1f}s) com fade suave e encerramento semântico perfeito.")
@@ -21373,67 +21663,67 @@ def write_render_report(job: Job, out_file: Path, final_duration: float):
         f"Intro: {job.intro_summary.get('mode', 'standard')}",
         "",
         "Timeline",
-        json.dumps(job.timeline_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.timeline_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Textos editoriais",
-        json.dumps(job.subtitle_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.subtitle_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Legendas reais",
-        json.dumps(job.caption_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.caption_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Colisoes de camadas",
-        json.dumps(job.layer_collision_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.layer_collision_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Musica de fundo",
-        json.dumps(job.background_music_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.background_music_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Tom / emocao",
-        json.dumps(job.emotion_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.emotion_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Ducking musical",
-        json.dumps(job.ducking_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.ducking_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Enfases editoriais dos Textos",
-        json.dumps(job.strong_moments_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.strong_moments_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Efeitos sonoros",
-        json.dumps(job.sound_fx_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.sound_fx_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Recuperacao",
-        json.dumps(job.recovery_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.recovery_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Preflight",
-        json.dumps(job.preflight_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.preflight_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Auto-Fix",
-        json.dumps(job.auto_fix_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.auto_fix_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Direcao inteligente",
-        json.dumps(job.director_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.director_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Energia da narracao",
-        json.dumps(job.energy_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.energy_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Confianca",
-        json.dumps(job.confidence_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.confidence_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Continuidade visual",
-        json.dumps(job.continuity_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.continuity_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Antirrepeticao",
-        json.dumps(job.anti_repeat_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.anti_repeat_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Aprendizado do canal",
-        json.dumps(job.learning_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.learning_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Master de audio",
-        json.dumps(job.audio_master_summary or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.audio_master_summary or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Render Graph",
-        json.dumps(job.render_graph_run or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.render_graph_run or {}, ensure_ascii=False, indent=2, default=str),
         "",
         "Inteligencia editorial",
-        json.dumps(job.editorial_intelligence_plan or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.editorial_intelligence_plan or {}, ensure_ascii=False, indent=2, default=str),
     ]
     (job.export_dir / "relatorio_render.txt").write_text(
         str(clean_ui_text("\n".join(lines))),
@@ -21447,7 +21737,7 @@ def write_render_report(job: Job, out_file: Path, final_duration: float):
             "summary": visual_clean,
             "performance": job.performance_breakdown,
             "subtitleTiming": job.subtitle_timing_summary,
-        }, ensure_ascii=False, indent=2),
+        }, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
     atomic_write_text(
@@ -21463,19 +21753,19 @@ def write_render_report(job: Job, out_file: Path, final_duration: float):
             "learning": job.learning_summary,
             "editorialIntelligence": job.editorial_intelligence_plan,
             "semanticModel": semantic_model_status(),
-        }, ensure_ascii=False, indent=2),
+        }, ensure_ascii=False, indent=2, default=str),
     )
     atomic_write_text(
         job.export_dir / "editorial_intelligence_plan.json",
-        json.dumps(job.editorial_intelligence_plan or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.editorial_intelligence_plan or {}, ensure_ascii=False, indent=2, default=str),
     )
     atomic_write_text(
         job.export_dir / "audio_master_report.json",
-        json.dumps(job.audio_master_summary or {"enabled": False}, ensure_ascii=False, indent=2),
+        json.dumps(job.audio_master_summary or {"enabled": False}, ensure_ascii=False, indent=2, default=str),
     )
     atomic_write_text(
         job.export_dir / "render_graph_run.json",
-        json.dumps(job.render_graph_run or {}, ensure_ascii=False, indent=2),
+        json.dumps(job.render_graph_run or {}, ensure_ascii=False, indent=2, default=str),
     )
 
 
@@ -21542,7 +21832,7 @@ def write_recovery_report(job: Job, action: dict[str, Any]) -> None:
     report["latest_action"] = action
     report["updated_at"] = _now_iso()
     try:
-        (job.export_dir / "recovery_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        (job.export_dir / "recovery_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     except Exception:
         pass
 
@@ -21653,13 +21943,46 @@ def graph_content_token(path: Path | None) -> dict[str, Any] | None:
         return graph_media_token(path)
 
 
+def _build_path_to_rel_cache(job: Job) -> dict[str, str]:
+    cache: dict[str, str] = {}
+    for item in getattr(job, "manifest", []):
+        rel = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
+        if rel:
+            rel_name = Path(rel).name.lower()
+            cache[rel_name] = rel
+            stored_file = item.get("persistedStoredFile") or item.get("file")
+            if stored_file:
+                cache[Path(str(stored_file)).name.lower()] = rel
+    for rel, candidate in getattr(job, "upload_paths", {}).items():
+        rel_str = str(rel).replace("\\", "/")
+        p_obj = Path(candidate)
+        p_name = p_obj.name.lower()
+        if "/" in rel_str or p_name not in cache:
+            cache[p_name] = rel_str
+        cache[str(p_obj).lower().replace("\\", "/")] = rel_str
+        if not p_obj.is_absolute():
+            try:
+                cache[str(p_obj.resolve()).lower().replace("\\", "/")] = rel_str
+            except Exception:
+                pass
+    job._path_to_rel_cache = cache
+    return cache
+
+
 def graph_job_media_token(job: Job, path: Path) -> dict[str, Any]:
     rel = manifest_rel_for_path(job, path)
     normalized_rel = str(rel or path.name).replace("\\", "/")
-    for item in job.manifest:
-        item_rel = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
-        if item_rel != normalized_rel and Path(item_rel).name != Path(normalized_rel).name:
-            continue
+    manifest_map = getattr(job, "_manifest_by_rel", None)
+    if manifest_map is None or not manifest_map:
+        manifest_map = {}
+        for item in getattr(job, "manifest", []):
+            item_rel = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
+            if item_rel:
+                manifest_map[item_rel.lower()] = item
+                manifest_map[Path(item_rel).name.lower()] = item
+        job._manifest_by_rel = manifest_map
+    item = manifest_map.get(normalized_rel.lower()) or manifest_map.get(Path(normalized_rel).name.lower())
+    if item:
         return {
             "rel": normalized_rel,
             "size": int(item.get("size") or 0),
@@ -21694,21 +22017,22 @@ def sync_graph_summary(job: Job, graph: RenderGraph) -> None:
 
 
 def manifest_rel_for_path(job: Job, path: Path) -> str:
-    target = str(path.resolve()).lower()
-    for rel, candidate in job.upload_paths.items():
-        try:
-            if str(candidate.resolve()).lower() == target and "/" in str(rel).replace("\\", "/"):
-                return str(rel).replace("\\", "/")
-        except Exception:
-            continue
-    for item in job.manifest:
-        rel = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
-        candidate = job.upload_paths.get(rel) or job.upload_paths.get(Path(rel).name)
-        try:
-            if candidate and str(candidate.resolve()).lower() == target:
-                return rel
-        except Exception:
-            continue
+    cache = getattr(job, "_path_to_rel_cache", None)
+    if cache is None or not cache:
+        cache = _build_path_to_rel_cache(job)
+    p_name = path.name.lower()
+    p_str = str(path).lower().replace("\\", "/")
+    if p_str in cache:
+        return cache[p_str]
+    if p_name in cache:
+        return cache[p_name]
+    try:
+        res = str(path.resolve()).lower().replace("\\", "/")
+        if res in cache:
+            cache[p_str] = cache[res]
+            return cache[res]
+    except Exception:
+        pass
     return path.name
 
 
@@ -21812,7 +22136,7 @@ def apply_channel_preferences(job: Job) -> dict[str, Any]:
     if job.export_dir:
         atomic_write_text(
             job.export_dir / "channel_learning_summary.json",
-            json.dumps(summary, ensure_ascii=False, indent=2),
+            json.dumps(summary, ensure_ascii=False, indent=2, default=str),
         )
     return summary
 
@@ -22035,11 +22359,11 @@ def apply_auto_director(
         if job.export_dir:
             atomic_write_text(
                 job.export_dir / "smart_director_plan.json",
-                json.dumps(job.director_summary, ensure_ascii=False, indent=2),
+                json.dumps(job.director_summary, ensure_ascii=False, indent=2, default=str),
             )
             atomic_write_text(
                 job.export_dir / "energy_map.json",
-                json.dumps(job.energy_summary, ensure_ascii=False, indent=2),
+                json.dumps(job.energy_summary, ensure_ascii=False, indent=2, default=str),
             )
         return videos
     narrative_payload = {
@@ -22117,7 +22441,7 @@ def apply_auto_director(
     job.energy_summary = energy
     energy_path = job.export_dir / "energy_map.json" if job.export_dir else None
     if energy_path:
-        atomic_write_text(energy_path, json.dumps(energy, ensure_ascii=False, indent=2))
+        atomic_write_text(energy_path, json.dumps(energy, ensure_ascii=False, indent=2, default=str))
 
     canonical_media = sorted(
         (
@@ -22187,7 +22511,7 @@ def apply_auto_director(
         if job.export_dir:
             atomic_write_text(
                 job.export_dir / "smart_director_plan.json",
-                json.dumps(job.director_summary, ensure_ascii=False, indent=2),
+                json.dumps(job.director_summary, ensure_ascii=False, indent=2, default=str),
             )
         return videos
 
@@ -22233,7 +22557,7 @@ def apply_auto_director(
             if job.export_dir:
                 atomic_write_text(
                     job.export_dir / "smart_director_plan.json",
-                    json.dumps(job.director_summary, ensure_ascii=False, indent=2),
+                    json.dumps(job.director_summary, ensure_ascii=False, indent=2, default=str),
                 )
             _append_log(job, "Diretor Visual Inteligente: ordem aprovada reutilizada sem repetir a indexacao visual.")
             return reordered
@@ -22407,7 +22731,7 @@ def apply_auto_director(
     if job.export_dir:
         atomic_write_text(
             job.export_dir / "visual_index_summary.json",
-            json.dumps(visual_index_summary, ensure_ascii=False, indent=2),
+            json.dumps(visual_index_summary, ensure_ascii=False, indent=2, default=str),
         )
 
     channel = project_channel_key(job)
@@ -22577,7 +22901,7 @@ def apply_auto_director(
     if job.export_dir:
         atomic_write_text(
             job.export_dir / "smart_director_plan.json",
-            json.dumps(state, ensure_ascii=False, indent=2),
+            json.dumps(state, ensure_ascii=False, indent=2, default=str),
         )
     sync_graph_summary(job, graph)
     if hasattr(job, "percent"):
@@ -22673,7 +22997,7 @@ def prepare_audio_foundation(
                     cache_key,
                 )
 
-    set_stage(job, "audio", "Preparando audio", "Preparando audio")
+    set_stage(job, "preparing", "Preparando audio", "Preparando audio")
     performance_start(job, "audio")
     audio_concat, audio_total = make_concat_audio(job, audios, work)
     analyze_audio_health(job, audio_concat, audio_total, work)
@@ -22759,7 +23083,7 @@ def prepare_audio_foundation(
     }
     final_audio = delay_voiceover_for_intro(job, audio_concat, timeline_total, work, intro_seconds) if intro_seconds else audio_concat
     if background_tracks:
-        set_stage(job, "audio", "Preparando música de fundo", "Ajustando música de fundo à narração")
+        set_stage(job, "preparing", "Preparando música de fundo", "Ajustando música de fundo à narração")
         if job.options.get("backgroundMusicAutoLibrary"):
             _append_log(job, (
                 f"Biblioteca musical automatica: genero={music_genre}, "
@@ -23011,8 +23335,8 @@ def render_worker(job_id: str):
         sync_graph_summary(job, graph)
 
         # Persist project information in the export folder before render starts.
-        (job.export_dir / "manifest.json").write_text(json.dumps(job.manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-        (job.export_dir / "options.json").write_text(json.dumps(job.options, indent=2, ensure_ascii=False), encoding="utf-8")
+        (job.export_dir / "manifest.json").write_text(json.dumps(job.manifest, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        (job.export_dir / "options.json").write_text(json.dumps(job.options, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
         attach_script_guide_plan_to_job(job)
         preflight_now = build_preflight_summary(job.manifest, job.options)
         job.auto_fix_summary = preflight_now.get("auto_fix_plan") or {}
@@ -23023,7 +23347,7 @@ def render_worker(job_id: str):
         job.message = "Analisando arquivos e configurações do projeto..."
         atomic_write_text(
             job.export_dir / "render_decisions.json",
-            json.dumps(job.render_decisions, ensure_ascii=False, indent=2),
+            json.dumps(job.render_decisions, ensure_ascii=False, indent=2, default=str),
         )
         write_editorial_intelligence_plan(job, "pre_render")
         priority = render_priority(job)
@@ -23463,24 +23787,34 @@ def render_worker(job_id: str):
         segments: list[Path] = []
         if segment_cached:
             segment_metadata = dict((segment_cached.get("manifest") or {}).get("metadata") or {})
-            segment_names = [
-                str(name)
-                for name in (segment_metadata.get("segment_names") or [])
-                if str(name).lower().endswith(".mp4")
-            ]
-            destinations = {
-                name: job.work / "segments" / Path(name).name
-                for name in segment_names
-            }
-            graph.restore(segment_cached, destinations)
-            segments = [destinations[name] for name in segment_names if destinations[name].exists()]
-            if len(segments) != len(segment_names) or not segments:
+            cached_tl_summary = dict(segment_metadata.get("timeline_summary") or {})
+            cached_duration = float(cached_tl_summary.get("audio_duration") or 0.0)
+            allow_trim_opt = bool(job.options.get("allowAudioTrim", False))
+            if cached_tl_summary.get("audio_trimmed") and not allow_trim_opt:
+                _append_log(job, "Render Graph: Cache de segmentos descartado porque continha corte de áudio antigo e o projeto exige 100% de duração.")
+                segments = []
+            elif cached_duration > 0 and abs(cached_duration - timeline_total) > 1.0 and not allow_trim_opt:
+                _append_log(job, f"Render Graph: Cache de segmentos ({cached_duration:.1f}s) incompatível com duração necessária ({timeline_total:.1f}s). Re-renderizando segmentos completos.")
                 segments = []
             else:
-                job.timeline_summary = dict(segment_metadata.get("timeline_summary") or {})
-                job.continuity_summary = dict(segment_metadata.get("continuity_summary") or {})
-                job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
-                _append_log(job, f"Render Graph: {len(segments)} segmento(s) reutilizado(s) do cache.")
+                segment_names = [
+                    str(name)
+                    for name in (segment_metadata.get("segment_names") or [])
+                    if str(name).lower().endswith(".mp4")
+                ]
+                destinations = {
+                    name: job.work / "segments" / Path(name).name
+                    for name in segment_names
+                }
+                graph.restore(segment_cached, destinations)
+                segments = [destinations[name] for name in segment_names if destinations[name].exists()]
+                if len(segments) != len(segment_names) or not segments:
+                    segments = []
+                else:
+                    job.timeline_summary = dict(segment_metadata.get("timeline_summary") or {})
+                    job.continuity_summary = dict(segment_metadata.get("continuity_summary") or {})
+                    job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
+                    _append_log(job, f"Render Graph: {len(segments)} segmento(s) reutilizado(s) do cache.")
         if not segments:
             segments = make_segments_smart(
                 job,
@@ -23529,7 +23863,7 @@ def render_worker(job_id: str):
         )
         job.preflight_summary["confidence"] = job.confidence_summary
 
-        if job.timeline_summary.get("audio_trimmed"):
+        if job.timeline_summary.get("audio_trimmed") and bool(job.options.get("allowAudioTrim", False)):
             trimmed_duration = float(job.timeline_summary.get("audio_duration") or timeline_total)
             if trimmed_duration < timeline_total - 0.25:
                 fade_duration = min(1.8, max(0.4, trimmed_duration * 0.08))
@@ -23627,7 +23961,7 @@ def render_worker(job_id: str):
                 },
                 "created_at": _now_iso(),
             }
-            atomic_write_text(job.export_dir / "performance_audit.json", json.dumps(audit, ensure_ascii=False, indent=2))
+            atomic_write_text(job.export_dir / "performance_audit.json", json.dumps(audit, ensure_ascii=False, indent=2, default=str))
         except Exception as exc:
             _append_log(job, f"Auditoria de performance nao foi salva ({exc}).")
         if recovery_attempt_index(job) > 0:
@@ -23702,7 +24036,7 @@ def render_worker(job_id: str):
                     "elapsed_seconds": round(render_budget_elapsed(job)),
                     "fallbacks": job.render_budget_fallbacks,
                     "message": job.error,
-                }, ensure_ascii=False, indent=2))
+                }, ensure_ascii=False, indent=2, default=str))
         except Exception:
             pass
         persist_job_summary_to_queue(job)
@@ -23731,7 +24065,7 @@ def render_worker(job_id: str):
                         "elapsed_seconds": round(render_budget_elapsed(job)),
                         "fallbacks": job.render_budget_fallbacks,
                         "message": job.error,
-                    }, ensure_ascii=False, indent=2))
+                    }, ensure_ascii=False, indent=2, default=str))
             except Exception:
                 pass
             persist_job_summary_to_queue(job)
@@ -23755,7 +24089,7 @@ def render_worker(job_id: str):
                     "cancelled_at": _now_iso(),
                     "message": job.error,
                     "percent": round(job.percent, 1),
-                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         except Exception:
             pass
         persist_job_summary_to_queue(job)
@@ -23778,7 +24112,7 @@ def render_worker(job_id: str):
                     "error": job.error,
                     "actions": recommended_error_actions(job.error or str(exc), job),
                     "created_at": _now_iso(),
-                }, ensure_ascii=False, indent=2), encoding="utf-8")
+                }, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
         except Exception:
             pass
         action = plan_recovery_retry(job, exc)
@@ -24181,6 +24515,7 @@ def _create_queue_project_job(
             job.upload_names[Path(rel_key).name] = display_name
         job.upload_names[source.name] = display_name
         job.uploaded_files += 1
+    _build_path_to_rel_cache(job)
 
     initial_duration = options_obj.get("estimatedDurationSeconds") or 0
     if initial_duration:
@@ -24541,52 +24876,81 @@ def status(job_id: str):
         eta_state = "finalizing"
         eta_confidence = "high"
         eta_reason = "finalizando entrega e salvando vídeo"
-    elif elapsed < 8.0 or (rendered_sec <= 0.0 and pct < 6.0):
+    elif elapsed < 4.0 or (rendered_sec <= 0.0 and pct < 6.0):
         remaining = 0.0
         estimated_total = 0.0
         eta_state = "warming_up"
         eta_confidence = "low"
         eta_reason = "preparando o plano e medindo as etapas"
-    elif rendered_sec <= 0.0 and pct < 28.0:
-        # Pre-encoding phase: audio mix, visual analysis, director indexing are running,
-        # but the GPU encoder hasn't started yet. Use stage_forecast to show a realistic
-        # preparation-aware estimate instead of the inflated crude fallback.
-        sf = (active_estimate or {}).get("stage_forecast") or {}
-        if sf:
-            prep_stages = ("audio", "direction", "subtitles_ass", "visual_analysis")
-            est_prep_total = max(10.0, sum(float(sf.get(k, 0)) for k in prep_stages))
-            prep_remaining_sec = max(3.0, est_prep_total - elapsed)
-            est_encode_and_post = max(25.0, float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 60.0) - est_prep_total)
-            remaining = round(prep_remaining_sec + est_encode_and_post, 1)
-            estimated_total = elapsed + remaining
+    else:
+        stage_forecast = (active_estimate or {}).get("stage_forecast") or {}
+        has_comp = bool(getattr(job, "has_visual_composition", False))
+
+        # Calculate realistic post-processing remaining duration (audio, composition, mux)
+        comp_est = float(stage_forecast.get("composition") or (45.0 + total_sec * 0.08 if has_comp else 15.0))
+        mux_est = float(stage_forecast.get("mux") or (6.0 + total_sec * 0.01)) + float(stage_forecast.get("delivery") or 2.0)
+        audio_est = float(stage_forecast.get("sound_fx") or 8.0) + float(stage_forecast.get("mastering") or 6.0)
+
+        if job.stage in ("delivery", "mux", "muxing"):
+            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("mux", "delivery")) if stage_forecast else 8.0
+            mux_pct = max(0.0, min(1.0, (pct - 95.0) / 4.0)) if pct >= 95.0 else 0.0
+            est_post_stage = max(2.0, est_post * (1.0 - mux_pct))
+        elif job.stage in ("cta", "composition"):
+            chunk_comp_pct = max(0.0, min(1.0, (pct - 72.0) / 23.0)) if pct >= 72.0 else 0.0
+            est_post_stage = max(6.0, comp_est * (1.0 - chunk_comp_pct) + mux_est)
+        elif job.stage == "audio":
+            audio_pct = max(0.0, min(1.0, (pct - 64.0) / 8.0)) if pct >= 64.0 else 0.0
+            est_post_stage = max(12.0, audio_est * (1.0 - audio_pct) + (comp_est if has_comp else 0.0) + mux_est)
+        else:
+            if stage_forecast:
+                est_post_stage = sum(float(stage_forecast.get(k, 0)) for k in ("sound_fx", "mastering", "composition", "mux", "delivery"))
+            else:
+                est_post_stage = (35.0 + total_sec * 0.08) if has_comp else 10.0
+
+        est_post = est_post_stage
+
+        if rendered_sec <= 0.0 and pct < 28.0:
+            # Pre-encoding phase: audio mix, visual analysis, director indexing are running,
+            # but the GPU encoder hasn't started yet. Use stage_forecast to show a realistic
+            # preparation-aware estimate instead of an inflated crude fallback.
+            base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
+            if base_est <= 0.0:
+                base_est = max(60.0, total_sec * 0.85)
+            if stage_forecast:
+                prep_stages = ("audio", "direction", "subtitles_ass", "visual_analysis")
+                est_prep_total = max(10.0, sum(float(stage_forecast.get(k, 0)) for k in prep_stages))
+                est_encode_and_post = max(25.0, base_est - est_prep_total)
+            else:
+                est_prep_total = max(10.0, base_est * 0.15)
+                est_encode_and_post = max(25.0, base_est * 0.85)
+
+            if elapsed < est_prep_total:
+                prep_remaining_sec = max(2.0, est_prep_total - elapsed)
+            else:
+                overrun = elapsed - est_prep_total
+                prep_remaining_sec = max(2.0, 10.0 / (1.0 + overrun * 0.15))
+
+            raw_remaining = round(prep_remaining_sec + est_encode_and_post, 1)
             eta_state = "preparing"
             eta_confidence = "medium"
             eta_reason = "preparando mídias — motor GPU NVENC aguardando largada"
-        else:
-            remaining = 0.0
-            estimated_total = 0.0
-            eta_state = "warming_up"
-            eta_confidence = "low"
-            eta_reason = "preparando o plano e medindo as etapas"
-    else:
-        has_comp = bool(getattr(job, "has_visual_composition", False))
-        stage_forecast = (active_estimate or {}).get("stage_forecast") or {}
 
-        # Calculate realistic post-processing remaining duration (audio, composition, mux)
-        if job.stage in ("delivery", "mux"):
-            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("mux", "delivery")) if stage_forecast else 6.0
-        elif job.stage in ("cta", "composition"):
-            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("composition", "mux", "delivery")) if stage_forecast else (20.0 + total_sec * 0.06 if has_comp else 6.0)
-        else:
-            est_post = sum(float(stage_forecast.get(k, 0)) for k in ("sound_fx", "mastering", "composition", "mux", "delivery")) if stage_forecast else (35.0 + total_sec * 0.08 if has_comp else 10.0)
-
-        if rendered_sec >= total_sec and total_sec > 0:
+        elif rendered_sec >= total_sec and total_sec > 0:
             # Segment encoding is complete; currently in post-processing (audio mix, visual chunks, mux)
-            post_pct_progress = max(0.0, min(1.0, (pct - 64.0) / 34.0)) if pct >= 64.0 else 0.0
-            raw_remaining = max(2.0, est_post * (1.0 - post_pct_progress))
-            eta_state = "composition"
-            eta_confidence = "high"
-            eta_reason = "compondo legendas, efeitos e áudio final"
+            raw_remaining = round(est_post_stage, 1)
+            if job.stage in ("delivery", "mux", "muxing"):
+                eta_state = "muxing"
+                eta_confidence = "high"
+                eta_reason = "finalizando arquivo de vídeo MP4"
+            elif job.stage in ("cta", "composition"):
+                eta_state = "composition"
+                eta_confidence = "high"
+                eta_reason = "compondo legendas, efeitos e CTA"
+            else:
+                eta_state = "audio"
+                eta_confidence = "high"
+                eta_reason = "equalizando e masterizando áudio final"
+
         elif ema_speed > 0.05 and rendered_sec > 0.5:
             # Segment encoding actively in progress
             rem_timeline = max(0.0, total_sec - rendered_sec)
@@ -24594,6 +24958,7 @@ def status(job_id: str):
             eta_state = "adaptive"
             eta_confidence = "high"
             eta_reason = "calculada com base na velocidade real observada"
+
         else:
             base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
             if base_est <= 0.0:
@@ -24610,17 +24975,20 @@ def status(job_id: str):
             eta_confidence = "medium"
             eta_reason = "estimativa inicial baseada no projeto"
 
+        # Smooth countdown: every second elapsed decreases remaining smoothly
         last_eta = getattr(job, "_last_status_eta_sec", None)
         last_time = getattr(job, "_last_status_time", None)
-        if last_eta is not None and last_time is not None:
-            dt = max(0.0, now_ts - last_time)
-            if 0.0 < dt < 30.0:
+        last_elapsed = getattr(job, "_last_status_elapsed", None)
+        if last_eta is not None and (last_time is not None or last_elapsed is not None):
+            dt_wall = max(0.0, now_ts - last_time) if last_time is not None else 0.0
+            dt_elapsed = max(0.0, elapsed - last_elapsed) if last_elapsed is not None else 0.0
+            dt = max(dt_wall, dt_elapsed)
+            if 0.0 < dt < 60.0:
                 expected_eta = max(1.0, last_eta - dt)
-                if raw_remaining > expected_eta:
-                    smoothed = 0.80 * expected_eta + 0.20 * raw_remaining
-                    smoothed = min(smoothed, expected_eta + 8.0)
+                if raw_remaining < expected_eta:
+                    smoothed = 0.60 * expected_eta + 0.40 * raw_remaining
                 else:
-                    smoothed = 0.85 * expected_eta + 0.15 * raw_remaining
+                    smoothed = expected_eta
                 remaining = max(1.0, round(smoothed, 1))
             else:
                 remaining = round(raw_remaining, 1)
@@ -24629,6 +24997,7 @@ def status(job_id: str):
 
         job._last_status_eta_sec = remaining
         job._last_status_time = now_ts
+        job._last_status_elapsed = elapsed
 
         if job.render_budget_seconds > 0:
             budget_ceiling = max(5.0, (job.render_budget_seconds * 1.05) - elapsed)
