@@ -3398,6 +3398,35 @@ def _reset_queue_project_runtime(project: dict[str, Any]) -> None:
     project["updatedAt"] = _now_iso()
 
 
+def _auto_assign_project_cta(project: dict[str, Any]) -> str:
+    """Escolhe o CTA automaticamente pelo idioma do SRT quando o utilizador não escolheu nenhum."""
+    options = project.get("options") if isinstance(project.get("options"), dict) else {}
+    current = canonical_cta_key(options.get("ctaLanguage") or options.get("selectedCta") or "")
+    if current in CTA_LANGUAGES:
+        return current
+    sample = ""
+    for kind in ("texts", "subtitles"):
+        for path in _project_media_paths_by_kind(project, kind, limit=1):
+            try:
+                sample = " ".join(cue.text for cue in parse_srt_file(path))
+            except Exception:
+                sample = ""
+            if sample:
+                break
+        if sample:
+            break
+    language = detect_text_language(sample or str(project.get("name") or ""), default="pt")
+    if language not in CTA_LANGUAGES or not cta_source_path(language).exists():
+        language = "pt" if cta_source_path("pt").exists() else next(
+            (key for key in CTA_LANGUAGES if cta_source_path(key).exists()), "")
+    if language:
+        options["ctaLanguage"] = language
+        options["selectedCta"] = language
+        options["ctaAutoSelected"] = True
+        project["options"] = options
+    return language
+
+
 def _queue_project_missing_requirements(project: dict[str, Any]) -> list[str]:
     media = project.get("media") if isinstance(project.get("media"), dict) else {}
     options = project.get("options") if isinstance(project.get("options"), dict) else {}
@@ -6083,8 +6112,23 @@ def performance_stop(job: Job, key: str) -> float:
     return elapsed
 
 
+# Ordem visível das etapas. Um job nunca recua nesta ordem: a UI marca as etapas
+# anteriores como concluídas, e recuar (ex.: cta -> audio) fazia o marcador saltar.
+STAGE_RANK: dict[str, int] = {
+    "preparing": 0, "analyzing_subtitles": 0, "uploading": 1, "rendering": 2,
+    "audio": 3, "cta": 4, "subtitles": 4, "muxing": 5, "done": 6,
+}
+
+
+def _advance_stage(job: Job, stage: str) -> None:
+    new_rank = STAGE_RANK.get(stage)
+    cur_rank = STAGE_RANK.get(str(getattr(job, "stage", "") or ""))
+    if new_rank is None or cur_rank is None or new_rank >= cur_rank:
+        job.stage = stage
+
+
 def set_stage(job: Job, stage: str, label: str, message: str | None = None, percent: float | None = None):
-    job.stage = stage
+    _advance_stage(job, stage)
     job.stage_label = str(clean_ui_text(label))
     if message is not None:
         job.message = str(clean_ui_text(message))
@@ -12892,6 +12936,28 @@ def infer_language_hint(options: dict[str, Any], files_manifest: list[dict[str, 
     return "pt"
 
 
+_LANGUAGE_STOPWORDS: dict[str, frozenset[str]] = {
+    "pt": frozenset("não uma com para mais como também porque então isso está são foi pelo pela seu sua muito já quando ainda você nós eles elas".split()),
+    "es": frozenset("una con para más como también porque entonces esto está son fue por pero muy ya cuando todavía usted nosotros ellos hay los las del".split()),
+    "en": frozenset("the and with for that this was are from have what which their there when been would could about into just they".split()),
+    "fr": frozenset("les des une avec pour plus comme aussi parce donc est sont été par mais très déjà quand nous vous ils elles dans".split()),
+    "de": frozenset("der die das und mit für nicht ist sind war auch aber sehr wenn noch wir sie ein eine den dem auf".split()),
+    "it": frozenset("il della che con per più come anche perché quindi questo sono stato però molto già quando noi loro gli nel".split()),
+    "pl": frozenset("nie jest się jak ale czy tak już jego jej przez oraz tylko które był była być dla".split()),
+    "ru": frozenset("и в не на что это как но он она они был была мы вы по для".split()),
+}
+
+
+def detect_text_language(text: str, default: str = "pt") -> str:
+    """Deteção local O(n) por stopwords — sem rede, suficiente para escolher o CTA."""
+    words = re.findall(r"[^\W\d_]+", str(text or "").lower())[:4000]
+    if not words:
+        return default
+    scores = {lang: sum(1 for w in words if w in stop) for lang, stop in _LANGUAGE_STOPWORDS.items()}
+    best = max(scores, key=lambda lang: scores[lang])
+    return best if scores[best] >= 3 else default
+
+
 def infer_project_tone(options: dict[str, Any], files_manifest: list[dict[str, Any]] | None = None, cues: list[SubtitleCue] | None = None) -> dict[str, Any]:
     requested = str(options.get("projectTone") or "auto").strip().lower()
     if requested in PROJECT_TONES and requested != "auto":
@@ -14103,7 +14169,7 @@ def prepare_cta_asset(job: Job, key: str) -> dict[str, Any]:
 
     out = cta_cache_path(key, ".mov", source)
     if not out.exists():
-        set_stage(job, "cta", "Preparando CTA", f"Removendo fundo verde do CTA {info['label']}")
+        set_stage(job, "rendering", "Preparando CTA", f"Removendo fundo verde do CTA {info['label']}")
         vf = cta_chroma_filter(key, 1280, 720, "argb")
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
@@ -15112,7 +15178,7 @@ def mix_cta_audio(job: Job, base_audio: Path, cta: dict[str, Any], times: list[f
         "-ac", "2", "-ar", "48000",
         out.name,
     ]
-    set_stage(job, "cta", "Mixando audio CTA", "Mantendo som do CTA junto da narracao")
+    set_stage(job, "audio", "Mixando audio CTA", "Mantendo som do CTA junto da narracao")
     has_comp = getattr(job, "has_visual_composition", False)
     cta_base = 61.0 if has_comp else 92.5
     cta_span = 1.0 if has_comp else 1.0
@@ -16435,6 +16501,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
             detail="O AUTO aceita apenas projetos vazios. Ocupados: " + ", ".join(str(item) for item in occupied),
         )
     expected: dict[str, dict[str, Any]] = {}
+    skipped: list[dict[str, str]] = []
     for raw in files:
         slot = re.sub(r"[^a-zA-Z0-9_-]", "", str(raw.get("slot") or ""))
         project_id = str(raw.get("projectId") or "").strip()
@@ -16446,6 +16513,11 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         if suffix in {".ds_store", ".thumbs", ".ini", ".db"} or Path(rel_key).name.startswith("._"):
             continue
         if not _automator_kind_allowed(kind, suffix):
+            # Pastas de mídia costumam trazer SVG/GIF/ICO/PSD soltos: ignorá-los em vez
+            # de abortar o lote inteiro. Narração/SRT/roteiro inválidos continuam fatais.
+            if kind in ("video", "image"):
+                skipped.append({"slot": slot, "rel": rel_key, "projectId": project_id})
+                continue
             raise HTTPException(status_code=400, detail=f"Tipo não suportado no AUTO: {rel_key} ({kind})")
         expected[slot] = {
             "slot": slot,
@@ -16476,6 +16548,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         "status": "uploading",
         "rows": json.loads(json.dumps(rows, ensure_ascii=False, default=str)),
         "expected": expected,
+        "skipped": {item["slot"] for item in skipped},
         "uploads": {},
         "folder": folder,
         "result": None,
@@ -16494,6 +16567,8 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         "status": "uploading",
         "expectedFiles": len(expected),
         "projects": len(project_ids),
+        "skippedSlots": [item["slot"] for item in skipped],
+        "skippedFiles": [item["rel"] for item in skipped],
     }
 
 
@@ -16514,6 +16589,12 @@ def upload_automator_session_file(
             raise HTTPException(status_code=409, detail="A sessão AUTO não aceita novos uploads neste estado.")
     expected = (session.get("expected") or {}).get(slot)
     if not expected:
+        if slot in (session.get("skipped") or set()):
+            try:
+                file.file.close()
+            except Exception:
+                pass
+            return {"ok": True, "slot": slot, "skipped": True}
         raise HTTPException(status_code=400, detail="Arquivo não pertence ao plano AUTO.")
     suffix = Path(file.filename or expected.get("name") or "").suffix.lower()
     if not _automator_kind_allowed(str(expected.get("kind") or ""), suffix):
@@ -16724,11 +16805,13 @@ def commit_automator_session(session_id: str):
             raise HTTPException(status_code=404, detail="Sessão AUTO expirada ou inexistente.")
         if session.get("status") == "committed":
             return session.get("result") or {"ok": True, "alreadyCommitted": True}
+        owns_commit = False
         if session.get("status") == "committing":
             # Se já está confirmando, espera alguns instantes para responder com o resultado
             # evitando falhar com 409 em caso de retry por reconexão da rede.
             pass
         else:
+            owns_commit = True
             expected = dict(session.get("expected") or {})
             uploads = dict(session.get("uploads") or {})
             missing_slots = [slot for slot in expected if slot not in uploads]
@@ -16736,14 +16819,19 @@ def commit_automator_session(session_id: str):
                 raise HTTPException(status_code=409, detail=f"Faltam {len(missing_slots)} arquivo(s) antes de confirmar.")
             session["status"] = "committing"
 
-    # Caso outro thread já esteja efetuando o commit desta sessão
-    t_wait_start = time.time()
-    while session.get("status") == "committing" and time.time() - t_wait_start < 40:
-        with AUTOMATOR_SESSION_LOCK:
-            cur_status = session.get("status")
-            if cur_status == "committed":
-                return session.get("result") or {"ok": True, "alreadyCommitted": True}
-        time.sleep(0.35)
+    # Só um pedido de retry espera pelo commit em curso; o dono do commit (que acabou de
+    # marcar "committing") segue direto — antes esperava por si próprio durante 40 s.
+    if not owns_commit:
+        t_wait_start = time.time()
+        while time.time() - t_wait_start < 40:
+            with AUTOMATOR_SESSION_LOCK:
+                cur_status = session.get("status")
+                if cur_status == "committed":
+                    return session.get("result") or {"ok": True, "alreadyCommitted": True}
+                if cur_status != "committing":
+                    break
+            time.sleep(0.35)
+        raise HTTPException(status_code=409, detail="A confirmação AUTO anterior ainda não terminou ou falhou. Tente novamente.")
 
     created_paths: list[Path] = []
     index_backups: dict[str, dict[str, Any]] = {}
@@ -18919,11 +19007,14 @@ def build_video_filter(
     if reused and effective_zoom == "off":
         effective_zoom = "light"
     if effective_zoom != "off":
-        if (idx % 2) == 0:
-            zexpr = "min(1.000+0.00012*on,1.052)" if reused else "min(1.000+0.00010*on,1.045)"
-        else:
-            zexpr = "max(1.052-0.00012*on,1.000)" if reused else "max(1.045-0.00010*on,1.000)"
-        vf += f",zoompan=z='{zexpr}':x='(iw/2-(iw/zoom/2))':y='(ih/2-(ih/zoom/2))':d=1:s={w}x{h}:fps=30"
+        # Enquadramento ampliado estático em vez de zoompan d=1: o zoompan arredonda o
+        # recorte para inteiros a cada frame e fazia o clipe tremer (jitter 0,47 px medido).
+        # O clipe já tem movimento próprio; o zoom fixo disfarça a repetição sem jitter
+        # e com o mesmo custo de render.
+        zoom_factor = 1.052 if reused else 1.045
+        zw = int(round(w * zoom_factor / 2.0)) * 2
+        zh = int(round(h * zoom_factor / 2.0)) * 2
+        vf += f",scale={zw}:{zh}:flags=bicubic,crop={w}:{h}"
     if abs(setpts_factor - 1.0) > 0.01:
         vf += f",setpts={setpts_factor:.8f}*PTS"
     vf += f",trim=duration={target_duration:.4f},settb=AVTB,setpts=PTS-STARTPTS"
@@ -18952,6 +19043,109 @@ def build_video_filter(
     return vf
 
 
+def image_motion_spec(
+    w: int,
+    h: int,
+    target_duration: float,
+    motion: str,
+    image_path: Path | str | None = None,
+    style_profile: dict[str, Any] | None = None,
+    is_outro: bool = False,
+    filmic_grade: str = "",
+    focal_point: tuple[float, float] | None = None,
+    hflip: bool = False,
+    clean_roi: tuple[float, float, float, float] | None = None,
+    safe_framing: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Parâmetros de movimento partilhados pelo warp sub-pixel e pelo fallback zoompan."""
+    frames = max(2, int(round(max(0.1, target_duration) * 30)))
+    if not focal_point or not safe_framing:
+        meta = probe_image_smart_metadata(image_path)
+        fx, fy = focal_point if focal_point else (meta["safe_fx"], meta["safe_fy"])
+        safe_framing = safe_framing or meta
+    else:
+        fx, fy = focal_point
+
+    roi = None
+    if clean_roi and len(clean_roi) == 4:
+        rx0, ry0, rx1, ry1 = clean_roi
+        rw = max(0.1, rx1 - rx0)
+        rh = max(0.1, ry1 - ry0)
+        roi = (float(rx0), float(ry0), float(rw), float(rh))
+        fx = max(0.0, min(1.0, (fx - rx0) / rw))
+        fy = max(0.0, min(1.0, (fy - ry0) / rh))
+    if hflip:
+        fx = max(0.0, min(1.0, 1.0 - fx))
+
+    # Limites estritos de enquadramento seguro para proteger cabeças, rostos e textos
+    safe_fx = max(0.20, min(0.80, fx))
+    safe_fy = max(0.18, min(0.55, fy)) if safe_framing.get("has_face") else max(0.22, min(0.68, fy))
+
+    m = str(motion or "").lower()
+    pan_x0 = pan_x1 = safe_fx
+    if m in {"slow_zoom_out", "zoom_out"}:
+        kind = "zoom_out"
+    elif m in {"subtle_pan_right", "pan_right"}:
+        kind = "pan"
+        pan_x0, pan_x1 = max(0.08, safe_fx - 0.18), min(0.92, safe_fx + 0.18)
+    elif m in {"subtle_pan_left", "pan_left"}:
+        kind = "pan"
+        pan_x0, pan_x1 = min(0.92, safe_fx + 0.18), max(0.08, safe_fx - 0.18)
+    else:
+        kind = "zoom_in"
+
+    style_filter, _style_label = image_motion_graphics_filter(style_profile)
+    filmic_chain = f",{filmic_grade}" if filmic_grade else ""
+    # Micro-fade cinematográfico apenas no encerramento (sem dip-to-black entre cortes normais)
+    fade_filters = ""
+    if is_outro:
+        fade_dur = min(0.8, max(0.2, target_duration * 0.25))
+        fade_out_st = max(0.0, target_duration - fade_dur)
+        fade_filters = f",fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
+
+    # Caso A/C (proporção compatível) ou Caso B (vertical/quadrada -> fundo Ambient Glass)
+    target_ratio = float(w) / float(max(1, h))
+    img_w, img_h = (w, h)
+    if image_path and Path(str(image_path)).exists():
+        img_w, img_h = probe_image_dimensions(image_path)
+    if roi:
+        img_w = max(1.0, img_w * roi[2])
+        img_h = max(1.0, img_h * roi[3])
+    ratio_diff = (float(img_w) / float(max(1, img_h))) / max(0.01, target_ratio)
+
+    return {
+        "frames": frames,
+        "duration": float(target_duration),
+        "kind": kind,
+        "safe_fx": safe_fx,
+        "safe_fy": safe_fy,
+        "pan_x0": pan_x0,
+        "pan_x1": pan_x1,
+        "roi": roi,
+        "hflip": bool(hflip),
+        "needs_blur": ratio_diff < 0.85 or ratio_diff > 1.28,
+        "post_chain": (
+            f"trim=duration={target_duration:.4f}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
+            "setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709"
+        ),
+    }
+
+
+IMAGE_MOTION_ZMAX = 1.06
+
+
+def image_motion_state(spec: dict[str, Any], frame_no: int) -> tuple[float, float, float]:
+    """(zoom, fração x, fração y) do frame: curva smoothstep 3t^2-2t^3 contínua, em float."""
+    t = min(1.0, max(0.0, frame_no / float(spec["frames"])))
+    ease = 3.0 * t * t - 2.0 * t * t * t
+    kind = spec["kind"]
+    if kind == "zoom_out":
+        return max(1.055 - 0.050 * ease, 1.0), spec["safe_fx"], spec["safe_fy"]
+    if kind == "pan":
+        return 1.060, spec["pan_x0"] + (spec["pan_x1"] - spec["pan_x0"]) * ease, spec["safe_fy"]
+    return min(1.0 + 0.050 * ease, 1.055), spec["safe_fx"], spec["safe_fy"]
+
+
 def build_image_filter_complex(
     w: int,
     h: int,
@@ -18965,116 +19159,212 @@ def build_image_filter_complex(
     hflip: bool = False,
     clean_roi: tuple[float, float, float, float] | None = None,
     safe_framing: dict[str, Any] | None = None,
+    spec: dict[str, Any] | None = None,
 ) -> str:
-    frames = max(2, int(round(max(0.1, target_duration) * 30)))
-    # Interpolação Smoothstep ultra-estável sem oscilação ou tremor: 3t^2 - 2t^3
-    norm_on = f"(on/{frames})"
-    smooth = f"(3*pow({norm_on},2)-2*pow({norm_on},3))"
-
-    if not focal_point or not safe_framing:
-        meta = probe_image_smart_metadata(image_path)
-        fx, fy = focal_point if focal_point else (meta["safe_fx"], meta["safe_fy"])
-        safe_framing = safe_framing or meta
-    else:
-        fx, fy = focal_point
-
-    crop_filter = ""
-    if clean_roi and len(clean_roi) == 4:
-        rx0, ry0, rx1, ry1 = clean_roi
-        rw = max(0.1, rx1 - rx0)
-        rh = max(0.1, ry1 - ry0)
-        crop_filter = f"crop=iw*{rw:.3f}:ih*{rh:.3f}:iw*{rx0:.3f}:ih*{ry0:.3f},"
-        fx = max(0.0, min(1.0, (fx - rx0) / rw))
-        fy = max(0.0, min(1.0, (fy - ry0) / rh))
-
-    if hflip:
-        fx = max(0.0, min(1.0, 1.0 - fx))
-
-    # Limites estritos de enquadramento seguro para proteger cabeças, rostos e textos
-    safe_fx = max(0.20, min(0.80, fx))
-    safe_fy = max(0.18, min(0.55, fy)) if safe_framing.get("has_face") else max(0.22, min(0.68, fy))
-
-    m = str(motion or "").lower()
-    if m in {"slow_zoom_out", "zoom_out"}:
-        # Slow zoom out suave e cinematográfico: 1.055 -> 1.000
+    """Fallback FFmpeg (zoompan 2x). O caminho principal é render_image_segment_subpixel."""
+    spec = spec or image_motion_spec(
+        w, h, target_duration, motion, image_path, style_profile, is_outro, filmic_grade,
+        focal_point, hflip, clean_roi, safe_framing,
+    )
+    frames = spec["frames"]
+    smooth = f"(3*pow((on/{frames}),2)-2*pow((on/{frames}),3))"
+    safe_fx, safe_fy = spec["safe_fx"], spec["safe_fy"]
+    if spec["kind"] == "zoom_out":
         z_expr = f"max(1.055-0.050*{smooth},1.000)"
         x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
-    elif m in {"subtle_pan_right", "pan_right"}:
-        # Slow pan right linear e suave com amortecimento nos extremos
+    elif spec["kind"] == "pan":
+        x0, x1 = spec["pan_x0"], spec["pan_x1"]
         z_expr = "1.060"
-        x0 = max(0.08, safe_fx - 0.18)
-        x1 = min(0.92, safe_fx + 0.18)
         x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
-        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
-    elif m in {"subtle_pan_left", "pan_left"}:
-        # Slow pan left linear e suave com amortecimento nos extremos
-        z_expr = "1.060"
-        x0 = min(0.92, safe_fx + 0.18)
-        x1 = max(0.08, safe_fx - 0.18)
-        x_expr = f"(iw-iw/zoom)*({x0:.3f}+({x1 - x0:.3f})*{smooth})"
-        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
     else:
-        # Padrão: Slow zoom in cinematográfico suave e estável: 1.000 -> 1.055
         z_expr = f"min(1.000+0.050*{smooth},1.055)"
         x_expr = f"(iw-iw/zoom)*{safe_fx:.3f}"
-        y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
-
-    style_filter, _style_label = image_motion_graphics_filter(style_profile)
-    filmic_chain = f",{filmic_grade}" if filmic_grade else ""
-
-    # Micro-fade cinematográfico apenas no encerramento (sem dip-to-black entre cortes normais)
-    if is_outro:
-        fade_dur = min(0.8, max(0.2, target_duration * 0.25))
-        fade_out_st = max(0.0, target_duration - fade_dur)
-        fade_filters = f",fade=t=out:st={fade_out_st:.2f}:d={fade_dur:.2f}"
-    else:
-        fade_filters = ""
-
-    # Preservação visual limpa: NÃO degradar imagem original com unsharp/contraste artificial
-    img_norm = ""
-
-    # Detectar se a proporção da imagem é compatível com o projeto (Caso A/C) ou precisa de background blur (Caso B)
-    target_ratio = float(w) / float(max(1, h))
-    img_w, img_h = (w, h)
-    if image_path and Path(str(image_path)).exists():
-        img_w, img_h = probe_image_dimensions(image_path)
-    if clean_roi and len(clean_roi) == 4:
-        rx0, ry0, rx1, ry1 = clean_roi
-        img_w = max(1.0, img_w * (rx1 - rx0))
-        img_h = max(1.0, img_h * (ry1 - ry0))
-    img_ratio = float(img_w) / float(max(1, img_h))
-    ratio_diff = img_ratio / max(0.01, target_ratio)
-
-    needs_blur = ratio_diff < 0.85 or ratio_diff > 1.28
-
-    # Supersample 2x: zoompan opera a resolução dobrada e depois reduz com lanczos.
-    # Isso elimina completamente o jitter/tremor subpixel causado pelo truncamento
-    # inteiro de x/y dentro do zoompan. A 2x resolução, cada salto de 1px no zoompan
-    # vira 0.5px subpixel no output final, interpolado suavemente pelo lanczos.
-    ss_w = int(round(w * 2) // 2 * 2)   # 3840 para 1920
-    ss_h = int(round(h * 2) // 2 * 2)   # 2160 para 1080
-    flip_prefix = "hflip," if hflip else ""
-
-    if not needs_blur:
+    y_expr = f"(ih-ih/zoom)*{safe_fy:.3f}"
+    crop_filter = ""
+    if spec["roi"]:
+        rx0, ry0, rw, rh = spec["roi"]
+        crop_filter = f"crop=iw*{rw:.3f}:ih*{rh:.3f}:iw*{rx0:.3f}:ih*{ry0:.3f},"
+    ss_w = int(round(w * 2) // 2 * 2)
+    ss_h = int(round(h * 2) // 2 * 2)
+    flip_prefix = "hflip," if spec["hflip"] else ""
+    post = spec["post_chain"]
+    if not spec["needs_blur"]:
         return (
             f"[0:v]{crop_filter}{flip_prefix}scale={ss_w}:{ss_h}:force_original_aspect_ratio=increase,crop={ss_w}:{ss_h}:(in_w-out_w)*{safe_fx:.3f}:(in_h-out_h)*{safe_fy:.3f},setsar=1,format=yuv420p,"
             f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={ss_w}x{ss_h}:fps=30,"
-            f"scale={w}:{h}:flags=lanczos,"
-            f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
-            f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
+            f"scale={w}:{h}:flags=lanczos,{post}[vout]"
         )
-
-    # Caso B: Proporção incompatível (vertical 9:16, quadrada 1:1, 4:3) -> Ambient Glass blur hiper-otimizado
     return (
         f"[0:v]{crop_filter}{flip_prefix}scale=384:216:force_original_aspect_ratio=increase,crop=384:216,boxblur=8:2,scale={w}:{h},eq=brightness=-0.08:saturation=0.85,setsar=1[bg];"
         f"[0:v]{crop_filter}{flip_prefix}scale={w}:{h}:force_original_aspect_ratio=decrease,setsar=1[fg];"
         f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,scale={ss_w}:{ss_h},format=yuv420p,"
         f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d={frames}:s={ss_w}x{ss_h}:fps=30,"
-        f"scale={w}:{h}:flags=lanczos,"
-        f"trim=duration={target_duration:.4f}{img_norm}{style_filter}{filmic_chain}{fade_filters},settb=AVTB,setpts=PTS-STARTPTS,"
-        f"setparams=range=tv:color_primaries=bt709:color_trc=bt709:colorspace=bt709[vout]"
+        f"scale={w}:{h}:flags=lanczos,{post}[vout]"
     )
+
+
+def _load_image_bgr(path: Path | str) -> Any:
+    """Lê a imagem com OpenCV (caminhos Unicode OK). Alpha é composto sobre preto como no FFmpeg."""
+    import cv2
+    import numpy as np
+    data = np.fromfile(str(path), dtype=np.uint8)
+    if data.size == 0:
+        return None
+    suffix = Path(str(path)).suffix.lower()
+    flags = cv2.IMREAD_UNCHANGED if suffix in {".png", ".webp", ".tif", ".tiff"} else cv2.IMREAD_COLOR
+    img = cv2.imdecode(data, flags)
+    if img is None:
+        return None
+    if img.dtype != np.uint8:
+        if img.dtype == np.uint16:
+            img = (img / 257.0).astype(np.uint8)
+        else:
+            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    if img.ndim == 2:
+        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    elif img.shape[2] == 4:
+        alpha = img[:, :, 3:4].astype(np.float32) / 255.0
+        img = (img[:, :, :3].astype(np.float32) * alpha).astype(np.uint8)
+    return np.ascontiguousarray(img)
+
+
+def _build_image_motion_base(spec: dict[str, Any], img: Any, bw: int, bh: int) -> Any:
+    """Imagem base (bw x bh, proporção do projeto) sobre a qual a câmara sub-pixel se move."""
+    import cv2
+    import numpy as np
+    if spec["roi"]:
+        ih, iw = img.shape[:2]
+        rx0, ry0, rw, rh = spec["roi"]
+        x0, y0 = int(round(iw * rx0)), int(round(ih * ry0))
+        img = img[y0:y0 + max(2, int(round(ih * rh))), x0:x0 + max(2, int(round(iw * rw)))]
+    if spec["hflip"]:
+        img = cv2.flip(img, 1)
+    ih, iw = img.shape[:2]
+
+    def cover(src: Any, tw: int, th: int, fx: float, fy: float) -> Any:
+        sh, sw = src.shape[:2]
+        scale = max(tw / sw, th / sh)
+        nw, nh = max(tw, int(np.ceil(sw * scale))), max(th, int(np.ceil(sh * scale)))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC
+        resized = cv2.resize(src, (nw, nh), interpolation=interp)
+        ox, oy = int((nw - tw) * fx), int((nh - th) * fy)
+        return resized[oy:oy + th, ox:ox + tw]
+
+    if not spec["needs_blur"]:
+        return np.ascontiguousarray(cover(img, bw, bh, spec["safe_fx"], spec["safe_fy"]))
+    # Ambient Glass: fundo desfocado (boxblur=8:2 ~ 2 passagens de caixa 17x17) + imagem inteira centrada
+    bg = cover(img, 384, 216, 0.5, 0.5)
+    bg = cv2.blur(cv2.blur(bg, (17, 17)), (17, 17))
+    bg = cv2.resize(bg, (bw, bh), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+    gray = bg.mean(axis=2, keepdims=True)
+    bg = np.clip(gray + 0.85 * (bg - gray) - 0.08 * 255.0, 0, 255).astype(np.uint8)
+    scale = min(bw / iw, bh / ih)
+    fw, fh = max(2, int(round(iw * scale))), max(2, int(round(ih * scale)))
+    fg = cv2.resize(img, (fw, fh), interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_CUBIC)
+    ox, oy = (bw - fw) // 2, (bh - fh) // 2
+    bg[oy:oy + fh, ox:ox + fw] = fg
+    return np.ascontiguousarray(bg)
+
+
+def render_image_segment_subpixel(
+    job: Job,
+    spec: dict[str, Any],
+    image_path: Path,
+    w: int,
+    h: int,
+    pre_input_args: list[str],
+    encoder_args: list[str],
+    out: Path,
+    cwd: Path | None = None,
+) -> bool:
+    """Ken Burns com interpolação sub-pixel real (sem jitter).
+
+    O zoompan do FFmpeg arredonda x/y e o tamanho do recorte para inteiros a cada
+    frame, o que produz micro-saltos (tremido) mesmo com supersampling. Aqui a
+    câmara é uma matriz afim em float aplicada com cv2.warpAffine diretamente nos
+    planos YUV 4:2:0 (Y bicúbico, U/V bilinear) e enviada por pipe ao mesmo encoder
+    (NVENC). Medido: jitter 0,31 px -> 0,045 px e ~3x mais rápido que zoompan 2x.
+    Devolve False quando a imagem não pode ser lida (o chamador usa o fallback).
+    """
+    try:
+        import cv2
+        import numpy as np
+    except Exception:
+        return False
+    if w % 2 or h % 2 or not FFMPEG:
+        return False
+    img = _load_image_bgr(image_path)
+    if img is None:
+        return False
+    bw = (int(np.ceil(w * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
+    bh = (int(np.ceil(h * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
+    base = _build_image_motion_base(spec, img, bw, bh)
+    del img
+    i420 = cv2.cvtColor(base, cv2.COLOR_BGR2YUV_I420)
+    del base
+    plane_y = i420[:bh]
+    plane_u = i420[bh:bh + bh // 4].reshape(bh // 2, bw // 2)
+    plane_v = i420[bh + bh // 4:].reshape(bh // 2, bw // 2)
+
+    frame = np.empty(w * h * 3 // 2, dtype=np.uint8)
+    out_y = frame[:w * h].reshape(h, w)
+    out_u = frame[w * h:w * h * 5 // 4].reshape(h // 2, w // 2)
+    out_v = frame[w * h * 5 // 4:].reshape(h // 2, w // 2)
+    luma_flags = cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP
+    chroma_flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
+
+    cmd = [
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *pre_input_args,
+        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}", "-r", "30", "-i", "-",
+        "-vf", spec["post_chain"],
+        "-an", "-r", "30",
+        *encoder_args,
+        "-pix_fmt", "yuv420p",
+        str(out),
+    ]
+    if job.cancel_requested:
+        raise RenderCancelled("Render cancelado pelo usuario.")
+    err_log = (Path(cwd) if cwd else out.parent) / f"{out.stem}.subpixel.log"
+    code = -1
+    with err_log.open("wb") as err_handle:
+        proc = _popen_hidden(
+            cmd, cwd=cwd, priority=render_priority(job),
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_handle,
+        )
+        _register_process(job, proc)
+        try:
+            for frame_no in range(int(spec["frames"])):
+                if job.cancel_requested:
+                    _terminate_process(proc)
+                    raise RenderCancelled("Render cancelado pelo usuario.")
+                zoom, fx, fy = image_motion_state(spec, frame_no)
+                win_w, win_h = bw / zoom, bh / zoom
+                x, y = (bw - win_w) * fx, (bh - win_h) * fy
+                sx, sy = win_w / w, win_h / h
+                # Mapeamento centro-de-pixel: destino (u,v) -> origem (x + sx*(u+.5) - .5, ...)
+                m_luma = np.array([[sx, 0.0, x + 0.5 * sx - 0.5], [0.0, sy, y + 0.5 * sy - 0.5]])
+                m_chroma = np.array([[sx, 0.0, x / 2.0 + 0.5 * sx - 0.5], [0.0, sy, y / 2.0 + 0.5 * sy - 0.5]])
+                cv2.warpAffine(plane_y, m_luma, (w, h), dst=out_y, flags=luma_flags, borderMode=cv2.BORDER_REPLICATE)
+                cv2.warpAffine(plane_u, m_chroma, (w // 2, h // 2), dst=out_u, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
+                cv2.warpAffine(plane_v, m_chroma, (w // 2, h // 2), dst=out_v, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
+                proc.stdin.write(frame.data)
+            proc.stdin.close()
+            code = proc.wait(timeout=max(60.0, spec["duration"] * 6.0))
+        except (BrokenPipeError, OSError, subprocess.TimeoutExpired) as exc:
+            _terminate_process(proc)
+            if job.cancel_requested:
+                raise RenderCancelled("Render cancelado pelo usuario.")
+            raise RuntimeError(f"FFmpeg encerrou o pipe do Ken Burns sub-pixel: {exc}") from exc
+        finally:
+            _unregister_process(job, proc)
+    if code != 0 or not out.exists() or out.stat().st_size <= 0:
+        detail = err_log.read_text(encoding="utf-8", errors="ignore")[-400:] if err_log.exists() else ""
+        raise RuntimeError(f"FFmpeg falhou no Ken Burns sub-pixel (código {code}): {detail}")
+    try:
+        err_log.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return True
 
 
 def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> bool:
@@ -20545,7 +20835,7 @@ def make_segments_smart(
             if ratio_diff < 0.85 or ratio_diff > 1.28:
                 summary["ambient_glass_segments"] = summary.get("ambient_glass_segments", 0) + 1
             style_profile = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
-            filter_complex = build_image_filter_complex(
+            motion_spec = image_motion_spec(
                 w,
                 h,
                 plan.target_duration,
@@ -20559,7 +20849,22 @@ def make_segments_smart(
                 hflip=getattr(plan, "hflip", False),
                 clean_roi=getattr(plan, "clean_roi", None),
             )
-            cmd = [
+            subpixel_done = False
+            try:
+                subpixel_done = render_image_segment_subpixel(
+                    job, motion_spec, img_source, w, h, segment_thread_args, encoder_args, out, cwd=work,
+                )
+            except RenderCancelled:
+                raise
+            except Exception as exc:
+                _append_log(job, f"Ken Burns sub-pixel indisponível para {display_name} ({exc}); usando zoompan.")
+                out.unlink(missing_ok=True)
+            if subpixel_done:
+                with render_state_lock:
+                    summary["subpixel_image_segments"] = summary.get("subpixel_image_segments", 0) + 1
+            else:
+                filter_complex = build_image_filter_complex(w, h, plan.target_duration, "", spec=motion_spec)
+            cmd = None if subpixel_done else [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
                 "-i", str(img_source),
                 "-filter_complex", filter_complex,
@@ -20625,7 +20930,8 @@ def make_segments_smart(
                 str(out),
             ]
         try:
-            run_cmd(job, cmd, cwd=work, quiet_success=True)
+            if cmd:
+                run_cmd(job, cmd, cwd=work, quiet_success=True)
         except RenderCancelled:
             raise
         except RuntimeError as exc:
@@ -20663,7 +20969,9 @@ def make_segments_smart(
             job.rendered_timeline_duration = completed_planned_duration
             job.total_timeline_duration = max(1.0, audio_total)
             has_comp = getattr(job, "has_visual_composition", False)
-            max_seg_pct = 85.0 if has_comp else 94.0
+            # Banda dos segmentos: 5-60% com composição (áudio 61-65, CTA/legendas 65-95,
+            # mux 96-99). 85% deixava a barra parada durante áudio + CTA.
+            max_seg_pct = 60.0 if has_comp else 92.0
             seg_base = 5.0
             seg_span = max_seg_pct - seg_base
             seg_progress = min(1.0, completed_planned_duration / max(1.0, audio_total))
@@ -20672,7 +20980,7 @@ def make_segments_smart(
             completed_count = getattr(job, "_completed_segments_count", 0) + 1
             job._completed_segments_count = completed_count
             total_plans = len(plans)
-            job.stage = "rendering"
+            _advance_stage(job, "rendering")
             job.stage_label = f"Renderizando clipes ({completed_count}/{total_plans})"
             job.message = f"Clipes: {completed_count}/{total_plans} ({int(job.percent)}%) | {completed_planned_duration:.1f}s/{audio_total:.1f}s da timeline"
         return out, actual
@@ -23159,7 +23467,7 @@ def master_final_audio(job: Job, audio_file: Path, work: Path) -> Path:
         mastered = work / "audio_mastered.wav"
         fast_filter = f"volume=0.96,alimiter=limit={limiter_value(master_profile)}:attack=5:release=50:asc=1"
         has_comp = getattr(job, "has_visual_composition", False)
-        comp_master_pct = 88.5 if has_comp else 95.0
+        comp_master_pct = 64.0 if has_comp else 95.0
         job.percent = max(job.percent, comp_master_pct)
         run_cmd(
             job,
@@ -24559,6 +24867,11 @@ class BackendQueueManager:
                 "current_job_id": self.current_job_id,
                 "current_index": self.current_index,
                 "total_count": len(self.queue_items),
+                "queue_project_ids": [item["id"] for item in self.queue_items],
+                "next_project_id": (
+                    self.queue_items[self.current_index]["id"]
+                    if 0 <= self.current_index < len(self.queue_items) else None
+                ),
                 "completed_count": self.completed_count,
                 "failed_count": self.failed_count,
                 "batch_id": self.batch_id,
@@ -24597,6 +24910,9 @@ class BackendQueueManager:
                 else:
                     for p in QUEUE_PROJECTS:
                         st = str(p.get("status") or "")
+                        # Projetos sem nenhuma mídia não são "falhas": ficam fora do lote.
+                        if _automator_project_is_empty(p):
+                            continue
                         if retry_failed:
                             if st == "error":
                                 target_projects.append(p)
@@ -24678,6 +24994,12 @@ class BackendQueueManager:
             try:
                 with QUEUE_LOCK:
                     p = _find_queue_project(project_id)
+                    if p:
+                        _auto_assign_project_cta(p)
+                        snap_opts = (item.get("snapshot") or {}).get("options") if isinstance(item.get("snapshot"), dict) else None
+                        if isinstance(snap_opts, dict) and not (snap_opts.get("ctaLanguage") or snap_opts.get("selectedCta")):
+                            snap_opts["ctaLanguage"] = snap_opts["selectedCta"] = (p.get("options") or {}).get("ctaLanguage", "")
+                        _save_queue_projects(QUEUE_PROJECTS)
                     missing = _queue_project_missing_requirements(p) if p else ["projeto ausente"]
                 if missing:
                     raise RuntimeError(f"Projeto incompleto: faltam {', '.join(missing)}")

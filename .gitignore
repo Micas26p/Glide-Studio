@@ -45,3 +45,4 @@ desktop.ini
 
 # Local simulation / test scratch outputs
 work/
+.claude/

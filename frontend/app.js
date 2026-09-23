@@ -2251,10 +2251,14 @@ function kindOfFile(file, forcedKind = null){
   if(forcedKind === 'subtitle') return subtitleExt.includes(ext(file)) ? 'subtitle' : null;
   if(forcedKind === 'caption_srt') return subtitleExt.includes(ext(file)) ? 'caption_srt' : null;
   if(forcedKind === 'script_guide') return scriptGuideExt.includes(ext(file)) ? 'script_guide' : null;
-  if(type.startsWith('video/')) return 'video';
-  if(type.startsWith('image/') && ext(file) !== 'gif') return 'image';
-  if(type.startsWith('audio/')) return 'audio';
+  // A extensão é a fonte de verdade: o MIME do navegador classifica SVG, ICO,
+  // GIF, WMV etc. como image/* ou video/*, mas o backend/FFmpeg não os aceita.
   const e = ext(file);
+  if(!hasFileExt(file)){
+    if(type.startsWith('video/')) return 'video';
+    if(type.startsWith('image/') && !type.includes('svg') && !type.includes('gif')) return 'image';
+    if(type.startsWith('audio/')) return 'audio';
+  }
   if(videoOnlyExt.includes(e)) return 'video';
   if(imageExt.includes(e)) return 'image';
   if(audioOnlyExt.includes(e)) return 'audio';
@@ -2263,17 +2267,23 @@ function kindOfFile(file, forcedKind = null){
   if(e === 'webm') return 'video';
   return null;
 }
+function hasFileExt(file){
+  const name = String(file?.name || '');
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && dot < name.length - 1;
+}
 function looksLikeVideo(file){
-  const type = (file.type || '').toLowerCase();
-  return type.startsWith('video/') || videoExt.includes(ext(file));
+  if(hasFileExt(file)) return videoExt.includes(ext(file));
+  return (file.type || '').toLowerCase().startsWith('video/');
 }
 function looksLikeAudio(file){
-  const type = (file.type || '').toLowerCase();
-  return type.startsWith('audio/') || audioContainerExt.includes(ext(file));
+  if(hasFileExt(file)) return audioContainerExt.includes(ext(file));
+  return (file.type || '').toLowerCase().startsWith('audio/');
 }
 function looksLikeImage(file){
+  if(hasFileExt(file)) return imageExt.includes(ext(file));
   const type = (file.type || '').toLowerCase();
-  return (type.startsWith('image/') && ext(file) !== 'gif') || imageExt.includes(ext(file));
+  return type.startsWith('image/') && !type.includes('svg') && !type.includes('gif');
 }
 function isVideo(file){ return kindOfFile(file) === 'video'; }
 function isImage(file){ return kindOfFile(file) === 'image'; }
@@ -6414,6 +6424,9 @@ function clearAutomatorList(type){
   else if(type === 'script') state.automator.scripts = [];
   else if(type === 'folder') state.automator.folders = [];
   updateAutomatorPreview();
+  const a = state.automator;
+  // Limpeza explícita de todas as listas também descarta o rascunho gravado.
+  if(!a.srts?.length && !a.audios?.length && !a.scripts?.length && !a.folders?.length) clearAutomatorDraftNow();
 }
 
 function automatorItemLabel(item, type){
@@ -6685,30 +6698,61 @@ function scheduleSaveAutomatorDraft(){
   automatorDraftTimer = setTimeout(saveAutomatorDraftNow, 400);
 }
 
+// O structured clone do IndexedDB descarta propriedades "expando" de File
+// (_autoRelativePath, _autoDuration...), por isso guardamos esses metadados à parte.
+const AUTOMATOR_FILE_META_KEYS = ['_autoRelativePath', '_autoDuration', '_autoImportedAt', '_autoSelectionIndex', '_autoUsageIndex'];
+function automatorDraftFileEntry(file){
+  const meta = {};
+  AUTOMATOR_FILE_META_KEYS.forEach(key => { if(file?.[key] !== undefined) meta[key] = file[key]; });
+  if(!meta._autoRelativePath && file?.webkitRelativePath) meta._autoRelativePath = file.webkitRelativePath;
+  return {file, meta};
+}
+function automatorFileFromDraftEntry(entry){
+  // Compatível com rascunhos antigos, que guardavam o File diretamente.
+  const file = entry instanceof Blob ? entry : entry?.file;
+  if(!(file instanceof Blob)) return null;
+  Object.entries(entry?.meta || {}).forEach(([key, value]) => {
+    try{ file[key] = value; }catch(_){}
+  });
+  return file;
+}
+
 async function saveAutomatorDraftNow(){
   try{
-    const db = await openAutomatorDraftDB();
-    if(!db) return;
     const srts = state.automator?.srts || [];
     const audios = state.automator?.audios || [];
     const scripts = state.automator?.scripts || [];
     const folders = state.automator?.folders || [];
-    if(!srts.length && !audios.length && !scripts.length && !folders.length){
-      await clearAutomatorDraftNow();
-      return;
-    }
+    // Estado vazio NÃO apaga o rascunho: abrir o modal (lista vazia) apagava a sessão
+    // anterior antes de o utilizador poder clicar em "Restaurar". Só descartar/confirmar limpa.
+    if(!srts.length && !audios.length && !scripts.length && !folders.length) return;
+    const db = await openAutomatorDraftDB();
+    if(!db) return;
     const draft = {
       id: 'current_draft',
+      version: 2,
       savedAt: Date.now(),
       sort: state.automator?.sort || {},
-      srts,
-      audios,
-      scripts,
-      folders,
+      srts: srts.map(automatorDraftFileEntry),
+      audios: audios.map(automatorDraftFileEntry),
+      scripts: scripts.map(automatorDraftFileEntry),
+      folders: folders.map(folder => {
+        const {files, ...rest} = folder;
+        return {...rest, files: (files || []).map(automatorDraftFileEntry)};
+      }),
     };
-    const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
-    tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
-  }catch(_){}
+    await new Promise(resolve => {
+      const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
+      tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = tx.onabort = () => {
+        console.warn('Rascunho AUTO não foi gravado:', tx.error);
+        resolve(false);
+      };
+    });
+  }catch(err){
+    console.warn('Rascunho AUTO não foi gravado:', err);
+  }
 }
 
 async function loadAutomatorDraft(){
@@ -6764,18 +6808,25 @@ async function checkAndPromptAutomatorDraft(){
 }
 
 async function restoreAutomatorDraft(){
+  const draftBanner = document.getElementById('automatorDraftBanner');
   const draft = await loadAutomatorDraft();
-  if(!draft) return;
+  if(!draft){
+    if(draftBanner) draftBanner.hidden = true;
+    if(dockSummary) dockSummary.textContent = 'AUTO: o rascunho anterior já não está disponível.';
+    return;
+  }
+  const restoreList = list => (list || []).map(automatorFileFromDraftEntry).filter(Boolean);
   state.automator = {
-    srts: draft.srts || [],
-    audios: draft.audios || [],
-    scripts: draft.scripts || [],
-    folders: draft.folders || [],
+    srts: restoreList(draft.srts),
+    audios: restoreList(draft.audios),
+    scripts: restoreList(draft.scripts),
+    folders: (draft.folders || []).map(folder => ({...folder, files: restoreList(folder.files)})).filter(folder => folder.files.length),
     sort: draft.sort || {},
   };
-  const draftBanner = document.getElementById('automatorDraftBanner');
   if(draftBanner) draftBanner.hidden = true;
   updateAutomatorPreview();
+  const total = state.automator.srts.length + state.automator.audios.length + state.automator.scripts.length + state.automator.folders.length;
+  if(dockSummary) dockSummary.textContent = `AUTO: rascunho restaurado (${total} item(ns)).`;
 }
 
 async function discardAutomatorDraft(){
@@ -6943,9 +6994,10 @@ async function applyAutomatorDistribution(options = {}){
   const rowsToApply = onlyHealthy ? plan.rows.filter(r => automatorRowHealth(r).ready) : plan.rows;
   if(plan.warnings.length || !rowsToApply.length){
     updateAutomatorPreview();
-    return;
+    return false;
   }
-  if(state.automatorApplying) return;
+  if(state.automatorApplying) return false;
+  let succeeded = false;
   state.automatorApplying = true;
   state.automatorAbortController = new AbortController();
   if(automatorConfirmBtn){
@@ -7046,6 +7098,17 @@ async function applyAutomatorDistribution(options = {}){
     if(!createResponse.ok) throw new Error(await createResponse.text());
     const created = await createResponse.json();
     state.automatorSessionId = created.sessionId;
+    const skippedSlots = new Set(Array.isArray(created.skippedSlots) ? created.skippedSlots : []);
+    const skippedByProject = new Map();
+    if(skippedSlots.size){
+      for(let i = fileSpecs.length - 1; i >= 0; i--){
+        if(!skippedSlots.has(fileSpecs[i].slot)) continue;
+        const pid = fileSpecs[i].projectId;
+        skippedByProject.set(pid, (skippedByProject.get(pid) || 0) + 1);
+        fileSpecs.splice(i, 1);
+      }
+      progress(3, `${skippedSlots.size} ficheiro(s) incompatível(is) ignorado(s) (ex.: ${(created.skippedFiles || [])[0] || ''}).`, true);
+    }
 
     const uploadedSlots = new Set();
     const MAX_FILES = fileSpecs.length > 200 ? 25 : (fileSpecs.length > 50 ? 16 : 8);
@@ -7194,7 +7257,7 @@ async function applyAutomatorDistribution(options = {}){
       const expectedVisuals = (row.folder?.files || []).filter(f => {
         const k = kindOfFile(f, 'video');
         return k === 'video' || k === 'image';
-      }).length;
+      }).length - (skippedByProject.get(row.project.id) || 0);
       if(!counts || (expectedVisuals > 0 && counts.videos !== expectedVisuals) || counts.audios !== expectedAudios || counts.texts !== expectedTexts){
         throw new Error(`Verificação falhou em ${row.project.name}: contagens incompletas.`);
       }
@@ -7211,6 +7274,7 @@ async function applyAutomatorDistribution(options = {}){
     if(draftBanner) draftBanner.hidden = true;
     closeAutomator();
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
+    succeeded = rowsToApply.map(row => row.project.id);
   }catch(error){
     const cancelled = error?.name === 'AbortError';
     const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
@@ -7234,6 +7298,7 @@ finally{
       automatorConfirmAndRenderBtn.disabled = Boolean(automatorPlan().warnings.length);
     }
   }
+  return succeeded;
 }
 
 async function clearProject(){
@@ -7684,7 +7749,8 @@ async function monitorBackendQueue(){
             const currentIndex = bq.current_index || 1;
             const totalCount = bq.total_count || state.projects.length;
             const activePid = bq.current_project_id;
-            const curProject = state.projects.find(p => p.id === activePid) || { name: `Projeto ${currentIndex}` };
+            const indexedPid = activePid || (Array.isArray(bq.queue_project_ids) ? bq.queue_project_ids[currentIndex - 1] : null);
+            const curProject = state.projects.find(p => p.id === indexedPid) || { name: `Projeto ${currentIndex}` };
 
             if(activePid){
               activateRenderingProject(activePid);
@@ -7695,6 +7761,7 @@ async function monitorBackendQueue(){
               lastRenderJobId = bq.current_job_id;
               state.activeJobId = bq.current_job_id;
               state.renderMaxPercent = 0;
+              state.renderMaxStageIdx = -1;
             }
 
             // Retrieve live job progress (from bq.current_job or /api/status/{job_id})
@@ -7718,7 +7785,14 @@ async function monitorBackendQueue(){
               renderTitle.textContent = `Renderizando: ${curProject.name}`;
               renderMsg.textContent = cleanDisplayText(j.message || 'Processando render acelerado...');
 
-              const currentStage = j.stage || 'rendering';
+              // O marcador de etapa nunca recua dentro do mesmo job (a barra também é monótona).
+              const STAGE_SEQ = ['preparing','uploading','rendering','audio','cta','muxing','done'];
+              let currentStage = normalizeRenderStage(j.stage || 'rendering');
+              const stageIdx = STAGE_SEQ.indexOf(currentStage);
+              if(stageIdx >= 0){
+                if(stageIdx < (state.renderMaxStageIdx ?? -1)) currentStage = STAGE_SEQ[state.renderMaxStageIdx];
+                else state.renderMaxStageIdx = stageIdx;
+              }
               setRenderStage(currentStage);
 
               const renderLabel = renderPriorityLabel(j.options?.renderPriority || curProject.options?.renderPriority);
@@ -7742,7 +7816,24 @@ async function monitorBackendQueue(){
                 state.outputDir = j.output_dir;
               }
             }else{
-              // Preparing stage before render worker spawns
+              // Sem job ativo: ou o projeto atual ainda vai arrancar, ou acabou de terminar
+              // e o próximo ainda não começou. Neste último caso não voltar a "3% Preparando".
+              const processed = (bq.completed_count || 0) + (bq.failed_count || 0);
+              const justFinished = processed >= currentIndex;
+              if(justFinished){
+                const nextName = currentIndex < totalCount
+                  ? (state.projects.find(p => p.id === bq.next_project_id)?.name || `Projeto ${currentIndex + 1}`)
+                  : '';
+                setRenderStage('done');
+                progressBar.style.width = '100%';
+                eyePercent.textContent = '100%';
+                renderTitle.textContent = `Concluído: ${curProject.name}`;
+                renderMsg.textContent = nextName ? `A seguir: ${nextName}` : 'A finalizar a fila...';
+                await new Promise(r => setTimeout(r, pollInterval));
+                continue;
+              }
+              state.renderMaxPercent = 0;
+              state.renderMaxStageIdx = -1;
               setRenderStage('preparing');
               progressBar.style.width = '3%';
               eyePercent.textContent = '3%';
@@ -7787,6 +7878,14 @@ async function monitorBackendQueue(){
                 state._etaLiveTimer = null;
               }
               state._currentEta = null;
+              if(!(bq.completed_count || 0) && !(bq.failed_count || 0)){
+                // Nada foi processado: não anunciar "Fila concluída" sobre uma fila vazia.
+                modal.classList.remove('show');
+                modal.setAttribute('aria-hidden', 'true');
+                dockSummary.textContent = 'Nenhum projeto com mídia completa foi renderizado.';
+                showToast('Fila vazia', 'Nenhum projeto elegível foi processado.', 'info');
+                break;
+              }
               setRenderStage('queue_done');
               setRenderProgress(100);
               renderTitle.textContent = 'Fila concluída';
@@ -9139,8 +9238,10 @@ if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
 });
 if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.addEventListener('click', async () => {
   try{
-    await applyAutomatorDistribution({onlyHealthy: true});
-    renderQueue().catch(err => {
+    // Só renderiza depois de a distribuição ter sido confirmada e verificada no servidor.
+    const appliedIds = await applyAutomatorDistribution({onlyHealthy: true});
+    if(!appliedIds) return;
+    renderQueue({projectIds: appliedIds}).catch(err => {
       if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
     });
   }catch(error){
@@ -9149,8 +9250,9 @@ if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.addEventListener('clic
 });
 if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.addEventListener('click', async () => {
   try{
-    await applyAutomatorDistribution();
-    renderQueue().catch(err => {
+    const appliedIds = await applyAutomatorDistribution();
+    if(!appliedIds) return;
+    renderQueue({projectIds: appliedIds}).catch(err => {
       if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
     });
   }catch(error){
