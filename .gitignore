@@ -51,3 +51,9 @@ dist_new/
 build_tmp/
 build_new.log
 .glide_build_marker
+
+# Dados do utilizador: nunca versionar (um git stash/reset substituía a fila)
+queue_projects.json
+queue_projects.json.bak
+queue_projects.*.json
+RESTAURAR_*.json

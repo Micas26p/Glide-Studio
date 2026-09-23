@@ -124,29 +124,13 @@ class AutoModeRegressions(unittest.TestCase):
         self.assertGreater(first / 120.0, 0.6)
         self.assertEqual(job.cta_summary["smart_position_preset"], "bottom_left")
 
-    def test_stale_webview_origins_are_removed_but_active_kept(self):
-        import json
-        from unittest.mock import patch
+    def test_desktop_never_deletes_webview_storage_out_of_band(self):
+        # Apagar pastas de IndexedDB por fora do Chromium dessincroniza o QuotaManager
+        # e levou à perda do rascunho AUTO. Nenhuma rotina do app pode voltar a fazê-lo.
+        source = (Path(__file__).resolve().parents[1] / "desktop_app.py").read_text(encoding="utf-8")
+        self.assertNotIn("cleanup_stale_webview_origins", source)
         import desktop_app
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            idb = root / "webview_profile" / "EBWebView" / "Default" / "IndexedDB"
-            for port in (49278, 54320, 60853):
-                (idb / f"http_127.0.0.1_{port}.indexeddb.leveldb").mkdir(parents=True)
-                (idb / f"http_127.0.0.1_{port}.indexeddb.blob").mkdir(parents=True)
-            (root / "desktop_port.json").write_text(json.dumps({"port": 54320}), encoding="utf-8")
-            with patch.object(desktop_app, "default_data_root", return_value=root):
-                desktop_app.cleanup_stale_webview_origins()
-            left = sorted(item.name for item in idb.iterdir())
-            self.assertEqual(left, ["http_127.0.0.1_54320.indexeddb.blob", "http_127.0.0.1_54320.indexeddb.leveldb"])
-
-    def test_stale_origin_cleanup_is_noop_without_known_port(self):
-        from unittest.mock import patch
-        import desktop_app
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            with patch.object(desktop_app, "default_data_root", return_value=root):
-                desktop_app.cleanup_stale_webview_origins()  # não pode falhar nem apagar nada
+        self.assertFalse({"IndexedDB", "WebStorage", "Local Storage"} & set(desktop_app.WEBVIEW_CACHE_DIR_NAMES))
 
     def test_update_cleanup_runs_once_per_build(self):
         from unittest.mock import patch
