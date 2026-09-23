@@ -6671,11 +6671,17 @@ function applyAutomatorFilesToProject(project, row){
 }
 
 const AUTOMATOR_DB_NAME = 'glide_studio_automator_db';
-const AUTOMATOR_DB_VERSION = 1;
+const AUTOMATOR_DB_VERSION = 2;
 const AUTOMATOR_STORE_NAME = 'automator_drafts';
+// Cada ficheiro é gravado UMA vez nesta store (chave nome|tamanho|data). O rascunho só
+// guarda referências: antes, cada alteração regravava todos os vídeos (GBs) no IndexedDB,
+// o que congelava o WebView (tela preta) e enchia o perfil com cópias.
+const AUTOMATOR_FILES_STORE = 'automator_files';
 
+let automatorDraftDbPromise = null;
 function openAutomatorDraftDB(){
-  return new Promise((resolve) => {
+  if(automatorDraftDbPromise) return automatorDraftDbPromise;
+  automatorDraftDbPromise = new Promise((resolve) => {
     if(!window.indexedDB){
       resolve(null);
       return;
@@ -6686,29 +6692,52 @@ function openAutomatorDraftDB(){
       if(!db.objectStoreNames.contains(AUTOMATOR_STORE_NAME)){
         db.createObjectStore(AUTOMATOR_STORE_NAME, {keyPath: 'id'});
       }
+      if(!db.objectStoreNames.contains(AUTOMATOR_FILES_STORE)){
+        db.createObjectStore(AUTOMATOR_FILES_STORE, {keyPath: 'key'});
+      }
     };
     req.onsuccess = () => resolve(req.result);
+    req.onerror = () => { automatorDraftDbPromise = null; resolve(null); };
+  });
+  return automatorDraftDbPromise;
+}
+
+function idbRequest(req){
+  return new Promise(resolve => {
+    req.onsuccess = () => resolve(req.result);
     req.onerror = () => resolve(null);
+  });
+}
+function idbTxDone(tx){
+  return new Promise(resolve => {
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = tx.onabort = () => {
+      console.warn('Rascunho AUTO não foi gravado:', tx.error);
+      resolve(false);
+    };
   });
 }
 
 let automatorDraftTimer = null;
 function scheduleSaveAutomatorDraft(){
   clearTimeout(automatorDraftTimer);
-  automatorDraftTimer = setTimeout(saveAutomatorDraftNow, 400);
+  automatorDraftTimer = setTimeout(saveAutomatorDraftNow, 600);
 }
 
 // O structured clone do IndexedDB descarta propriedades "expando" de File
 // (_autoRelativePath, _autoDuration...), por isso guardamos esses metadados à parte.
 const AUTOMATOR_FILE_META_KEYS = ['_autoRelativePath', '_autoDuration', '_autoImportedAt', '_autoSelectionIndex', '_autoUsageIndex'];
+function automatorFileKey(file){
+  return [file?.name || '', Number(file?.size || 0), Number(file?.lastModified || 0)].join('|');
+}
 function automatorDraftFileEntry(file){
   const meta = {};
   AUTOMATOR_FILE_META_KEYS.forEach(key => { if(file?.[key] !== undefined) meta[key] = file[key]; });
   if(!meta._autoRelativePath && file?.webkitRelativePath) meta._autoRelativePath = file.webkitRelativePath;
-  return {file, meta};
+  return {key: automatorFileKey(file), meta};
 }
 function automatorFileFromDraftEntry(entry){
-  // Compatível com rascunhos antigos, que guardavam o File diretamente.
+  // Compatível com rascunhos antigos (File direto ou {file, meta}).
   const file = entry instanceof Blob ? entry : entry?.file;
   if(!(file instanceof Blob)) return null;
   Object.entries(entry?.meta || {}).forEach(([key, value]) => {
@@ -6717,7 +6746,24 @@ function automatorFileFromDraftEntry(entry){
   return file;
 }
 
+let automatorDraftSaving = null;
+let automatorDraftDirty = false;
 async function saveAutomatorDraftNow(){
+  // Serializa gravações: se já está a gravar, marca pendente e grava de novo no fim.
+  if(automatorDraftSaving){
+    automatorDraftDirty = true;
+    return automatorDraftSaving;
+  }
+  automatorDraftSaving = (async () => {
+    do{
+      automatorDraftDirty = false;
+      await saveAutomatorDraftOnce();
+    }while(automatorDraftDirty);
+  })().finally(() => { automatorDraftSaving = null; });
+  return automatorDraftSaving;
+}
+
+async function saveAutomatorDraftOnce(){
   try{
     const srts = state.automator?.srts || [];
     const audios = state.automator?.audios || [];
@@ -6728,9 +6774,21 @@ async function saveAutomatorDraftNow(){
     if(!srts.length && !audios.length && !scripts.length && !folders.length) return;
     const db = await openAutomatorDraftDB();
     if(!db) return;
+    const allFiles = [...srts, ...audios, ...scripts, ...folders.flatMap(folder => folder.files || [])];
+    const wanted = new Map(allFiles.filter(file => file instanceof Blob).map(file => [automatorFileKey(file), file]));
+    const keysReq = db.transaction(AUTOMATOR_FILES_STORE, 'readonly').objectStore(AUTOMATOR_FILES_STORE).getAllKeys();
+    const existingKeys = new Set((await idbRequest(keysReq)) || []);
+    // 1) Ficheiros novos: um por transação, para não segurar GBs numa só operação.
+    for(const [key, file] of wanted){
+      if(existingKeys.has(key)) continue;
+      const tx = db.transaction(AUTOMATOR_FILES_STORE, 'readwrite');
+      tx.objectStore(AUTOMATOR_FILES_STORE).put({key, file});
+      if(!await idbTxDone(tx)) return;
+    }
+    // 2) Rascunho leve (só referências + metadados)
     const draft = {
       id: 'current_draft',
-      version: 2,
+      version: 3,
       savedAt: Date.now(),
       sort: state.automator?.sort || {},
       srts: srts.map(automatorDraftFileEntry),
@@ -6741,15 +6799,12 @@ async function saveAutomatorDraftNow(){
         return {...rest, files: (files || []).map(automatorDraftFileEntry)};
       }),
     };
-    await new Promise(resolve => {
-      const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
-      tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = tx.onabort = () => {
-        console.warn('Rascunho AUTO não foi gravado:', tx.error);
-        resolve(false);
-      };
-    });
+    const tx = db.transaction([AUTOMATOR_STORE_NAME, AUTOMATOR_FILES_STORE], 'readwrite');
+    tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
+    // 3) Remove ficheiros que já não fazem parte do rascunho
+    const store = tx.objectStore(AUTOMATOR_FILES_STORE);
+    existingKeys.forEach(key => { if(!wanted.has(key)) store.delete(key); });
+    await idbTxDone(tx);
   }catch(err){
     console.warn('Rascunho AUTO não foi gravado:', err);
   }
@@ -6759,12 +6814,24 @@ async function loadAutomatorDraft(){
   try{
     const db = await openAutomatorDraftDB();
     if(!db) return null;
-    return new Promise((resolve) => {
-      const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readonly');
-      const req = tx.objectStore(AUTOMATOR_STORE_NAME).get('current_draft');
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror = () => resolve(null);
-    });
+    const tx = db.transaction([AUTOMATOR_STORE_NAME, AUTOMATOR_FILES_STORE], 'readonly');
+    const draftReq = tx.objectStore(AUTOMATOR_STORE_NAME).get('current_draft');
+    const draft = await idbRequest(draftReq);
+    if(!draft) return null;
+    // Resolve as referências (formato v3) dentro da mesma transação; formatos antigos passam direto.
+    const filesStore = tx.objectStore(AUTOMATOR_FILES_STORE);
+    const resolveEntry = entry => {
+      if(entry instanceof Blob || entry?.file instanceof Blob || !entry?.key) return Promise.resolve(entry);
+      return idbRequest(filesStore.get(entry.key)).then(record => (record?.file ? {file: record.file, meta: entry.meta || {}} : null));
+    };
+    const resolveList = list => Promise.all((list || []).map(resolveEntry));
+    const [srts, audios, scripts, folders] = await Promise.all([
+      resolveList(draft.srts),
+      resolveList(draft.audios),
+      resolveList(draft.scripts),
+      Promise.all((draft.folders || []).map(folder => resolveList(folder.files).then(files => ({...folder, files})))),
+    ]);
+    return {...draft, srts, audios, scripts, folders};
   }catch(_){
     return null;
   }
@@ -6772,10 +6839,14 @@ async function loadAutomatorDraft(){
 
 async function clearAutomatorDraftNow(){
   try{
+    clearTimeout(automatorDraftTimer);
+    if(automatorDraftSaving) await automatorDraftSaving;
     const db = await openAutomatorDraftDB();
     if(!db) return;
-    const tx = db.transaction(AUTOMATOR_STORE_NAME, 'readwrite');
+    const tx = db.transaction([AUTOMATOR_STORE_NAME, AUTOMATOR_FILES_STORE], 'readwrite');
     tx.objectStore(AUTOMATOR_STORE_NAME).delete('current_draft');
+    tx.objectStore(AUTOMATOR_FILES_STORE).clear();
+    await idbTxDone(tx);
   }catch(_){}
 }
 

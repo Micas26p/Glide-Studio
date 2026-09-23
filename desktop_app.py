@@ -128,6 +128,69 @@ def find_free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+DEFAULT_DESKTOP_PORT = 47851
+
+
+def _port_is_free(port: int) -> bool:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((HOST, int(port)))
+        return True
+    except OSError:
+        return False
+
+
+def _latest_webview_origin_port(root: Path) -> int | None:
+    """Porta da origem WebView usada mais recentemente (onde estão rascunhos/definições)."""
+    idb = root / "webview_profile" / "EBWebView" / "Default" / "IndexedDB"
+    try:
+        entries = [
+            item for item in idb.iterdir()
+            if item.is_dir() and item.name.startswith("http_127.0.0.1_") and item.name.endswith(".indexeddb.leveldb")
+        ]
+    except OSError:
+        return None
+    entries.sort(key=lambda item: item.stat().st_mtime, reverse=True)
+    for item in entries:
+        digits = item.name[len("http_127.0.0.1_"):].split(".", 1)[0]
+        if digits.isdigit():
+            return int(digits)
+    return None
+
+
+def choose_desktop_port() -> int:
+    """Porta estável entre arranques.
+
+    O IndexedDB/localStorage do WebView é por origem (host:porta). Com uma porta
+    aleatória a cada arranque, o rascunho do AUTO e as preferências "desapareciam"
+    e cada sessão criava uma nova cópia dos ficheiros no perfil. Reutiliza a porta
+    guardada; na primeira vez adota a origem mais recente para não perder o rascunho.
+    """
+    root = default_data_root()
+    config = root / "desktop_port.json"
+    candidates: list[int] = []
+    try:
+        saved = int(json.loads(config.read_text(encoding="utf-8")).get("port") or 0)
+        if saved:
+            candidates.append(saved)
+    except Exception:
+        latest = _latest_webview_origin_port(root)
+        if latest:
+            candidates.append(latest)
+    candidates.append(DEFAULT_DESKTOP_PORT)
+    for index, port in enumerate(candidates):
+        if 1024 < port < 65536 and _port_is_free(port):
+            # Só memoriza a porta preferida; um recurso temporário (porta ocupada por
+            # outra instância) não pode substituir a origem onde está o rascunho.
+            if index == 0:
+                try:
+                    config.write_text(json.dumps({"port": port}), encoding="utf-8")
+                except OSError:
+                    pass
+            return port
+    return find_free_port()
+
+
 def wait_for_health(base_url: str, timeout: float = SERVER_READY_TIMEOUT):
     deadline = time.time() + timeout
     last_error: Exception | None = None
@@ -406,7 +469,7 @@ def cleanup_desktop_runtime_data() -> None:
 class DesktopRuntime:
     def __init__(self):
         backend_app = load_backend()
-        self.port = find_free_port()
+        self.port = choose_desktop_port()
         self.base_url = f"http://{HOST}:{self.port}"
         self.server = uvicorn.Server(
             uvicorn.Config(

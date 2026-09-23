@@ -46,3 +46,7 @@ desktop.ini
 # Local simulation / test scratch outputs
 work/
 .claude/
+desktop_port.json
+dist_new/
+build_tmp/
+build_new.log
