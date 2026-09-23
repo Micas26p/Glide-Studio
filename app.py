@@ -14190,6 +14190,68 @@ def prepare_cta_asset(job: Job, key: str) -> dict[str, Any]:
     }
 
 
+CTA_NICHE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "tech": (
+        "tecnologia", "technology", "tecnología", "software", "computador", "computer", "chip", "chips",
+        "bateria", "baterias", "battery", "batería", "inteligência artificial", "inteligencia artificial",
+        "ai", "ia", "robô", "robot", "digital", "internet", "smartphone", "celular", "gpu", "processador",
+        "elétrico", "eletrico", "electric", "eléctrico", "lítio", "litio", "lithium", "engenharia", "engineering",
+    ),
+    "finance": (
+        "dinheiro", "money", "dinero", "investimento", "investment", "inversión", "bolsa", "ações", "acciones",
+        "stocks", "economia", "economy", "economía", "mercado", "market", "bitcoin", "cripto", "crypto",
+        "lucro", "profit", "banco", "bank", "inflação", "inflation", "inflación", "bilhões", "billion", "millones",
+        "empresa", "company", "dólares", "dollars", "preço", "price", "precio",
+    ),
+    "mystery": (
+        "mistério", "misterio", "mystery", "segredo", "secret", "secreto", "desaparec", "disappear", "crime",
+        "assassin", "murder", "estranho", "strange", "extraño", "ninguém sabe", "nobody knows", "nadie sabe",
+        "enigma", "sombrio", "dark", "oscuro", "paranormal", "inexplic", "unexplained",
+    ),
+    "documentary": (
+        "história", "historia", "history", "guerra", "war", "século", "century", "siglo", "império", "empire",
+        "imperio", "antigo", "ancient", "antiguo", "descoberta", "discovery", "descubrimiento", "civilização",
+        "civilization", "documentário", "documentary", "natureza", "nature", "naturaleza", "país", "country",
+    ),
+    "entertainment": (
+        "incrível", "incredible", "increíble", "top", "curiosidades", "curiosities", "engraçado", "funny",
+        "gracioso", "famoso", "famous", "celebridade", "celebrity", "filme", "movie", "película", "jogo", "game",
+        "juego", "viral", "desafio", "challenge", "reto",
+    ),
+}
+
+# Janela de retenção (fração do vídeo), posição e escala do CTA por nicho.
+CTA_NICHE_PROFILES: dict[str, dict[str, Any]] = {
+    "tech": {"window": (0.25, 0.38), "position": "top_right", "scale": 1.0, "label": "tecnologia"},
+    "finance": {"window": (0.28, 0.40), "position": "top_right", "scale": 0.96, "label": "finanças"},
+    "mystery": {"window": (0.25, 0.35), "position": "top_left", "scale": 0.9, "label": "mistério"},
+    "documentary": {"window": (0.30, 0.40), "position": "top_left", "scale": 0.92, "label": "documentário"},
+    "entertainment": {"window": (0.25, 0.33), "position": "top_center", "scale": 1.08, "label": "entretenimento"},
+    "general": {"window": (0.25, 0.40), "position": "top_right", "scale": 1.0, "label": "geral"},
+}
+
+CTA_CLIMAX_MARKERS: tuple[str, ...] = tuple(pattern for pattern, _label in STRONG_MOMENT_PATTERNS) + (
+    "mas ", "porém", "só que", "but ", "pero ", "até que", "until", "hasta que", "e então", "and then",
+    "o que aconteceu", "what happened", "lo que pasó", "a verdade", "the truth", "la verdad",
+)
+
+
+def detect_cta_niche(text: str) -> tuple[str, dict[str, int]]:
+    """Classificação local O(n) do nicho do roteiro por palavras-chave (pt/en/es)."""
+    haystack = f" {heuristic_text(text)[:60000]} "
+    scores: dict[str, int] = {}
+    for niche, keywords in CTA_NICHE_KEYWORDS.items():
+        total = 0
+        for keyword in keywords:
+            token = heuristic_text(keyword)
+            if not token:
+                continue
+            total += haystack.count(f" {token}") if len(token) > 4 else haystack.count(f" {token} ")
+        scores[niche] = total
+    best = max(scores, key=lambda key: scores[key]) if scores else "general"
+    return (best if scores.get(best, 0) >= 2 else "general"), scores
+
+
 def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[float]:
     duration = max(0.5, min(float(cta_duration or 0.5), max(0.5, audio_total)))
     if audio_total < duration + 0.8:
@@ -14201,18 +14263,32 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
     if audio_total >= 210.0 and not has_explicit_moment:
         target_count = requested_max
 
-    cta_moment = str(job.options.get("ctaMoment") or "middle").lower().strip()
+    cta_moment = str(job.options.get("ctaMoment") or "auto").lower().strip()
+    if cta_moment not in {"start", "middle", "end", "auto"}:
+        cta_moment = "auto"
     min_start = 3.0 if audio_total < 60.0 else max(5.0, min(18.0, audio_total * 0.08))
     max_start = max(min_start + 0.1, audio_total - duration - (2.0 if audio_total < 60.0 else 4.0))
 
-    if cta_moment == "start":
+    cues_for_niche = list(job.subtitle_cues or [])
+    niche, niche_scores = detect_cta_niche(
+        " ".join(cue.text for cue in cues_for_niche) + " " + str(job.options.get("queueProjectName") or "")
+    )
+    niche_profile = CTA_NICHE_PROFILES[niche]
+    window_lo, window_hi = niche_profile["window"]
+
+    if cta_moment == "auto":
+        # Gancho de retenção: 25-40% do vídeo, ajustado ao nicho.
+        ideal_target_time = max(min_start, min(max_start, audio_total * (window_lo + window_hi) / 2.0))
+    elif cta_moment == "start":
         ideal_target_time = max(min_start, min(max_start, audio_total * 0.12))
     elif cta_moment == "end":
         ideal_target_time = max(min_start, min(max_start, audio_total * 0.85))
     else:  # middle
         ideal_target_time = max(min_start, min(max_start, audio_total * 0.50))
 
-    user_pos = str(job.options.get("ctaPositionPreset") or "top_right").strip()
+    user_pos = str(job.options.get("ctaPositionPreset") or "auto").strip()
+    if user_pos not in CTA_POSITION_PRESETS:
+        user_pos = niche_profile["position"]
     strong_times = [
         float(item.get("time") or 0.0)
         for item in (job.strong_moments_summary or {}).get("moments", [])
@@ -14262,6 +14338,21 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
         if gap < 0.45:
             continue
         position = float(cue.end) / max(audio_total, 0.1)
+        if cta_moment == "auto":
+            if not (window_lo <= position <= window_hi):
+                continue
+            # Pausa imediatamente antes de uma virada/clímax segura o espectador no CTA.
+            upcoming = " ".join(item.text for item in cues[idx + 1:idx + 4]).lower()
+            before_climax = any(marker in upcoming for marker in CTA_CLIMAX_MARKERS) or any(
+                0.0 < value - float(cue.end) <= 12.0 for value in strong_times
+            )
+            add_candidate(
+                float(cue.end) + min(0.25, gap * 0.35),
+                2.3 + min(1.2, gap * 0.65) + (1.6 if before_climax else 0.0),
+                f"pausa no gancho de retenção ({position * 100:.0f}%)" + ("; antes do clímax" if before_climax else ""),
+                user_pos,
+            )
+            continue
         # Check if pause matches desired moment
         matches_moment = (
             (cta_moment == "start" and position <= 0.35)
@@ -14277,7 +14368,12 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
             )
 
     # Always ensure a direct fallback candidate at ideal user target time
-    add_candidate(ideal_target_time, 3.0, f"momento solicitado pelo usuário ({cta_moment})", user_pos)
+    add_candidate(
+        ideal_target_time,
+        2.6 if cta_moment == "auto" else 3.0,
+        f"gancho de retenção do nicho {niche_profile['label']}" if cta_moment == "auto" else f"momento solicitado pelo usuário ({cta_moment})",
+        user_pos,
+    )
     if target_count >= 2:
         secondary_time = audio_total * 0.82 if cta_moment != "end" else audio_total * 0.35
         add_candidate(max(min_start, min(max_start, secondary_time)), 2.2, "segunda ocorrencia editorial", user_pos)
@@ -14307,9 +14403,13 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
         "requested_occurrences": requested_max,
         "target_occurrences": target_count,
         "candidate_count": len(candidates),
-        "selection_reason": f"CTA posicionado no momento '{cta_moment}' e posicao '{user_pos}'.",
+        "selection_reason": f"CTA posicionado no momento '{cta_moment}' e posicao '{user_pos}' (nicho {niche_profile['label']}).",
         "selected_windows": chosen,
         "avoids_strong_moments": True,
+        "niche": niche,
+        "niche_scores": niche_scores,
+        "niche_scale": float(niche_profile["scale"]),
+        "smart_position_preset": user_pos,
     })
     return [round(float(item.get("start") or 0.0), 3) for item in chosen[:2]]
 
@@ -14317,12 +14417,14 @@ def choose_cta_times(job: Job, audio_total: float, cta_duration: float) -> list[
 def cta_scale_width(job: Job, frame_w: int) -> int:
     ratio = str(job.options.get("ratio") or "16:9")
     scale = 0.68 if ratio == "9:16" else 0.42
+    scale *= clamp_float((job.cta_summary or {}).get("niche_scale"), 1.0, 0.8, 1.15)
     return max(180, int(round(frame_w * scale)))
 
 
 def cta_position_expr(job: Job) -> tuple[str, str, str]:
+    user_preset = str(job.options.get("ctaPositionPreset") or "")
     preset = str(
-        job.options.get("ctaPositionPreset")
+        (user_preset if user_preset in CTA_POSITION_PRESETS else "")
         or (job.cta_summary or {}).get("position_preset")
         or (job.cta_summary or {}).get("smart_position_preset")
         or "top_right"
@@ -21296,6 +21398,8 @@ def concat_segments_and_mux(
             "selection_reason": smart_cta_summary.get("selection_reason"),
             "selected_windows": smart_cta_summary.get("selected_windows") or [],
             "candidate_count": smart_cta_summary.get("candidate_count"),
+            "niche": smart_cta_summary.get("niche"),
+            "niche_scale": smart_cta_summary.get("niche_scale"),
             "max_occurrences": 2,
             "offset_x": clamp_float(job.options.get("ctaOffsetX"), 0.0, -35.0, 35.0),
             "offset_y": clamp_float(job.options.get("ctaOffsetY"), 0.0, -35.0, 35.0),

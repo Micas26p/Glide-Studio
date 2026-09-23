@@ -49,8 +49,8 @@ const state = {
   musicGenre: localStorage.getItem('glide_music_genre') || 'cinematic',
   sidebarCollapsed: localStorage.getItem('glide_sidebar_collapsed') === '1',
   presetMusic: {genres: []},
-  ctaMoment: localStorage.getItem('glide_cta_moment') || 'middle',
-  ctaPositionPreset: localStorage.getItem('glide_cta_position') || 'top_right',
+  ctaMoment: (localStorage.getItem('glide_cta_auto_v1') ? localStorage.getItem('glide_cta_moment') : null) || 'auto',
+  ctaPositionPreset: (localStorage.getItem('glide_cta_auto_v1') ? localStorage.getItem('glide_cta_position') : null) || 'auto',
   ctaOffsetX: Number.isFinite(Number(localStorage.getItem('glide_cta_offset_x'))) ? Number(localStorage.getItem('glide_cta_offset_x')) : 0,
   ctaOffsetY: Number.isFinite(Number(localStorage.getItem('glide_cta_offset_y'))) ? Number(localStorage.getItem('glide_cta_offset_y')) : 0,
   renderMaxPercent: 0,
@@ -1018,8 +1018,8 @@ function captureControlSnapshot(includeSubtitle = true){
     subtitleStyle: includeSubtitle ? currentSubtitleStyle() : null,
     captionStyle: includeSubtitle ? currentCaptionStyle() : null,
     cinematicOpeningPolicy: 'auto_contextual',
-    ctaMoment: ctaMomentSelect?.value || state.ctaMoment || 'middle',
-    ctaPositionPreset: state.ctaPositionPreset || 'top_right',
+    ctaMoment: ctaMomentSelect?.value || state.ctaMoment || 'auto',
+    ctaPositionPreset: state.ctaPositionPreset || 'auto',
     ctaOffsetX: state.ctaOffsetX || 0,
     ctaOffsetY: state.ctaOffsetY || 0,
   };
@@ -1091,9 +1091,9 @@ function applyControlSnapshot(options = {}, {deferDecorations = false} = {}){
   applySubtitleStyleSnapshot(options.textStyle || options.subtitleStyle);
   applyCaptionStyleSnapshot(options.captionStyle);
   applyIntroStyleSnapshot(options.introSubtitleStyle);
-  state.ctaMoment = options.ctaMoment || 'middle';
+  state.ctaMoment = options.ctaMoment || 'auto';
   if(ctaMomentSelect) ctaMomentSelect.value = state.ctaMoment;
-  state.ctaPositionPreset = options.ctaPositionPreset || 'top_right';
+  state.ctaPositionPreset = options.ctaPositionPreset || 'auto';
   state.ctaOffsetX = Number(options.ctaOffsetX || 0);
   state.ctaOffsetY = Number(options.ctaOffsetY || 0);
   if(ctaPositionPreset) ctaPositionPreset.value = state.ctaPositionPreset;
@@ -3605,7 +3605,7 @@ function ctaAnchor(preset){
 }
 
 function updateCtaControlVisuals(){
-  if(ctaMomentSelect) ctaMomentSelect.value = state.ctaMoment || 'middle';
+  if(ctaMomentSelect) ctaMomentSelect.value = state.ctaMoment || 'auto';
   if(ctaPositionPreset) ctaPositionPreset.value = state.ctaPositionPreset;
   if(ctaOffsetX) ctaOffsetX.value = String(state.ctaOffsetX);
   if(ctaOffsetY) ctaOffsetY.value = String(state.ctaOffsetY);
@@ -5422,7 +5422,7 @@ function buildRenderPayload(extraOptions = {}, projectSnapshot = null){
     ctaRequired: true,
     ctaPolicy: 'manual_position',
     ctaTimingPolicy: 'fixed_start_end',
-    ctaMoment: optionValue('ctaMoment', state.ctaMoment || 'middle'),
+    ctaMoment: optionValue('ctaMoment', state.ctaMoment || 'auto'),
     ctaPositionPreset: optionValue('ctaPositionPreset', state.ctaPositionPreset),
     ctaOffsetX: Number(optionValue('ctaOffsetX', state.ctaOffsetX)),
     ctaOffsetY: Number(optionValue('ctaOffsetY', state.ctaOffsetY)),
@@ -8771,16 +8771,18 @@ if(ctaGrid){
 
 if(ctaMomentSelect){
   ctaMomentSelect.addEventListener('change', () => {
-    state.ctaMoment = ctaMomentSelect.value || 'middle';
+    state.ctaMoment = ctaMomentSelect.value || 'auto';
     localStorage.setItem('glide_cta_moment', state.ctaMoment);
+    localStorage.setItem('glide_cta_auto_v1', '1');
     updateCtaPreview();
     captureActiveProject();
   });
 }
 if(ctaPositionPreset){
   ctaPositionPreset.addEventListener('change', () => {
-    state.ctaPositionPreset = ctaPositionPreset.value || 'top_right';
+    state.ctaPositionPreset = ctaPositionPreset.value || 'auto';
     localStorage.setItem('glide_cta_position', state.ctaPositionPreset);
+    localStorage.setItem('glide_cta_auto_v1', '1');
     updateCtaPreview();
     captureActiveProject();
   });

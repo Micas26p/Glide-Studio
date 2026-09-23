@@ -95,6 +95,35 @@ class AutoModeRegressions(unittest.TestCase):
         app.set_stage(job, "error", "e")
         self.assertEqual(job.stage, "error")
 
+    def test_cta_niche_detection(self):
+        self.assertEqual(app.detect_cta_niche("A bateria de lítio e o chip mudaram a tecnologia digital")[0], "tech")
+        self.assertEqual(app.detect_cta_niche("O dinheiro na bolsa e o investimento em bitcoin")[0], "finance")
+        self.assertEqual(app.detect_cta_niche("O mistério do desaparecimento e o segredo sombrio")[0], "mystery")
+        self.assertEqual(app.detect_cta_niche("uma frase qualquer")[0], "general")
+
+    def test_auto_cta_lands_in_retention_window_before_climax(self):
+        texts = ["A bateria de lítio mudou a tecnologia.", "Hoje vamos ver como funciona.", "Cada célula guarda energia digital.",
+                 "O processador controla a carga.", "Mas o problema começou em 2019.", "Ninguém esperava o que aconteceu."] * 5
+        cues, t = [], 0.0
+        for i, text in enumerate(texts):
+            cues.append(app.SubtitleCue(t, t + 2.5, text))
+            t += 2.5 + (0.9 if i % 6 == 3 else 0.1)
+        job = app.Job(id="cta_auto", work=Path(_sandbox.name))
+        job.subtitle_cues, job.options, job.cta_summary, job.strong_moments_summary = cues, {}, {}, {}
+        first = app.choose_cta_times(job, t, 6.0)[0]
+        self.assertGreaterEqual(first / t, 0.24)
+        self.assertLessEqual(first / t, 0.41)
+        self.assertEqual(job.cta_summary["niche"], "tech")
+        self.assertIn("antes do clímax", job.cta_summary["selected_windows"][0]["reason"])
+
+    def test_manual_cta_moment_still_respected(self):
+        cues = [app.SubtitleCue(i * 3.0, i * 3.0 + 2.5, "frase simples") for i in range(40)]
+        job = app.Job(id="cta_end", work=Path(_sandbox.name))
+        job.subtitle_cues, job.options, job.cta_summary, job.strong_moments_summary = cues, {"ctaMoment": "end", "ctaPositionPreset": "bottom_left"}, {}, {}
+        first = app.choose_cta_times(job, 120.0, 6.0)[0]
+        self.assertGreater(first / 120.0, 0.6)
+        self.assertEqual(job.cta_summary["smart_position_preset"], "bottom_left")
+
     def test_image_motion_is_continuous(self):
         for kind in ("zoom_in", "zoom_out", "pan"):
             spec = {"frames": 150, "kind": kind, "safe_fx": 0.5, "safe_fy": 0.4, "pan_x0": 0.3, "pan_x1": 0.7}
