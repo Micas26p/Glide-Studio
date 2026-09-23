@@ -960,11 +960,11 @@ body[data-theme-resolved="light"] .automator-draft-banner .draft-info span{color
 }
 
 .btn.primary:disabled{
-  opacity:.62!important;
+  opacity:.42!important;
   cursor:not-allowed!important;
   transform:none!important;
   box-shadow:none!important;
-  filter:grayscale(.35)!important;
+  filter:grayscale(.75)!important;
   pointer-events:none;
   color:#ffffff!important;
 }
@@ -976,11 +976,11 @@ body[data-theme-resolved="light"] .automator-draft-banner .draft-info span{color
 
 .btn.export:disabled,
 #renderBtn:disabled{
-  opacity:.62!important;
+  opacity:.42!important;
   cursor:not-allowed!important;
   transform:none!important;
   box-shadow:none!important;
-  filter:grayscale(.35)!important;
+  filter:grayscale(.75)!important;
   pointer-events:none;
   color:#ffffff!important;
 }
@@ -4481,3 +4481,157 @@ body[data-theme-resolved="light"] .shortcut-desc strong {
 body[data-theme-resolved="light"] .shortcut-desc small {
   color: #475569;
 }
+
+/* =====================================================================
+   Vivid theme layer — dá profundidade e cor aos temas escuro e claro.
+   Só sobrepõe tokens e superfícies (mesma especificidade, declarado por
+   último), sem alterar layout.
+   ===================================================================== */
+:root{
+  --bg-canvas:#060910;
+  --bg:#060910;
+  --bg-sidebar:#0a0f18;
+  --bg-panel:#0e1521;
+  --bg-card:#131c2b;
+  --bg-card-hover:#192437;
+  --bg-elevated:#1f2b40;
+  --bg-input:#0a1019;
+  --panel:#0e1521;
+  --panel-2:#131c2b;
+  --panel-3:#0a0f18;
+  --line:rgba(148,163,184,.12);
+  --border-subtle:rgba(148,163,184,.12);
+  --border-default:rgba(148,163,184,.18);
+  --border-strong:rgba(148,163,184,.30);
+  --border-hover:rgba(52,211,153,.45);
+  --violet:#8b5cf6;
+  --page-bg:
+    radial-gradient(60% 45% at 8% -5%, rgba(16,185,129,.16) 0%, transparent 70%),
+    radial-gradient(45% 40% at 95% 0%, rgba(6,182,212,.12) 0%, transparent 70%),
+    radial-gradient(55% 45% at 70% 105%, rgba(139,92,246,.10) 0%, transparent 70%),
+    linear-gradient(180deg,#070b13 0%,#080d16 55%,#060910 100%);
+  --sidebar-bg:linear-gradient(180deg,rgba(13,20,32,.96) 0%,rgba(8,12,20,.98) 100%);
+  --surface-panel:linear-gradient(180deg,rgba(255,255,255,.045) 0%,rgba(255,255,255,.012) 38%,rgba(255,255,255,0) 100%),#0e1521;
+  --surface-card:linear-gradient(180deg,rgba(255,255,255,.05) 0%,rgba(255,255,255,.015) 100%),#131c2b;
+  --surface-card-hover:linear-gradient(180deg,rgba(52,211,153,.08) 0%,rgba(255,255,255,.02) 100%),#172234;
+  --panel-edge:inset 0 1px 0 rgba(255,255,255,.07),inset 0 0 0 1px rgba(255,255,255,.015);
+  --card-glow:0 0 0 1px rgba(52,211,153,.30),0 10px 30px rgba(16,185,129,.14);
+  --modal-bg:
+    radial-gradient(70% 50% at 0% 0%, rgba(16,185,129,.10) 0%, transparent 70%),
+    radial-gradient(60% 50% at 100% 0%, rgba(6,182,212,.08) 0%, transparent 70%),
+    linear-gradient(180deg,#131c2b 0%,#0b111b 100%);
+}
+
+body[data-theme="light"],
+body[data-theme-resolved="light"]{
+  --bg-canvas:#eef3f8;
+  --bg:#eef3f8;
+  --bg-sidebar:#e8f0f5;
+  --bg-panel:#fbfdff;
+  --bg-card:#ffffff;
+  --bg-card-hover:#f2faf7;
+  --bg-input:#f5f9fc;
+  --panel:#fbfdff;
+  --panel-3:#e5edf4;
+  --line:rgba(30,58,95,.10);
+  --border-subtle:rgba(30,58,95,.10);
+  --border-default:rgba(30,58,95,.16);
+  --border-strong:rgba(30,58,95,.28);
+  --border-hover:rgba(5,150,105,.45);
+  --violet:#7c3aed;
+  --page-bg:
+    radial-gradient(55% 45% at 5% -5%, rgba(16,185,129,.16) 0%, transparent 70%),
+    radial-gradient(45% 40% at 98% 0%, rgba(14,165,233,.13) 0%, transparent 70%),
+    radial-gradient(50% 45% at 70% 108%, rgba(139,92,246,.08) 0%, transparent 70%),
+    linear-gradient(180deg,#f3f7fb 0%,#eaf0f6 100%);
+  --sidebar-bg:linear-gradient(180deg,rgba(236,247,243,.97) 0%,rgba(229,237,245,.98) 100%);
+  --surface-panel:linear-gradient(180deg,#ffffff 0%,#fafcfe 100%);
+  --surface-card:linear-gradient(180deg,#ffffff 0%,#f8fbfd 100%);
+  --surface-card-hover:linear-gradient(180deg,#f3fcf8 0%,#ffffff 100%);
+  --panel-edge:inset 0 1px 0 #ffffff;
+  --card-glow:0 0 0 1px rgba(5,150,105,.28),0 10px 26px rgba(5,150,105,.12);
+  --shadow:0 6px 20px rgba(30,58,95,.08),0 1px 3px rgba(30,58,95,.06);
+  --shadow-sm:0 2px 8px rgba(30,58,95,.07),0 1px 2px rgba(30,58,95,.05);
+  --modal-bg:
+    radial-gradient(70% 50% at 0% 0%, rgba(16,185,129,.09) 0%, transparent 70%),
+    radial-gradient(60% 50% at 100% 0%, rgba(14,165,233,.07) 0%, transparent 70%),
+    linear-gradient(180deg,#ffffff 0%,#f3f7fb 100%);
+}
+
+@media (prefers-color-scheme: light){
+  body[data-theme="system"]{
+    --bg-panel:#fbfdff;
+    --bg-card-hover:#f2faf7;
+    --line:rgba(30,58,95,.10);
+    --border-subtle:rgba(30,58,95,.10);
+    --border-default:rgba(30,58,95,.16);
+    --border-hover:rgba(5,150,105,.45);
+    --page-bg:
+      radial-gradient(55% 45% at 5% -5%, rgba(16,185,129,.16) 0%, transparent 70%),
+      radial-gradient(45% 40% at 98% 0%, rgba(14,165,233,.13) 0%, transparent 70%),
+      linear-gradient(180deg,#f3f7fb 0%,#eaf0f6 100%);
+    --sidebar-bg:linear-gradient(180deg,rgba(236,247,243,.97) 0%,rgba(229,237,245,.98) 100%);
+    --surface-panel:linear-gradient(180deg,#ffffff 0%,#fafcfe 100%);
+    --surface-card:linear-gradient(180deg,#ffffff 0%,#f8fbfd 100%);
+    --surface-card-hover:linear-gradient(180deg,#f3fcf8 0%,#ffffff 100%);
+    --panel-edge:inset 0 1px 0 #ffffff;
+    --card-glow:0 0 0 1px rgba(5,150,105,.28),0 10px 26px rgba(5,150,105,.12);
+    --modal-bg:linear-gradient(180deg,#ffffff 0%,#f3f7fb 100%);
+  }
+}
+
+body{background:var(--page-bg);background-attachment:fixed}
+
+.card,.glass,.timeline-section,.subtitle-panel,.preflight-panel,.cta-panel,.music-library,.intelligence-panel{
+  background:var(--surface-panel);
+  box-shadow:var(--shadow),var(--panel-edge);
+}
+.queue-card,.clip-card,.stat,.cta-card,.preflight-item,.gallery-item,.music-store-card,.intelligence-score,.audio-item,.side-card{
+  background:var(--surface-card);
+}
+.queue-card,.clip-card,.cta-card,.gallery-item,.music-store-card,.stat{
+  transition:border-color var(--duration-fast) ease,box-shadow var(--duration-normal) var(--ease-out),transform var(--duration-normal) var(--ease-out),background var(--duration-normal) ease;
+}
+.queue-card:hover,.clip-card:hover,.cta-card:not(.disabled):hover,.gallery-item:hover,.music-store-card:hover,.stat:hover{
+  background:var(--surface-card-hover);
+  border-color:var(--border-hover);
+  box-shadow:var(--card-glow);
+}
+.queue-card.active,.queue-card.selected{box-shadow:var(--card-glow)}
+
+/* Hairline de acento no topo dos painéis principais */
+.card,.timeline-section,.subtitle-panel,.preflight-panel,.cta-panel,.music-library{position:relative}
+.card::before,.timeline-section::before,.subtitle-panel::before,.preflight-panel::before,.cta-panel::before,.music-library::before{
+  content:"";position:absolute;left:18px;right:18px;top:-1px;height:1px;pointer-events:none;border-radius:1px;
+  background:linear-gradient(90deg,transparent,rgba(52,211,153,.55) 25%,rgba(34,211,238,.45) 60%,rgba(139,92,246,.35) 85%,transparent);
+  opacity:.7;
+}
+body[data-theme-resolved="light"] .card::before,body[data-theme="light"] .card::before{opacity:.55}
+
+.nav-item.active{
+  background:linear-gradient(90deg,var(--accent-subtle) 0%,rgba(6,182,212,.06) 100%);
+}
+body:not([data-theme="light"]):not([data-theme-resolved="light"]) .eyebrow{
+  background:linear-gradient(90deg,var(--accent-text),var(--teal));
+  -webkit-background-clip:text;background-clip:text;color:transparent;
+}
+.modal-card{background:var(--modal-bg)}
+.modal{background:rgba(3,6,12,.72)}
+body[data-theme-resolved="light"] .modal,body[data-theme="light"] .modal{background:rgba(30,41,59,.38)}
+
+/* Barra de progresso do render com brilho animado */
+#progressBar{
+  background:linear-gradient(90deg,#10b981 0%,#22d3ee 60%,#8b5cf6 100%);
+  background-size:200% 100%;
+  animation:glide-progress-sheen 3.2s linear infinite;
+  box-shadow:0 0 14px rgba(16,185,129,.45);
+}
+@keyframes glide-progress-sheen{from{background-position:0% 0}to{background-position:-200% 0}}
+@media (prefers-reduced-motion: reduce){#progressBar{animation:none}}
+
+/* O atributo hidden tem de ganhar a regras display:flex/grid de componentes
+   (o banner de rascunho do AUTO ficava sempre visível). */
+[hidden]{display:none !important}
+
+/* Botões desativados inequívocos em ambos os temas */
+.btn:disabled,.btn[disabled]{opacity:.4;filter:saturate(.25);box-shadow:none;cursor:not-allowed;transform:none}

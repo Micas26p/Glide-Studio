@@ -7269,6 +7269,10 @@ async function applyAutomatorDistribution(options = {}){
     updateStats();
     progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`, true);
     state.automatorApplying = false;
+    // Distribuição concluída: esvaziar as listas e cancelar saves pendentes antes de
+    // apagar o rascunho (senão o debounce regravava-o e o banner voltava a aparecer).
+    clearTimeout(automatorDraftTimer);
+    state.automator = {srts: [], audios: [], scripts: [], folders: [], sort: state.automator?.sort || {}};
     await clearAutomatorDraftNow();
     const draftBanner = document.getElementById('automatorDraftBanner');
     if(draftBanner) draftBanner.hidden = true;
@@ -7295,8 +7299,9 @@ finally{
     }
     if(automatorConfirmAndRenderBtn){
       automatorConfirmAndRenderBtn.textContent = 'Confirmar & Renderizar Agora';
-      automatorConfirmAndRenderBtn.disabled = Boolean(automatorPlan().warnings.length);
     }
+    // Recalcula o estado de todos os botões a partir do plano atual (0 ficheiros => desativados).
+    updateAutomatorPreview();
   }
   return succeeded;
 }
@@ -9227,9 +9232,7 @@ if(automatorAutoHealBtn) automatorAutoHealBtn.addEventListener('click', () => {
     p.options.allowAudioTrim = false;
   });
   if(dockSummary) dockSummary.textContent = '🪄 Auto-Healer aplicado: lote balanceado com ritmo saudável e preservação total de 100% da narração!';
-  if(automatorConfirmBtn) automatorConfirmBtn.disabled = false;
-  if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = false;
-  if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = false;
+  updateAutomatorPreview();
   automatorAutoHealBtn.textContent = '✨ Lote Balanceado!';
   setTimeout(() => { if(automatorAutoHealBtn) automatorAutoHealBtn.textContent = '🪄 Auto-Healer (Balancear Lote)'; }, 3000);
 });

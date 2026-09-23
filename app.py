@@ -38,7 +38,7 @@ except Exception:
     cv2 = None
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Response, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from glide_config import load_config_bundle
@@ -4426,9 +4426,22 @@ def build_auto_fix_plan(
     }
 
 
+def _static_cache_token(match: "re.Match[str]") -> str:
+    rel_path = match.group(2)
+    try:
+        stamp = (FRONTEND / rel_path).stat().st_mtime_ns
+    except OSError:
+        stamp = 0
+    return f"{match.group(1)}{rel_path}?v={APP_VERSION}-{stamp:x}"
+
+
 @app.get("/")
 def index():
-    return FileResponse(FRONTEND / "index.html")
+    # /static é servido como "immutable": cada asset leva o mtime no ?v= para que uma
+    # atualização do app nunca continue a correr o JS/CSS antigo em cache.
+    html = (FRONTEND / "index.html").read_text(encoding="utf-8")
+    html = re.sub(r'(/static/)([^"?\s]+)\?v=[^"\s]*', _static_cache_token, html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, must-revalidate"})
 
 
 @app.get("/favicon.ico")
