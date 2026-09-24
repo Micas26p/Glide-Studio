@@ -140,6 +140,23 @@ class AutoModeRegressions(unittest.TestCase):
         self.assertIsNone(policy.next_delay(2, now=3.0))  # limite atingido: sem ciclo de recargas
         self.assertEqual(policy.next_delay(1, now=700.0), 2.0)  # janela expirou
 
+    def test_ui_freeze_watchdog(self):
+        import desktop_app
+        dog = desktop_app.UiFreezeWatchdog(stale_after=25.0, grace=45.0)
+        dog.mark_action(0.0)
+        self.assertFalse(dog.is_frozen(30.0, 0.0, True, False, True))  # ainda no período de carga
+        self.assertTrue(dog.is_frozen(100.0, 60.0, True, False, True))  # 40 s sem batimento
+        self.assertFalse(dog.is_frozen(100.0, 90.0, True, False, True))  # batimento recente
+        self.assertFalse(dog.is_frozen(100.0, 60.0, True, True, False))  # minimizada
+        self.assertFalse(dog.is_frozen(100.0, 60.0, False, False, False))  # tapada por outra janela
+        self.assertTrue(dog.is_frozen(100.0, 60.0, False, False, True))  # em frente mas JS preso
+
+    def test_ui_heartbeat_endpoint(self):
+        r = self.client.post("/api/ui/heartbeat", json={"visible": False})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(app.UI_HEARTBEAT["visible"])
+        self.assertGreater(app.UI_HEARTBEAT["at"], 0.0)
+
     def test_update_cleanup_runs_once_per_build(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:

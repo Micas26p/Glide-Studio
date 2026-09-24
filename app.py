@@ -4572,6 +4572,18 @@ def favicon():
     return FileResponse(ASSETS / "glide_studio.ico", media_type="image/x-icon")
 
 
+# Batimento da UI: a página só o envia de dentro de requestAnimationFrame, logo prova
+# que o JS corre E que a página está a pintar. O watchdog do desktop lê isto.
+UI_HEARTBEAT: dict[str, Any] = {"at": 0.0, "visible": False}
+
+
+@app.post("/api/ui/heartbeat")
+def ui_heartbeat(payload: dict[str, Any] = Body(default={})):
+    UI_HEARTBEAT["at"] = time.monotonic()
+    UI_HEARTBEAT["visible"] = bool(payload.get("visible", True))
+    return {"ok": True}
+
+
 @app.get("/api/health")
 def health():
     return {

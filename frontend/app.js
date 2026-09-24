@@ -9844,6 +9844,23 @@ function setupUiPerformanceGuards(){
   animatedRegions.forEach(region => observer.observe(region));
 }
 
+// Batimento para o watchdog do desktop: enviado de dentro de um frame pintado.
+// Se o JS bloquear ou a página deixar de pintar, o batimento pára e o app recarrega a UI.
+function sendUiHeartbeat(visible){
+  try{
+    const body = new Blob([JSON.stringify({visible})], {type: 'application/json'});
+    if(!(navigator.sendBeacon && navigator.sendBeacon('/api/ui/heartbeat', body))){
+      fetch('/api/ui/heartbeat', {method: 'POST', body, keepalive: true}).catch(() => {});
+    }
+  }catch(_err){}
+}
+window.setInterval(() => {
+  if(document.hidden) return;
+  window.requestAnimationFrame(() => sendUiHeartbeat(true));
+}, 3000);
+document.addEventListener('visibilitychange', () => sendUiHeartbeat(!document.hidden));
+sendUiHeartbeat(!document.hidden);
+
 document.addEventListener('visibilitychange', () => {
   if(!document.hidden) return;
   const active = captureActiveProject();

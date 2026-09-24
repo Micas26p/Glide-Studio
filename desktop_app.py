@@ -612,7 +612,7 @@ class PageCrashRecovery:
     # COREWEBVIEW2_PROCESS_FAILED_KIND: 1 = renderer terminou, 2 = renderer sem resposta
     RECOVERABLE_KINDS = {1, 2}
 
-    def __init__(self, max_reloads: int = 5, window_seconds: float = 600.0):
+    def __init__(self, max_reloads: int = 8, window_seconds: float = 600.0):
         self.max_reloads = max_reloads
         self.window_seconds = window_seconds
         self.reloads: list[float] = []
@@ -630,10 +630,95 @@ class PageCrashRecovery:
         return min(30.0, 2.0 * (2 ** (len(self.reloads) - 1)))
 
 
+class UiFreezeWatchdog:
+    """Deteta a UI congelada (JS bloqueado ou página sem pintar) pelo batimento da página."""
+
+    def __init__(self, stale_after: float = 25.0, grace: float = 45.0):
+        self.stale_after = stale_after
+        self.grace = grace
+        self.last_action = time.monotonic()
+
+    def is_frozen(self, now: float, last_beat: float, page_visible: bool, minimized: bool, foreground: bool) -> bool:
+        if minimized or not (page_visible or foreground):
+            return False  # minimizada/tapada: o Chromium pára de pintar de propósito
+        if now - self.last_action < self.grace:
+            return False  # a página ainda está a (re)carregar
+        return now - max(last_beat, self.last_action) > self.stale_after
+
+    def mark_action(self, now: float | None = None) -> None:
+        self.last_action = time.monotonic() if now is None else now
+
+
+def _window_flags(hwnd: int) -> tuple[bool, bool]:
+    """(minimizada, em primeiro plano) via Win32; (False, False) se indisponível."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        return bool(user32.IsIconic(hwnd)), user32.GetForegroundWindow() == hwnd
+    except Exception:
+        return False, False
+
+
+def _kill_webview_renderers(browser_pid: int) -> int:
+    """Termina só os renderers filhos do WebView2 do Glide (dispara ProcessFailed -> recarregar)."""
+    if not browser_pid:
+        return 0
+    script = (
+        f"Get-CimInstance Win32_Process -Filter \"ParentProcessId={int(browser_pid)} AND Name='msedgewebview2.exe'\" | "
+        "Where-Object { $_.CommandLine -like '*--type=renderer*' } | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=20, **hidden_subprocess_kwargs(),
+        ).stdout
+        return len([line for line in out.split() if line.strip().isdigit()])
+    except Exception:
+        return 0
+
+
 def attach_page_crash_recovery(window: Any, url: str) -> None:
-    """Liga o evento ProcessFailed do WebView2 a um recarregamento automático."""
+    """Liga o evento ProcessFailed do WebView2 e o watchdog de congelamento a um recarregamento automático."""
     policy = PageCrashRecovery()
-    attached = {"done": False}
+    watchdog = UiFreezeWatchdog()
+    attached = {"done": False, "hwnd": 0, "browser_pid": 0}
+
+    def reload_page():
+        """Navega de novo no thread da UI (o renderer é recriado se tiver morrido)."""
+        core = attached.get("core")
+        try:
+            from System import Func, Type
+            if core is None:
+                window.load_url(url)
+                return
+            window.native.Invoke(Func[Type](lambda: core.Navigate(url) or None))
+        except Exception as exc:
+            print(f"[desktop] falha ao recarregar a UI: {exc}", file=sys.stderr)
+
+    def watch_loop():
+        try:
+            import app as backend
+        except Exception:
+            return
+        while True:
+            time.sleep(5.0)
+            if not attached["hwnd"]:
+                continue
+            beat = backend.UI_HEARTBEAT
+            minimized, foreground = _window_flags(attached["hwnd"])
+            now = time.monotonic()
+            if not watchdog.is_frozen(now, float(beat.get("at") or 0.0), bool(beat.get("visible")), minimized, foreground):
+                continue
+            watchdog.mark_action(now)
+            if policy.next_delay(2, now=now) is None:
+                continue  # demasiadas recuperações seguidas: não entrar em ciclo
+            # Um renderer preso não obedece a Navigate/Reload. Terminá-lo faz o WebView2
+            # disparar ProcessFailed, que recarrega a página num processo novo.
+            killed = _kill_webview_renderers(attached["browser_pid"])
+            print(f"[desktop] UI congelada ha {now - float(beat.get('at') or 0.0):.0f}s; renderers terminados={killed}", file=sys.stderr)
+            if not killed:
+                reload_page()
 
     def on_process_failed(_sender, args):
         try:
@@ -642,8 +727,14 @@ def attach_page_crash_recovery(window: Any, url: str) -> None:
             kind = -1
         delay = policy.next_delay(kind)
         print(f"[desktop] WebView2 ProcessFailed kind={kind}; recarregar em {delay}s", file=sys.stderr)
-        if delay is not None:
-            threading.Timer(delay, lambda: window.load_url(url)).start()
+        if delay is None:
+            return
+        watchdog.mark_action()
+        if kind == 2:
+            # Sem resposta: recarregar não chega ao renderer preso; terminá-lo gera kind=1.
+            threading.Thread(target=_kill_webview_renderers, args=(attached["browser_pid"],), daemon=True).start()
+            return
+        threading.Timer(delay, reload_page).start()
 
     def attach():
         browser = getattr(getattr(window, "native", None), "browser", None)
@@ -651,7 +742,14 @@ def attach_page_crash_recovery(window: Any, url: str) -> None:
         if core is None or attached["done"]:
             return
         core.ProcessFailed += on_process_failed
+        attached["core"] = core
+        attached["hwnd"] = int(window.native.Handle.ToInt64())
+        try:
+            attached["browser_pid"] = int(core.BrowserProcessId)
+        except Exception:
+            pass
         attached["done"] = True
+        threading.Thread(target=watch_loop, name="glide-ui-watchdog", daemon=True).start()
 
     def on_loaded():
         if attached["done"]:
