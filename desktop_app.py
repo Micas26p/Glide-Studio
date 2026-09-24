@@ -601,6 +601,70 @@ def run_browser_app(runtime: DesktopRuntime):
         cleanup_browser_profiles()
 
 
+class PageCrashRecovery:
+    """Decide quando recarregar a página após o WebView2 matar o processo da UI.
+
+    Com o Windows sem memória o renderer é encerrado e fica o ecrã "This page is
+    having a problem"; o backend (e o render) continua vivo, basta recarregar.
+    Limita as tentativas para não entrar em ciclo se a memória continuar esgotada.
+    """
+
+    # COREWEBVIEW2_PROCESS_FAILED_KIND: 1 = renderer terminou, 2 = renderer sem resposta
+    RECOVERABLE_KINDS = {1, 2}
+
+    def __init__(self, max_reloads: int = 5, window_seconds: float = 600.0):
+        self.max_reloads = max_reloads
+        self.window_seconds = window_seconds
+        self.reloads: list[float] = []
+
+    def next_delay(self, kind: int, now: float | None = None) -> float | None:
+        """Segundos até recarregar, ou None quando não se deve recarregar."""
+        if kind not in self.RECOVERABLE_KINDS:
+            return None
+        now = time.monotonic() if now is None else now
+        self.reloads = [t for t in self.reloads if now - t < self.window_seconds]
+        if len(self.reloads) >= self.max_reloads:
+            return None
+        self.reloads.append(now)
+        # Recuo progressivo: dá tempo ao Windows para libertar memória antes de recarregar
+        return min(30.0, 2.0 * (2 ** (len(self.reloads) - 1)))
+
+
+def attach_page_crash_recovery(window: Any, url: str) -> None:
+    """Liga o evento ProcessFailed do WebView2 a um recarregamento automático."""
+    policy = PageCrashRecovery()
+    attached = {"done": False}
+
+    def on_process_failed(_sender, args):
+        try:
+            kind = int(args.ProcessFailedKind)
+        except Exception:
+            kind = -1
+        delay = policy.next_delay(kind)
+        print(f"[desktop] WebView2 ProcessFailed kind={kind}; recarregar em {delay}s", file=sys.stderr)
+        if delay is not None:
+            threading.Timer(delay, lambda: window.load_url(url)).start()
+
+    def attach():
+        browser = getattr(getattr(window, "native", None), "browser", None)
+        core = getattr(getattr(browser, "webview", None), "CoreWebView2", None)
+        if core is None or attached["done"]:
+            return
+        core.ProcessFailed += on_process_failed
+        attached["done"] = True
+
+    def on_loaded():
+        if attached["done"]:
+            return
+        try:
+            from System import Func, Type
+            window.native.Invoke(Func[Type](lambda: attach() or None))
+        except Exception as exc:
+            print(f"[desktop] recuperação da página indisponível: {exc}", file=sys.stderr)
+
+    window.events.loaded += on_loaded
+
+
 def run_native_app(runtime: DesktopRuntime):
     import webview
 
@@ -631,6 +695,8 @@ def run_native_app(runtime: DesktopRuntime):
 
     window.events.closing += on_closing
     window.events.before_show += on_before_show
+    if os.name == "nt":
+        attach_page_crash_recovery(window, url)
     webview.start(
         private_mode=False,
         storage_path=str(data_root() / "webview_profile"),

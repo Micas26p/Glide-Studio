@@ -132,6 +132,14 @@ class AutoModeRegressions(unittest.TestCase):
         import desktop_app
         self.assertFalse({"IndexedDB", "WebStorage", "Local Storage"} & set(desktop_app.WEBVIEW_CACHE_DIR_NAMES))
 
+    def test_page_crash_recovery_reloads_with_backoff_and_limit(self):
+        import desktop_app
+        policy = desktop_app.PageCrashRecovery(max_reloads=3, window_seconds=600.0)
+        self.assertIsNone(policy.next_delay(0, now=0.0))  # browser process: não recuperável aqui
+        self.assertEqual([policy.next_delay(1, now=t) for t in (0.0, 1.0, 2.0)], [2.0, 4.0, 8.0])
+        self.assertIsNone(policy.next_delay(2, now=3.0))  # limite atingido: sem ciclo de recargas
+        self.assertEqual(policy.next_delay(1, now=700.0), 2.0)  # janela expirou
+
     def test_update_cleanup_runs_once_per_build(self):
         from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
