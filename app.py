@@ -26,7 +26,7 @@ import wave
 import zipfile
 import xml.etree.ElementTree as ET
 from array import array
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -588,6 +588,33 @@ SFX_INDEX_LOCK = threading.Lock()
 SFX_ASSET_CACHE: list[Path] | None = None
 SFX_DURATION_CACHE: dict[str, float] = {}
 SFX_TIMING_CACHE: dict[str, dict[str, float]] = {}
+SFX_TIMING_CACHE_FILE = DATA_ROOT / "sfx_timing_cache.json"
+SFX_TIMING_CACHE_LOCK = threading.Lock()
+_SFX_TIMING_CACHE_LOADED = False
+
+
+def _load_sfx_timing_cache() -> None:
+    """Perfis de pico/onset dos efeitos persistem entre sessões (antes: ~120 FFmpeg por arranque)."""
+    global _SFX_TIMING_CACHE_LOADED
+    with SFX_TIMING_CACHE_LOCK:
+        if _SFX_TIMING_CACHE_LOADED:
+            return
+        _SFX_TIMING_CACHE_LOADED = True
+        try:
+            data = json.loads(SFX_TIMING_CACHE_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                SFX_TIMING_CACHE.update({str(k): v for k, v in data.items() if isinstance(v, dict)})
+        except Exception:
+            pass
+
+
+def _persist_sfx_timing_cache() -> None:
+    with SFX_TIMING_CACHE_LOCK:
+        snapshot = dict(SFX_TIMING_CACHE)
+    try:
+        atomic_write_text(SFX_TIMING_CACHE_FILE, json.dumps(snapshot, ensure_ascii=False))
+    except Exception:
+        pass
 SFX_RENDER_PROFILE_CACHE: dict[str, dict[str, float]] = {}
 CACHE_MAINTENANCE_LOCK = threading.Lock()
 CACHE_WARM_LOCK = threading.Lock()
@@ -1759,7 +1786,25 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
     }
 
 
+_QUEUE_PROJECTS_DISK_DIGEST: str | None = None
+
+
+def _queue_projects_digest(projects: list[dict[str, Any]]) -> str:
+    encoded = json.dumps(projects, ensure_ascii=False, separators=(",", ":"), default=str, sort_keys=True)
+    return hashlib.sha256(encoded.encode("utf-8", errors="ignore")).hexdigest()
+
+
 def _load_queue_projects() -> list[dict[str, Any]]:
+    global _QUEUE_PROJECTS_DISK_DIGEST
+    projects = _load_queue_projects_from_disk()
+    try:
+        _QUEUE_PROJECTS_DISK_DIGEST = _queue_projects_digest(projects)
+    except Exception:
+        _QUEUE_PROJECTS_DISK_DIGEST = None
+    return projects
+
+
+def _load_queue_projects_from_disk() -> list[dict[str, Any]]:
     candidates = (QUEUE_PROJECTS_FILE, QUEUE_PROJECTS_FILE.with_suffix(".json.bak"))
     for candidate in candidates:
         try:
@@ -1789,7 +1834,16 @@ def _invalidate_queue_cache():
 
 
 def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
+    global _QUEUE_PROJECTS_DISK_DIGEST
     _invalidate_queue_cache()
+    # Não reescreve a fila quando nada mudou: as migrações/reparações que correm ao
+    # abrir o app gravavam sempre, mexendo nos ficheiros do utilizador sem necessidade.
+    try:
+        digest = _queue_projects_digest(projects)
+    except Exception:
+        digest = None
+    if digest and digest == _QUEUE_PROJECTS_DISK_DIGEST and QUEUE_PROJECTS_FILE.exists():
+        return
     QUEUE_PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": APP_VERSION,
@@ -1810,6 +1864,7 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
     # Compact JSON eliminates 46% of disk footprint and speeds up serialization
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
+    _QUEUE_PROJECTS_DISK_DIGEST = digest
 
 
 def _load_app_settings() -> dict[str, Any]:
@@ -6850,8 +6905,42 @@ def safe_probe_duration(path: Path, cwd: Path | None = None) -> float:
     return dur
 
 
+_PROBE_DURATION_CACHE: dict[tuple[str, int, int], float] = {}
+_PROBE_DURATION_LOCK = threading.Lock()
+
+
+def _probe_cache_key(path: Path, cwd: Path | None = None) -> tuple[str, int, int] | None:
+    try:
+        resolved = path if path.is_absolute() else ((cwd or DATA_ROOT) / path)
+        stat = resolved.stat()
+        return (str(resolved.resolve()).lower(), int(stat.st_size), int(stat.st_mtime_ns))
+    except OSError:
+        return None
+
+
+def remember_probe_duration(path: Path, duration: float, cwd: Path | None = None) -> None:
+    """Regista uma duração já conhecida (ex.: segmento acabado de renderizar) para evitar ffprobe."""
+    key = _probe_cache_key(Path(path), cwd)
+    if key and duration and duration > 0:
+        with _PROBE_DURATION_LOCK:
+            _PROBE_DURATION_CACHE[key] = float(duration)
+
+
 def cached_probe_duration(path: Path, cwd: Path | None = None) -> float:
-    return safe_probe_duration(path, cwd=cwd)
+    # Antes chamava ffprobe sempre: ~258 processos por vídeo longo só para somar durações.
+    key = _probe_cache_key(Path(path), cwd)
+    if key:
+        with _PROBE_DURATION_LOCK:
+            cached = _PROBE_DURATION_CACHE.get(key)
+        if cached:
+            return cached
+    duration = safe_probe_duration(path, cwd=cwd)
+    if key and duration and duration > 0:
+        with _PROBE_DURATION_LOCK:
+            if len(_PROBE_DURATION_CACHE) > 20000:
+                _PROBE_DURATION_CACHE.clear()
+            _PROBE_DURATION_CACHE[key] = float(duration)
+    return duration
 
 
 def safe_probe_video_stream_duration(path: Path | str, cwd: Path | None = None) -> float:
@@ -14881,6 +14970,44 @@ def compose_final_visuals(
     return out
 
 
+FINAL_AAC_ARGS = ["-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2"]
+
+
+def precompute_final_aac(job: Job, wav: Path, work: Path) -> Path | None:
+    """Codifica o AAC final enquanto a composição visual ainda corre.
+
+    O encoder AAC nativo faz ~13x tempo real (≈2,5 min num vídeo de 33 min) e era
+    executado no mux, no fim do render. Mesmo encoder e parâmetros: qualidade idêntica.
+    """
+    try:
+        source = Path(wav)
+        if not source.is_absolute():
+            source = work / source
+        out = work / "audio_final_aac.m4a"
+        run_cmd(job, [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(source.resolve()),
+            "-vn", *FINAL_AAC_ARGS, str(out.resolve()),
+        ], cwd=work, quiet_success=True)
+        if out.exists() and out.stat().st_size > 0:
+            job.final_aac_cache = {"wav": str(source.resolve()).lower(), "aac": str(out.resolve())}
+            return out
+    except RenderCancelled:
+        raise
+    except Exception as exc:
+        _append_log(job, f"Pré-codificação AAC indisponível ({human_render_error(exc)}); o mux codifica no fim.")
+    return None
+
+
+def final_audio_mux_args(job: Job, wav: Path | str) -> tuple[str, list[str]]:
+    """(entrada de áudio, argumentos de codec) para o mux: copia o AAC pré-codificado quando existe."""
+    resolved = str(Path(wav).resolve())
+    cache = getattr(job, "final_aac_cache", None) or {}
+    aac = cache.get("aac")
+    if cache.get("wav") == resolved.lower() and aac and Path(aac).exists() and Path(aac).stat().st_size > 0:
+        return aac, ["-c:a", "copy"]
+    return resolved, list(FINAL_AAC_ARGS)
+
+
 def compose_visual_chunks_parallel(
     job: Job,
     segments: list[Path],
@@ -14890,7 +15017,7 @@ def compose_visual_chunks_parallel(
     work: Path,
     target_duration: float,
     target_chunk_seconds: float = 150.0,
-    audio_file: Path | None = None,
+    audio_file: "Path | Future | None" = None,
 ) -> Path:
     label = "Composição Render Studio em Chunks"
     set_stage(job, "cta", label, "Renderizando blocos visuais em paralelo com fusao instantanea")
@@ -15032,6 +15159,12 @@ def compose_visual_chunks_parallel(
 
     final_visual = work / ("video_turbo_composed.mp4" if turbo_enabled(job) else "video_final_composed.mp4")
     total_chunks_dur = sum(float(ch.get("duration", 0.0)) for ch in chunks)
+    if isinstance(audio_file, Future):
+        # O áudio foi masterizado em paralelo com os blocos; só aqui é preciso esperar.
+        try:
+            audio_file = audio_file.result()
+        except Exception:
+            audio_file = None  # o erro de áudio é levantado pelo orquestrador, não aqui
     direct_mux = bool(audio_file and Path(audio_file).exists() and Path(audio_file).stat().st_size > 0)
     if direct_mux and total_chunks_dur < target_duration - 0.35:
         _append_log(
@@ -15042,14 +15175,15 @@ def compose_visual_chunks_parallel(
         direct_mux = False
 
     if direct_mux:
+        mux_audio_input, mux_audio_codec = final_audio_mux_args(job, audio_file)
         cmd_merge = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
             "-fflags", "+genpts",
             "-f", "concat", "-safe", "0", "-i", final_concat_txt.name,
-            "-i", str(Path(audio_file).resolve()),
+            "-i", mux_audio_input,
             "-map", "0:v:0", "-map", "1:a:0",
             "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+            *mux_audio_codec,
             "-avoid_negative_ts", "make_zero", str(final_visual.name),
         ]
         job.direct_audio_muxed = True
@@ -16110,15 +16244,13 @@ def find_matching_sfx_asset(effect: str, seed: str | None = None) -> Path | None
     tokens = sfx_asset_tokens(effect)
     ranked: list[tuple[int, Path]] = []
     for path in indexed_sfx_assets():
-        prof = sfx_asset_timing_profile(path)
-        if not prof.get("is_usable", True):
-            continue
         stem = path.stem.lower()
         score = 0
         for token in tokens:
             if token and token in stem:
                 score += max(1, min(24, len(token)))
-        if score > 0:
+        # Só mede (FFmpeg) os ficheiros candidatos: antes media todos a cada evento.
+        if score > 0 and sfx_asset_timing_profile(path).get("is_usable", True):
             ranked.append((score, path))
     if not ranked:
         return None
@@ -16183,6 +16315,7 @@ def sfx_asset_timing_profile(asset: Path) -> dict[str, float]:
         key = f"{asset.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     except Exception:
         key = str(asset)
+    _load_sfx_timing_cache()
     cached = SFX_TIMING_CACHE.get(key)
     if cached:
         return cached
@@ -16241,6 +16374,7 @@ def sfx_asset_timing_profile(asset: Path) -> dict[str, float]:
             "is_usable": is_usable,
         }
         SFX_TIMING_CACHE[key] = profile
+        _persist_sfx_timing_cache()
         return profile
     except Exception:
         return fallback
@@ -21137,6 +21271,7 @@ def make_segments_smart(
         file_size = out.stat().st_size if out.exists() else 0
         suspicious_size = file_size < max(4096, int(plan.target_duration * 1200))
         actual = safe_probe_duration(out) if suspicious_size else plan.target_duration
+        remember_probe_duration(out, actual)
         if not out.exists() or file_size <= 0 or actual <= 0.08:
             with render_state_lock:
                 summary["skipped_segments"] += 1
@@ -21532,7 +21667,11 @@ def concat_segments_and_mux(
             _append_log(job, "Render Graph: mixagem e master de audio reutilizados.")
         else:
             audio_cached = None
-    if not audio_cached:
+    audio_future: Future | None = None
+    audio_executor: ThreadPoolExecutor | None = None
+
+    def _run_audio_chain(audio_in: Path) -> Path:
+        audio_out = audio_in
         set_stage(job, "audio", "Mixagem e master", "Equalizando locução, trilha sonora e sound FX...", percent=max(job.percent, 64.0))
         effective_subtitles = subtitles or getattr(job, "subtitles", None) or []
         if not effective_subtitles and hasattr(job, "upload_paths"):
@@ -21550,18 +21689,35 @@ def concat_segments_and_mux(
             except Exception as exc:
                 _append_log(job, f"Aviso ao preparar sincronia de legendas para áudio/SFX: {exc}")
         if cta:
-            audio_file = mix_cta_audio(job, audio_file, cta, cta_times, audio_total, work)
+            audio_out = mix_cta_audio(job, audio_out, cta, cta_times, audio_total, work)
         performance_start(job, "sound_fx")
         try:
-            audio_file = mix_auto_sound_fx(job, audio_file, audio_total, work, segments)
+            audio_out = mix_auto_sound_fx(job, audio_out, audio_total, work, segments)
         finally:
             performance_stop(job, "sound_fx")
-        audio_file = master_final_audio(job, audio_file, work)
+        mastered = master_final_audio(job, audio_out, work)
+        precompute_final_aac(job, mastered, work)
+        return mastered
+
+    def _finish_audio_chain() -> Path:
+        """Espera pela cadeia de áudio paralela e regista-a no Render Graph (thread principal)."""
+        nonlocal audio_future, audio_executor
+        if audio_future is None:
+            return audio_file
+        try:
+            finished = audio_future.result()
+        finally:
+            if audio_executor is not None:
+                audio_executor.shutdown(wait=True)
+            audio_future = None
+            audio_executor = None
+        if audio_cached:
+            return finished
         if graph:
             graph.record_metadata(
                 stage="audio_master",
                 payload={
-                    "audio": graph_media_token(audio_file),
+                    "audio": graph_media_token(finished),
                     "profile": job.options.get("platformMasterProfile") or "youtube_long",
                     "audioMastering": bool(job.options.get("audioMastering", True)),
                     "pipeline": RENDER_PIPELINE_VERSION,
@@ -21573,15 +21729,28 @@ def concat_segments_and_mux(
             graph.commit(
                 stage="audio_mix",
                 cache_key=audio_key,
-                artifacts={"audio.wav": audio_file},
+                artifacts={"audio.wav": finished},
                 metadata={
                     "cta_summary": job.cta_summary,
                     "sound_fx_summary": job.sound_fx_summary,
                     "audio_master_summary": job.audio_master_summary,
                 },
             )
-    if graph:
-        sync_graph_summary(job, graph)
+            sync_graph_summary(job, graph)
+        return finished
+
+    if not audio_cached:
+        # A cadeia de áudio (CTA, efeitos, master) é independente da composição visual:
+        # corre em paralelo e só é esperada no mux. Antes as duas etapas eram sequenciais.
+        audio_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"glide-audio-{job.id[:8]}")
+        audio_future = audio_executor.submit(_run_audio_chain, audio_file)
+    else:
+        # Áudio reutilizado do cache: ainda assim adianta o AAC em paralelo com a composição.
+        cached_audio = audio_file
+        audio_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"glide-aac-{job.id[:8]}")
+        audio_future = audio_executor.submit(lambda: (precompute_final_aac(job, cached_audio, work), cached_audio)[1])
+        if graph:
+            sync_graph_summary(job, graph)
 
     visual_key = ""
     visual_cached = None
@@ -21641,7 +21810,7 @@ def concat_segments_and_mux(
                     subtitle_ass=subtitle_ass,
                     work=work,
                     target_duration=audio_total,
-                    audio_file=audio_file,
+                    audio_file=audio_future if audio_future is not None else audio_file,
                 )
                 chunk_success = True
             except RenderCancelled:
@@ -21730,6 +21899,7 @@ def concat_segments_and_mux(
     if graph:
         sync_graph_summary(job, graph)
 
+    audio_file = _finish_audio_chain()
     video_source = ensure_video_duration(job, video_source, audio_total, work)
     video_duration = safe_probe_duration(video_source)
     verify_anti_freeze_guarantee(job, video_source, audio_total)
@@ -21782,14 +21952,15 @@ def concat_segments_and_mux(
                 )
         else:
             performance_start(job, "mux")
+            mux_audio_input, mux_audio_codec = final_audio_mux_args(job, audio_resolved)
             cmd_mux = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1", "-filter_complex_threads", "1",
                 "-fflags", "+genpts",
                 "-i", str(video_resolved.resolve()),
-                "-i", str(audio_resolved.resolve()),
+                "-i", mux_audio_input,
                 "-map", "0:v:0", "-map", "1:a:0",
                 "-c:v", "copy",
-                "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-ac", "2",
+                *mux_audio_codec,
                 "-avoid_negative_ts", "make_zero",
                 str(out_resolved.resolve()),
             ]

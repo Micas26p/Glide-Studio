@@ -4622,12 +4622,24 @@ body[data-theme-resolved="light"] .modal,body[data-theme="light"] .modal{backgro
 /* Barra de progresso do render com brilho animado */
 #progressBar{
   background:linear-gradient(90deg,#10b981 0%,#22d3ee 60%,#8b5cf6 100%);
-  background-size:200% 100%;
-  animation:glide-progress-sheen 3.2s linear infinite;
   box-shadow:0 0 14px rgba(16,185,129,.45);
 }
-@keyframes glide-progress-sheen{from{background-position:0% 0}to{background-position:-200% 0}}
-@media (prefers-reduced-motion: reduce){#progressBar{animation:none}}
+
+/* Poupança de CPU/GPU durante o render: a interface chegava a ~23% da CPU só a animar
+   e a desfocar a página por trás do modal. O render fica com esses núcleos. */
+body.queue-rendering #renderModal{
+  backdrop-filter:none;-webkit-backdrop-filter:none;
+  background:rgba(3,6,12,.9);
+}
+body[data-theme-resolved="light"].queue-rendering #renderModal,
+body[data-theme="light"].queue-rendering #renderModal{background:rgba(226,232,240,.94)}
+body.queue-rendering .sidebar,
+body.queue-rendering .app *,
+body.queue-rendering .sidebar *{
+  animation-play-state:paused !important;
+  backdrop-filter:none !important;-webkit-backdrop-filter:none !important;
+}
+body.page-hidden *,body.page-hidden *::before,body.page-hidden *::after{animation-play-state:paused !important}
 
 /* O atributo hidden tem de ganhar a regras display:flex/grid de componentes
    (o banner de rascunho do AUTO ficava sempre visível). */

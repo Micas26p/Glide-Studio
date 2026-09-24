@@ -9380,6 +9380,10 @@ if(shortcutsModal) shortcutsModal.addEventListener('click', event => {
     shortcutsModal.setAttribute('aria-hidden', 'true');
   }
 });
+// Janela minimizada/oculta: pausa todas as animações para libertar CPU/GPU para o render.
+document.addEventListener('visibilitychange', () => {
+  document.body.classList.toggle('page-hidden', document.hidden);
+});
 syncUiSoundControls();
 if(uiSoundsToggle) uiSoundsToggle.addEventListener('change', () => {
   state.uiSoundsEnabled = uiSoundsToggle.checked;

@@ -57,3 +57,4 @@ queue_projects.json
 queue_projects.json.bak
 queue_projects.*.json
 RESTAURAR_*.json
+sfx_timing_cache.json
