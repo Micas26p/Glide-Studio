@@ -1507,10 +1507,10 @@ function cleanCoverageBodyHtml(c){
   if(c.status === 'deferred') return '<span class="queue-coverage pending">Verificação de material limpo em pausa (render em curso)</span>';
   if(c.status !== 'done') return '';
   if(Number(c.deficitSeconds) > 0){
-    return `<span class="queue-coverage warn" title="Clipes barrados pelo filtro nunca entram no vídeo. Os clipes limpos vão ser reutilizados com variação de corte/zoom.">`
-      + `Material limpo: ${formatMinutes(c.cleanSeconds)} de ${formatMinutes(c.neededSeconds)} — faltam ${formatMinutes(c.deficitSeconds)} (${c.cleanClips}/${c.totalClips} clipes aprovados)</span>`;
+    return `<span class="queue-coverage warn" title="Mesmo usando cada clipe 3 vezes (uma espelhada) o material não cobre a narração; alguns clipes vão repetir mais. Adicione clipes.">`
+      + `Material insuficiente: ${formatMinutes(c.cleanSeconds)} aproveitáveis para ${formatMinutes(c.neededSeconds)} de narração, mesmo com 3 usos por clipe (${c.cleanClips}/${c.totalClips} clipes, ${c.removedPct || 0}% removidos)</span>`;
   }
-  return `<span class="queue-coverage ok">Material limpo suficiente (${c.cleanClips}/${c.totalClips} clipes aprovados)</span>`;
+  return `<span class="queue-coverage ok">Material suficiente (${c.cleanClips}/${c.totalClips} clipes, ${c.removedPct || 0}% removidos pelo filtro)</span>`;
 }
 let cleanCoverageTimer = null;
 async function pollCleanCoverage(){
@@ -1560,13 +1560,13 @@ function confirmCleanCoverage(projectIds){
   if(!short.length) return true;
   const lines = short.map(p => {
     const c = cleanCoverageOf(p);
-    return `• ${p.name}: ${formatMinutes(c.cleanSeconds)} de material limpo para ${formatMinutes(c.neededSeconds)} de narração`;
+    return `• ${p.name}: ${formatMinutes(c.cleanSeconds)} de material aproveitável para ${formatMinutes(c.neededSeconds)} de narração`;
   }).join(String.fromCharCode(10));
   return window.confirm(
-    `Material limpo insuficiente:
+    `Material insuficiente mesmo com 3 usos por clipe:
 ${lines}
 
-Os clipes barrados pelo filtro NÃO entram no vídeo; os clipes limpos serão reutilizados (com variação de corte e zoom).
+Para cobrir a narração, alguns clipes vão aparecer mais de 3 vezes (repartido por igual).
 
 Renderizar mesmo assim? (Cancelar para adicionar mais clipes antes.)`
   );

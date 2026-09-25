@@ -10817,6 +10817,32 @@ def visual_clean_zone(options: dict[str, Any], position_ratio: float, media_kind
     return level, f"manual: {level}"
 
 
+VISUAL_REMOVAL_CAP = 0.30  # o filtro nunca retira mais de 30% dos clipes (regra do utilizador)
+MAX_ASSET_USES = 3  # cada clipe aparece no máximo 3 vezes (a 2ª espelhada quando é seguro)
+TECHNICAL_REMOVAL_CATEGORIES = {"perceptual_duplicate", "low_resolution"}
+TEXT_HEAVY_CATEGORIES = {"text_dominant", "presentation_slide", "ui_screenshot", "data_dominant",
+                         "screen_recording", "polluted_banner"}
+
+
+def visual_reject_severity(category: str, evidence: dict[str, Any], confidence: float) -> float | None:
+    """Severidade de um clipe suspeito, ou None quando é leve (fica no vídeo).
+
+    Só é grave: apresentador em quase todo o clipe, muito texto, ou ecrã de subscribe/fim.
+    Apresentador parcial, logótipo no canto ou pouco texto não justificam retirar o clipe.
+    """
+    ev = evidence if isinstance(evidence, dict) else {}
+    presenter = float(ev.get("presenter_ratio") or 0.0)
+    text = max(float(ev.get("text_ratio") or 0.0), float(ev.get("data_ratio") or 0.0))
+    conf = max(0.1, min(1.0, float(confidence or 0.0)))
+    if category == "outro_subscribe_screen":
+        return 3.0 + conf
+    if category in {"presenter", "webcam_pip"} and presenter >= 0.8:
+        return 2.0 + presenter * conf
+    if category in TEXT_HEAVY_CATEGORIES and text >= 0.6:
+        return 2.0 + text * conf
+    return None
+
+
 def apply_visual_clean_filter(
     job: Job,
     valid_pairs: list[tuple[Path, float]],
@@ -10905,6 +10931,8 @@ def apply_visual_clean_filter(
 
     clean_pairs: list[tuple[Path, float]] = []
     fallback_pairs: list[tuple[Path, float]] = []
+    suspect_pool: list[tuple[int, Path, float, float | None, dict[str, Any]]] = []
+    technical_removed = 0
     soft_rejected_pairs: list[tuple[Path, float]] = []
     hard_rejected_pairs: list[tuple[Path, float]] = []
     retained_safety_pairs: list[tuple[Path, float, dict[str, Any]]] = []
@@ -11145,11 +11173,16 @@ def apply_visual_clean_filter(
             if media_kind == "image":
                 summary["images_rejected"] += 1
 
-            soft_rejected_pairs.append((source, duration))
-            fallback_pairs.append((source, duration))
-            summary["soft_demoted"] += 1
-            item["decision"] = "soft_reject"
-            summary["items"].append(item)
+            if category in TECHNICAL_REMOVAL_CATEGORIES:
+                # Duplicado perceptual / resolução inutilizável: sai sempre (não conta para a variedade).
+                soft_rejected_pairs.append((source, duration))
+                technical_removed += 1
+                summary["soft_demoted"] += 1
+                item["decision"] = "removed_technical"
+                summary["items"].append(item)
+                continue
+            severity = visual_reject_severity(category, item.get("evidence") or {}, float(item.get("confidence") or 0.0))
+            suspect_pool.append((idx, source, duration, severity, item))
             continue
         else:
             trim_info = analysis.get("clean_trim") or (analysis.get("metrics") or {}).get("clean_trim") or {}
@@ -11180,6 +11213,39 @@ def apply_visual_clean_filter(
                 item["decision"] = "kept"
             if item["decision"] != "kept" or category != "clean":
                 summary["items"].append(item)
+
+    # Limite de remoção: no máximo 30% dos clipes saem (pretos/corrompidos incluídos).
+    # Retiram-se primeiro os mais graves; os restantes voltam ao vídeo na ordem original.
+    removal_cap = int(math.floor(len(valid_pairs) * VISUAL_REMOVAL_CAP))
+    budget = max(0, removal_cap - hard_rejected_count - technical_removed)
+    severe_sorted = sorted((entry for entry in suspect_pool if entry[3] is not None), key=lambda entry: -float(entry[3]))
+    removed_ids = {id(entry) for entry in severe_sorted[:budget]}
+    order_of = {str(src): i for i, (src, _dur) in enumerate(valid_pairs)}
+    for entry in suspect_pool:
+        _idx, source, duration, severity, item = entry
+        if id(entry) in removed_ids:
+            soft_rejected_pairs.append((source, duration))
+            summary["soft_demoted"] += 1
+            summary["severe_removed"] = int(summary.get("severe_removed") or 0) + 1
+            item["decision"] = "removed_severe"
+        else:
+            clean_pairs.append((source, duration))
+            accepted_clean_duration += duration
+            key = "severe_kept_by_cap" if severity is not None else "mild_kept"
+            summary[key] = int(summary.get(key) or 0) + 1
+            item["decision"] = "kept_capped" if severity is not None else "kept_mild"
+        summary["items"].append(item)
+    clean_pairs.sort(key=lambda pair: order_of.get(str(pair[0]), 10 ** 9))
+    summary["removal_cap_pct"] = int(VISUAL_REMOVAL_CAP * 100)
+    summary["removed_total"] = hard_rejected_count + technical_removed + int(summary.get("severe_removed") or 0)
+    summary["removed_pct"] = round(100.0 * summary["removed_total"] / max(1, len(valid_pairs)), 1)
+    if suspect_pool:
+        _append_log(
+            job,
+            f"Filtro Visual (limite {summary['removal_cap_pct']}%): removidos {summary['removed_total']}/{len(valid_pairs)} "
+            f"({summary['removed_pct']}%) | graves removidos={summary.get('severe_removed', 0)} | "
+            f"graves mantidos pelo limite={summary.get('severe_kept_by_cap', 0)} | leves mantidos={summary.get('mild_kept', 0)}."
+        )
 
     # Montagem da Timeline:
     # 1. Clipes 100% limpos SEMPRE ocupam o início e corpo principal da timeline.
@@ -18172,7 +18238,8 @@ def _run_clean_coverage(project_id: str) -> None:
         selected, summary = apply_visual_clean_filter(job, pairs, narration, work)
         clean_seconds = round(sum(duration for _, duration in selected), 1)
         needed = round(float(summary.get("needed_raw_seconds") or narration), 1)
-        deficit = round(max(0.0, needed - clean_seconds), 1)
+        # Com até 3 usos por clipe, só falta material se nem assim cobre a narração.
+        deficit = round(max(0.0, needed - clean_seconds * MAX_ASSET_USES), 1)
         update(
             status="done",
             cleanClips=len(selected),
@@ -18180,7 +18247,9 @@ def _run_clean_coverage(project_id: str) -> None:
             cleanSeconds=clean_seconds,
             neededSeconds=needed,
             deficitSeconds=deficit,
-            coverage=round(min(1.0, clean_seconds / max(1.0, needed)), 3),
+            coverage=round(min(1.0, clean_seconds * MAX_ASSET_USES / max(1.0, needed)), 3),
+            removedPct=float(summary.get("removed_pct") or 0.0),
+            maxUses=MAX_ASSET_USES,
             rejected={
                 key: int(summary.get(key) or 0)
                 for key in ("presenter_rejected", "rejected_text", "rejected_watermarks", "rejected_ui_screenshots",
@@ -20914,9 +20983,20 @@ def build_segment_plan(
             # allow_audio_trim=False: NUNCA CORTA O ÁUDIO! Preenche 100% da narração com ciclos mutantes variados
             cycle_num = 2
             available_pool = list(unique_pass1_items)
+            use_cap = MAX_ASSET_USES
             while remaining > 0.08 and available_pool:
+                # Só entram clipes abaixo do limite de usos. Se todos o atingiram e ainda falta
+                # narração (material insuficiente), o limite sobe 1 de forma uniforme para
+                # nunca cortar a narração, e isso fica registado para o aviso.
+                pool_now = [item for item in available_pool if asset_usage.get(item[2], 0) < use_cap]
+                if not pool_now:
+                    if use_cap >= 50:
+                        break
+                    use_cap += 1
+                    auto_healing_applied.append(f"limite_de_usos_elevado_para_{use_cap}_por_falta_de_material")
+                    continue
                 last_key = str(plans[-1].source) if plans else None
-                permuted = generate_mutant_permutation(available_pool, cycle=cycle_num, last_source_key=last_key)
+                permuted = generate_mutant_permutation(pool_now, cycle=cycle_num, last_source_key=last_key)
                 for src, orig_dur, fp, s_idx in permuted:
                     if remaining <= 0.08:
                         break
@@ -21772,8 +21852,8 @@ def make_segments_smart(
                 if rendered_duration >= target_floor or attempts >= max_attempts:
                     break
                 src_fp = compute_asset_fingerprint(src, cwd=work)
-                if rendered_asset_usage.get(src_fp, 0) >= 2:
-                    continue  # LIMITE ABSOLUTO: nenhum asset pode ser usado 3 ou mais vezes
+                if rendered_asset_usage.get(src_fp, 0) >= MAX_ASSET_USES:
+                    continue  # limite: cada clipe aparece no máximo 3 vezes
                 attempts += 1
                 remaining = target_floor - rendered_duration
                 if remaining <= 0.10:

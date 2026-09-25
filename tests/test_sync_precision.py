@@ -118,29 +118,74 @@ class CalloutCardTests(unittest.TestCase):
             self.assertNotIn("\\move", second)
 
 
-class StrictVisualFilterTests(unittest.TestCase):
-    def test_rejected_clips_never_return_to_timeline(self):
+class VisualFilterCapTests(unittest.TestCase):
+    """Regra: o filtro retira no máximo 30% dos clipes, começando pelos mais graves."""
+
+    def _run(self, spec):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
-            clean = [work / f"clean_{i}.mp4" for i in range(2)]
-            dirty = [work / f"presenter_{i}.mp4" for i in range(6)]
-            for path in clean + dirty:
-                path.write_bytes(b"x" * 64)
+            pairs, verdicts = [], {}
+            for name, verdict in spec:
+                path = work / f"{name}.mp4"
+                path.write_bytes(name.encode() * 16)
+                pairs.append((path, 8.0))
+                verdicts[path.name] = verdict
 
             def fake_probe(path, duration, level, cwd=None, context=None, media_kind="video"):
-                if "presenter" in Path(path).name:
-                    return {"category": "presenter", "action": "hard_reject", "reason": "apresentador", "confidence": 0.9, "metrics": {}}
-                return {"category": "clean", "action": "keep", "reason": "limpo", "confidence": 0.9, "metrics": {}}
+                return dict(verdicts[Path(path).name])
 
-            job = app.Job(id="strict", work=work)
+            job = app.Job(id="cap", work=work)
             job.options = {}
-            pairs = [(p, 8.0) for p in clean + dirty]
             with patch.object(app, "probe_visual_clean_health", side_effect=fake_probe):
                 selected, summary = app.apply_visual_clean_filter(job, pairs, 300.0, work)
-            names = {Path(p).name for p, _ in selected}
-            self.assertFalse(any(n.startswith("presenter") for n in names), names)
-            self.assertEqual(summary.get("fallback_used", 0), 0)
-            self.assertTrue(summary.get("insufficient_clean_media"))
+            return [Path(p).stem for p, _ in selected], summary
+
+    @staticmethod
+    def _presenter(ratio):
+        return {"category": "presenter", "action": "hard_reject", "reason": "apresentador", "confidence": 0.9,
+                "evidence": {"presenter_ratio": ratio}, "metrics": {}}
+
+    def test_never_removes_more_than_30_percent_and_worst_go_first(self):
+        clean = {"category": "clean", "action": "keep", "reason": "limpo", "confidence": 0.9, "metrics": {}}
+        spec = [("c1", clean), ("c2", clean)]
+        spec += [(f"full{i}", self._presenter(1.0 - i * 0.02)) for i in range(6)]  # apresentador no clipe inteiro
+        spec += [("partial1", self._presenter(0.4)), ("partial2", self._presenter(0.4))]  # parcial: leve
+        kept, summary = self._run(spec)
+        self.assertEqual(summary["removed_total"], 3)  # 30% de 10
+        self.assertLessEqual(summary["removed_pct"], 30.0)
+        for worst in ("full0", "full1", "full2"):
+            self.assertNotIn(worst, kept)
+        for stays in ("c1", "c2", "partial1", "partial2", "full3", "full4", "full5"):
+            self.assertIn(stays, kept)
+        self.assertEqual(kept[:2], ["c1", "c2"])  # ordem original preservada
+
+    def test_mild_suspects_always_stay(self):
+        mild_text = {"category": "text_dominant", "action": "soft_suspect", "reason": "texto", "confidence": 0.7,
+                     "evidence": {"text_ratio": 0.2}, "metrics": {}}
+        kept, summary = self._run([(f"t{i}", mild_text) for i in range(5)])
+        self.assertEqual(len(kept), 5)
+        self.assertEqual(summary["removed_total"], 0)
+
+
+class RepetitionLimitTests(unittest.TestCase):
+    def test_each_clip_used_at_most_three_times_second_mirrored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = []
+            for i in range(8):
+                path = Path(tmp) / f"broll_{i}.mp4"
+                path.write_bytes(bytes([i]) * (1000 + i))
+                files.append(path)
+            # 8 clipes de 8 s (usados até ~5,5 s por aparição) para 100 s de narração
+            with patch.object(app, "is_safe_for_hflip", return_value=True):
+                plans, _summary = app.build_segment_plan(files, [8.0] * 8, 100.0)
+            uses: dict[str, list] = {}
+            for plan in plans:
+                uses.setdefault(plan.source.name, []).append(plan)
+            self.assertLessEqual(max(len(v) for v in uses.values()), 3)
+            second_uses = [v[1] for v in uses.values() if len(v) >= 2]
+            self.assertTrue(second_uses)
+            self.assertTrue(all(plan.hflip for plan in second_uses))
+            self.assertAlmostEqual(sum(p.target_duration for p in plans), 100.0, delta=0.2)
 
 
 class TailPadTests(unittest.TestCase):
