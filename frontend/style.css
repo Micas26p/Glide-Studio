@@ -590,6 +590,11 @@ body[data-theme-resolved="light"] .automator-draft-banner .draft-info span{color
 .queue-main small{color:var(--muted);font-size:11px}
 .queue-visual-metrics{display:block;min-width:0;color:var(--accent-text);font-size:11px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .queue-visual-metrics b{color:var(--muted-dark);padding:0 3px}
+.queue-coverage{display:block;min-width:0;margin-top:3px;font-size:11px;font-weight:700;line-height:1.35;white-space:normal}
+.queue-coverage.warn{color:#f5b454}
+.queue-coverage.ok{color:var(--accent-text)}
+.queue-coverage.pending{color:var(--muted-dark);font-weight:600}
+body[data-theme-resolved="light"] .queue-coverage.warn{color:#a15c00}
 .queue-status{border:1px solid var(--border-subtle);border-radius:999px;padding:2px 7px;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
 .queue-grip{width:16px;height:28px;display:grid;place-items:center;color:var(--muted-dark);cursor:grab;transition:color var(--duration-fast) ease}
 .queue-grip:hover{color:var(--text)}

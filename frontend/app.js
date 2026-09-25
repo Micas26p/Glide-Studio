@@ -1473,8 +1473,79 @@ function rerenderEligibility(project){
 }
 function queueVisualMetricsHtml(project){
   const report = projectVisualReport(project);
-  if(!report) return '';
-  return `<span class="queue-visual-metrics">Aprovados ${report.approved} <b>|</b> Reprovados ${report.rejected} <b>|</b> Fallback ${report.fallback}</span>`;
+  const coverage = cleanCoverageHtml(project);
+  if(!report) return coverage;
+  return `<span class="queue-visual-metrics">Aprovados ${report.approved} <b>|</b> Reprovados ${report.rejected}</span>${coverage}`;
+}
+
+// ---- Cobertura de material limpo (o filtro nunca deixa entrar clipes barrados) ----
+state.cleanCoverage = state.cleanCoverage || {};
+function formatMinutes(seconds){
+  const s = Math.max(0, Number(seconds) || 0);
+  return s >= 90 ? `${(s / 60).toFixed(1).replace('.', ',')} min` : `${Math.round(s)} s`;
+}
+function cleanCoverageOf(project){
+  return state.cleanCoverage[project?.id] || project?.cleanCoverage || null;
+}
+function cleanCoverageHtml(project){
+  const c = cleanCoverageOf(project);
+  if(!c || !c.status || c.status === 'none') return '';
+  if(c.status === 'queued' || c.status === 'analyzing'){
+    const prog = c.total ? ` ${c.analyzed || 0}/${c.total}` : '';
+    return `<span class="queue-coverage pending">A verificar material limpo…${prog}</span>`;
+  }
+  if(c.status === 'deferred') return '<span class="queue-coverage pending">Verificação de material limpo em pausa (render em curso)</span>';
+  if(c.status !== 'done') return '';
+  if(Number(c.deficitSeconds) > 0){
+    return `<span class="queue-coverage warn" title="Clipes barrados pelo filtro nunca entram no vídeo. Os clipes limpos vão ser reutilizados com variação de corte/zoom.">`
+      + `Material limpo: ${formatMinutes(c.cleanSeconds)} de ${formatMinutes(c.neededSeconds)} — faltam ${formatMinutes(c.deficitSeconds)} (${c.cleanClips}/${c.totalClips} clipes aprovados)</span>`;
+  }
+  return `<span class="queue-coverage ok">Material limpo suficiente (${c.cleanClips}/${c.totalClips} clipes aprovados)</span>`;
+}
+let cleanCoverageTimer = null;
+async function pollCleanCoverage(){
+  cleanCoverageTimer = null;
+  const pending = Object.entries(state.cleanCoverage).filter(([, c]) => ['queued', 'analyzing'].includes(c?.status)).map(([id]) => id);
+  if(!pending.length) return;
+  await Promise.all(pending.map(async id => {
+    try{
+      const r = await fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage`, {cache: 'no-store'});
+      if(r.ok) state.cleanCoverage[id] = await r.json();
+    }catch(_err){}
+  }));
+  state.projectQueueSignature = '';
+  state.projectQueueStructureSignature = '';
+  renderProjectQueue();
+  cleanCoverageTimer = window.setTimeout(pollCleanCoverage, 4000);
+}
+async function requestCleanCoverage(projectIds){
+  for(const id of (projectIds || [])){
+    try{
+      const r = await fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage`, {method: 'POST'});
+      if(r.ok) state.cleanCoverage[id] = {status: 'queued'};
+    }catch(_err){}
+  }
+  if(!cleanCoverageTimer) cleanCoverageTimer = window.setTimeout(pollCleanCoverage, 1500);
+}
+function confirmCleanCoverage(projectIds){
+  const ids = projectIds && projectIds.length ? projectIds : state.projects.map(p => p.id);
+  const short = state.projects.filter(p => ids.includes(p.id)).filter(p => {
+    const c = cleanCoverageOf(p);
+    return c && c.status === 'done' && Number(c.deficitSeconds) > 0;
+  });
+  if(!short.length) return true;
+  const lines = short.map(p => {
+    const c = cleanCoverageOf(p);
+    return `• ${p.name}: ${formatMinutes(c.cleanSeconds)} de material limpo para ${formatMinutes(c.neededSeconds)} de narração`;
+  }).join(String.fromCharCode(10));
+  return window.confirm(
+    `Material limpo insuficiente:
+${lines}
+
+Os clipes barrados pelo filtro NÃO entram no vídeo; os clipes limpos serão reutilizados (com variação de corte e zoom).
+
+Renderizar mesmo assim? (Cancelar para adicionar mais clipes antes.)`
+  );
 }
 function reportReasonRows(report){
   const items = Array.isArray(report?.details?.items) ? report.details.items : [];
@@ -7350,6 +7421,7 @@ async function applyAutomatorDistribution(options = {}){
     closeAutomator();
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
     succeeded = rowsToApply.map(row => row.project.id);
+    requestCleanCoverage(succeeded);
   }catch(error){
     const cancelled = error?.name === 'AbortError';
     const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
@@ -7986,6 +8058,7 @@ async function monitorBackendQueue(){
 
 async function renderQueue(config = {}){
   if(state.queueRendering || state.renderActive) return;
+  if(!confirmCleanCoverage(config.projectIds)) return;
 
   // Unlock Web Audio Context during user gesture click
   try {

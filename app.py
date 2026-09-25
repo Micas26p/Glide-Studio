@@ -27,6 +27,8 @@ import zipfile
 import xml.etree.ElementTree as ET
 from array import array
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+
+import glide_align
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -1526,6 +1528,8 @@ class Job:
     output_dir: str | None = None
     error: str | None = None
     log: list[str] = field(default_factory=list)
+    narration_words: list[tuple[float, str]] | None = None  # transcrição (glide_align) para alinhar callouts
+    narration_alignment_future: Any = None
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -1629,6 +1633,7 @@ class SegmentPlan:
     delogo_boxes: list[tuple[int, int, int, int]] = field(default_factory=list)
     focal_point: tuple[float, float] | None = None
     safe_framing: dict[str, Any] | None = None
+    frame_count: int = 0  # frames exatos na grelha da timeline (quantize_plans_to_frame_grid)
 
 
 @dataclass
@@ -4459,6 +4464,7 @@ def _public_queue_project(project: dict[str, Any]) -> dict[str, Any]:
     render_graph_run = compact_render_graph_run(project.get("renderGraphRun")) if isinstance(project.get("renderGraphRun"), dict) else None
 
     return {
+        "cleanCoverage": dict(CLEAN_COVERAGE.get(str(project.get("id") or "")) or {}) or None,
         "id": project.get("id"),
         "name": project.get("name") or "Projeto",
         "status": project.get("status") or "draft",
@@ -11185,68 +11191,15 @@ def apply_visual_clean_filter(
     selected_pairs: list[tuple[Path, float]] = list(clean_pairs)
     clean_raw = sum(duration for _, duration in clean_pairs)
 
+    # Regra do utilizador: o que o filtro barrou NUNCA entra na timeline. Se faltar
+    # material limpo, o planeador reutiliza apenas os clipes limpos (com variação de
+    # corte/zoom) e o AUTO avisa antes do render quanto material limpo falta.
     used_fallback_pairs: list[tuple[Path, float]] = []
-    if clean_raw < needed_raw and fallback_pairs:
-        # Priorizar mídias de apoio com menor poluição (excluir estritamente dados, slides e screenshots de app/console)
-        usable_fallbacks = [
-            (s, d) for s, d in fallback_pairs
-            if not any(
-                item.get("category") in {"data_dominant", "presentation_slide", "ui_screenshot", "screen_recording", "polluted_banner"}
-                for item in summary.get("items", [])
-                if item.get("file") == s.name
-            )
-        ]
-        pool_to_use = usable_fallbacks if usable_fallbacks else fallback_pairs
-        for source, duration in pool_to_use:
-            selected_pairs.append((source, duration))
-            used_fallback_pairs.append((source, duration))
-            clean_raw += duration
-            summary["fallback_used"] += 1
-            if clean_raw >= needed_raw:
-                break
-
-    if clean_raw < needed_raw:
-        # Salvaguarda de Integridade de Timeline:
-        # NUNCA deixa a timeline desprovida de midia. Resgata exclusivamente itens com perfil aceitavel (NUNCA hard-reject).
-        selected_set = {str(p[0]) for p in selected_pairs}
-        hard_set = {str(p[0]) for p in hard_rejected_pairs}
-        salvage_pool: list[tuple[Path, float, float]] = []
-        for src, dur in valid_pairs:
-            if str(src) in selected_set or str(src) in hard_set:
-                continue
-            idx_in_valid = next((i for i, (s, _) in enumerate(valid_pairs) if str(s) == str(src)), None)
-            an = precomputed_probes.get(idx_in_valid) if idx_in_valid is not None else None
-            cat = str(an.get("category") or "") if isinstance(an, dict) else ""
-            act = str(an.get("action") or "") if isinstance(an, dict) else ""
-            if act == "hard_reject" or cat in {
-                "invalid", "no_frames", "black_screen", "static_black_screen",
-                "outro_subscribe_screen", "static_video", "presentation_slide",
-                "screen_recording", "data_dominant", "ui_screenshot", "polluted_banner",
-            }:
-                continue
-            m = an.get("metrics", {}) if isinstance(an, dict) else {}
-            score = float(m.get("quality_score") or 0.70) - (float(m.get("text_score") or 0.0) * 0.5)
-            salvage_pool.append((src, dur, score))
-
-        salvage_pool.sort(key=lambda x: x[2], reverse=True)
-        restored = 0
-        for src, dur, _ in salvage_pool:
-            selected_pairs.append((src, dur))
-            used_fallback_pairs.append((src, dur))
-            if (src, dur) not in soft_rejected_pairs:
-                soft_rejected_pairs.append((src, dur))
-            clean_raw += dur
-            restored += 1
-            if clean_raw >= needed_raw * 1.08:
-                break
-        if restored > 0:
-            summary["salvaged_for_coverage"] = restored
-            _append_log(
-                job,
-                f"Salvaguarda Visual: {restored} mídia(s) de apoio resgatadas por ordem de qualidade "
-                f"para cobrir integralmente a narração ({clean_raw:.1f}s/{needed_raw:.1f}s), "
-                f"evitando repetições forçadas ou falta de vídeo."
-            )
+    if not clean_pairs and valid_pairs:
+        raise RuntimeError(
+            "Filtro Visual: nenhuma mídia limpa aprovada (todas tinham apresentador, texto, marca d'água "
+            "ou outro problema). Adicione clipes/imagens limpos ao projeto antes de renderizar."
+        )
 
     job.fallback_used_media = list(used_fallback_pairs)
     job.soft_rejected_media = list(soft_rejected_pairs)
@@ -13773,6 +13726,54 @@ def subtitle_accent_dialogue(
     return ""
 
 
+CALLOUT_CARD_BOX_ALPHA = "40"  # caixa ~75% opaca, como no vídeo de referência
+
+
+def callout_card_style_line(style: dict[str, Any], font_size: int, margin_v: int) -> str:
+    """Estilo 'Card': o próprio libass desenha a caixa (BorderStyle 3) à medida do texto."""
+    box = ass_color(style.get("back") or "#0B1118", "#0B1118", alpha=CALLOUT_CARD_BOX_ALPHA)
+    primary = ass_color(style.get("primary"), "#FFFFFF")
+    bold = -1 if style.get("bold") else 0
+    italic = -1 if style.get("italic") else 0
+    pad = max(6.0, round(font_size * 0.32, 1))
+    spacing = float(style.get("spacing", 0))
+    return (f"Style: Card,{style['font']},{font_size},{primary},{primary},{box},{box},{bold},{italic},0,0,"
+            f"100,100,{spacing},0,3,{pad:.1f},0,2,70,70,{margin_v},1\n")
+
+
+def callout_card_dialogues(
+    text_ass: str,
+    start: str,
+    end: str,
+    x: int,
+    y: int,
+    style: dict[str, Any],
+    font_size: int,
+) -> tuple[str, str]:
+    """Cartão editorial: caixa translúcida (camada 1, estilo Card) + barra de acento em
+    desenho inline, e o texto por cima (camada 2) com o mesmo layout, por isso ficam
+    sempre alinhados. Entrada a deslizar com fade de ~7 frames.
+    Devolve (linha da caixa, texto com tags para a camada 2)."""
+    bar_w = max(5, int(round(font_size * 0.12)))
+    bar_h = max(10, int(round(font_size * 0.78)))
+    gap = max(8, int(round(font_size * 0.35)))
+    slide = max(16, int(round(font_size * 0.5)))
+    primary = str(style.get("primary") or "#FFFFFF").upper()
+    accent_hex = str(style.get("accent") or (primary if primary not in {"#FFFFFF", "#FFF", "#F5F5F7", "#FBF6EE"} else "#2FD4A7"))
+    accent = "&H" + ass_color(accent_hex, "#2FD4A7")[4:] + "&"
+    anim = f"\\an2\\move({x - slide},{y},{x},{y},0,240)\\fad(200,180)"
+    bar = f"m 0 0 l {bar_w} 0 l {bar_w} {bar_h} l 0 {bar_h}"
+    spacer = f"m 0 0 l {gap} 0 l {gap} 1 l 0 1"
+    # Caixa + barra visíveis, texto invisível (só dá a largura à caixa)
+    box_line = (f"Dialogue: 1,{start},{end},Card,,0,0,0,,{{{anim}\\shad0}}"
+                f"{{\\1c{accent}\\1a&H00&\\p1}}{bar}{{\\p0}}{{\\1a&HFF&\\p1}}{spacer}{{\\p0}}{text_ass}\n")
+    # Texto visível com o mesmo prefixo (transparente), sem caixa
+    outline = min(1.0, float(style.get("outline_size") or 0.6))
+    text_tagged = (f"{{{anim}\\bord{outline:.1f}\\shad0}}{{\\1a&HFF&\\3a&HFF&\\p1}}{bar}{{\\p0}}"
+                   f"{{\\p1}}{spacer}{{\\p0}}{{\\1a&H00&\\3a&H00&}}{text_ass}")
+    return box_line, text_tagged
+
+
 def caption_style_from_options(options: dict[str, Any]) -> dict[str, Any]:
     style = dict(options.get("captionStyle") or {})
     presets = {
@@ -13837,6 +13838,150 @@ def split_caption_cues(cues: list[SubtitleCue], max_chars: int = 44) -> list[Sub
     return result
 
 
+# ---------------------------------------------------------------------------
+# Transcrição local da narração (whisper.cpp na GPU) para alinhar callouts.
+# Corre antes do render (quando o AUTO distribui) ou em paralelo com ele, nunca o
+# atrasa: sem transcrição pronta a tempo, os callouts mantêm os tempos do SRT.
+# ---------------------------------------------------------------------------
+WHISPER_TOOL_DIR = APP_DIR / "tools" / "whisper"
+ASR_CACHE_DIR = DATA_ROOT / "asr_cache"
+ASR_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="glide-asr")
+_ASR_FUTURES: dict[str, Future] = {}
+_ASR_LOCK = threading.Lock()
+
+
+def whisper_engine() -> tuple[Path, Path] | None:
+    """(whisper-cli, modelo) quando a build GPU está instalada em tools/whisper."""
+    exe = WHISPER_TOOL_DIR / "whisper-cli.exe"
+    models = WHISPER_TOOL_DIR / "models"
+    model = next((models / name for name in ("ggml-small.bin", "ggml-base.bin", "ggml-medium.bin") if (models / name).is_file()), None)
+    if exe.is_file() and model and (WHISPER_TOOL_DIR / "ggml-cuda.dll").is_file():
+        return exe, model
+    return None
+
+
+def _audio_content_signature(path: Path) -> str:
+    stat = path.stat()
+    digest = hashlib.md5()
+    with open(path, "rb") as handle:
+        digest.update(handle.read(65536))
+        if stat.st_size > 131072:
+            handle.seek(stat.st_size - 65536)
+            digest.update(handle.read(65536))
+    return f"{stat.st_size}_{digest.hexdigest()[:20]}"
+
+
+def narration_words_cached(audio: Path) -> list[tuple[float, str]] | None:
+    try:
+        cache = ASR_CACHE_DIR / f"{_audio_content_signature(Path(audio))}.json"
+        if not cache.is_file():
+            return None
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        return [(float(t), str(w)) for t, w in data.get("words") or []]
+    except Exception:
+        return None
+
+
+def _transcribe_narration(audio: Path, language: str) -> list[tuple[float, str]]:
+    engine = whisper_engine()
+    if not engine:
+        raise RuntimeError("whisper.cpp GPU não instalado")
+    exe, model = engine
+    sig = _audio_content_signature(audio)
+    tmp = ASR_CACHE_DIR / f"tmp_{sig}"
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        wav = tmp / "narration16k.wav"
+        _run_hidden([FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(audio), "-vn", "-ac", "1",
+                     "-ar", "16000", "-c:a", "pcm_s16le", str(wav)], priority="balanced", check=True, timeout=900)
+        lang = language if language in {"pt", "en", "es", "fr", "de", "it"} else "auto"
+        _run_hidden([str(exe), "-m", str(model), "-f", str(wav), "-l", lang, "-ml", "1", "-sow", "-oj",
+                     "-of", str(tmp / "words"), "-t", "3", "-np"],
+                    cwd=WHISPER_TOOL_DIR, priority="balanced", check=True, timeout=5400, capture_output=True)
+        words = glide_align.load_whisper_json(tmp / "words.json")
+        ASR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        atomic_write_text(
+            ASR_CACHE_DIR / f"{sig}.json",
+            json.dumps({"engine": "whisper.cpp-cuda", "model": model.name, "language": lang,
+                        "createdAt": _now_iso(), "words": words}, ensure_ascii=False),
+        )
+        return words
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def schedule_narration_transcription(audio: Path, language: str = "auto") -> Future | None:
+    """Agenda (uma vez por áudio) a transcrição na GPU; devolve o Future ou None sem motor."""
+    audio = Path(audio)
+    if not audio.is_file() or not whisper_engine():
+        return None
+    try:
+        sig = _audio_content_signature(audio)
+    except Exception:
+        return None
+    with _ASR_LOCK:
+        current = _ASR_FUTURES.get(sig)
+        if current is not None and not (current.done() and current.exception() is not None):
+            return current
+        cached = narration_words_cached(audio)
+        future: Future = Future()
+        if cached:
+            future.set_result(cached)
+        else:
+            future = ASR_EXECUTOR.submit(_transcribe_narration, audio, language)
+        _ASR_FUTURES[sig] = future
+        return future
+
+
+def srt_language(path: Path | None) -> str:
+    try:
+        return detect_text_language(" ".join(cue.text for cue in parse_srt_file(Path(path))[:120]))
+    except Exception:
+        return "auto"
+
+
+def prepare_narration_alignment(job: Job, narration: Path | None, subtitle_path: Path | None) -> None:
+    """No início do render: usa a transcrição em cache ou arranca-a em paralelo (GPU)."""
+    job.narration_words = None
+    job.narration_alignment_future = None
+    if not narration or not subtitle_path or not bool(job.options.get("alignCallouts", True)):
+        return
+    if job.options.get("_smart_sample_windows"):
+        return
+    words = narration_words_cached(Path(narration))
+    if words:
+        job.narration_words = words
+        _append_log(job, f"Sincronia de callouts: transcrição da narração em cache ({len(words)} palavras).")
+        return
+    future = schedule_narration_transcription(Path(narration), srt_language(subtitle_path))
+    if future is not None:
+        job.narration_alignment_future = future
+        _append_log(job, "Sincronia de callouts: a transcrever a narração na GPU em paralelo com o render.")
+
+
+def apply_late_narration_alignment(job: Job, subtitle_ass: Path | None) -> Path | None:
+    """Depois dos segmentos (antes de CTA/SFX/composição): se a transcrição acabou entretanto,
+    reconstrói o ASS com os callouts alinhados. Nunca espera pela transcrição."""
+    future = getattr(job, "narration_alignment_future", None)
+    args = getattr(job, "_ass_rebuild_args", None)
+    if not subtitle_ass or getattr(job, "narration_words", None) or future is None or not args:
+        return subtitle_ass
+    if not future.done():
+        _append_log(job, "Sincronia de callouts: transcrição ainda não terminou; mantidos os tempos do SRT neste render.")
+        return subtitle_ass
+    try:
+        job.narration_words = future.result()
+    except Exception as exc:
+        _append_log(job, f"Sincronia de callouts indisponível ({exc}); mantidos os tempos do SRT.")
+        return subtitle_ass
+    try:
+        rebuilt = build_ass_file(job, *args[:5], caption_path=args[5])
+        return rebuilt or subtitle_ass
+    except Exception as exc:
+        _append_log(job, f"Sincronia de callouts: falha ao reconstruir o ASS ({exc}); mantido o anterior.")
+        return subtitle_ass
+
+
 def resolve_effective_subtitle_cues(
     job: Job,
     srt_path: Path | str | None,
@@ -13855,6 +14000,14 @@ def resolve_effective_subtitle_cues(
     if not p_srt.exists():
         return [], {}, []
     original_cues = parse_srt_file(p_srt)
+    alignment_stats: dict[str, Any] | None = None
+    words = getattr(job, "narration_words", None)
+    if words and bool(job.options.get("alignCallouts", True)) and not job.options.get("_smart_sample_windows"):
+        new_times, alignment_stats = glide_align.align_callouts(
+            [(cue.start, cue.end, cue.text) for cue in original_cues], words
+        )
+        if alignment_stats.get("applied"):
+            original_cues = [SubtitleCue(a, b, cue.text) for (a, b), cue in zip(new_times, original_cues)]
     min_duration = float(job.options.get("subtitleMinDuration") or MIN_SUBTITLE_SECONDS)
     cinematic = intro_mode(job.options) == "cinematic"
     offset = intro_duration(job.options) if cinematic else 0.0
@@ -13868,6 +14021,8 @@ def resolve_effective_subtitle_cues(
     if smart_sample_windows:
         summary["smart_sample_blocks"] = smart_sample_windows
         summary["smart_sample_mode"] = "blocos_narrativos"
+    if alignment_stats is not None:
+        summary["narration_alignment"] = alignment_stats
     p_caption = Path(str(caption_path)) if caption_path else None
     caption_original = parse_srt_file(p_caption) if p_caption and p_caption.exists() else []
     caption_cues, caption_summary = normalize_subtitles(caption_original, narration_duration, min_duration=0.45)
@@ -13949,7 +14104,7 @@ Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
 Style: Default,{style['font']},{font_size},{primary},{secondary},{outline_color},{back_color},{bold},{italic},0,0,100,100,{spacing},0,{border_style},{outline:.1f},{shadow:.1f},2,70,70,{margin_v},1
 {f"Style: Intro,{intro_style['font']},{intro_font_size},{ass_color(intro_style.get('primary'), '#FFD36A')},{ass_color(intro_style.get('primary'), '#FFD36A')},{ass_color(intro_style.get('outline'), '#090909')},{intro_back},{intro_bold},0,0,0,100,100,0,0,{intro_border_style},{intro_outline:.1f},{float(intro_style.get('shadow', 1.0)):.1f},5,80,80,0,1" if intro_style else ""}
 Style: Accent,Arial,20,&H0067E6C2&,&H0067E6C2&,&H00000000&,&H00000000&,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1
-Style: Caption,{caption_style['font']},{caption_font_size},{ass_color(caption_style.get('primary'), '#FFFFFF')},{ass_color(caption_style.get('primary'), '#FFFFFF')},{ass_color(caption_style.get('outline'), '#111111')},{caption_back},0,0,0,0,100,100,0,0,{caption_border},{float(caption_style.get('outline_size', 2.0)):.1f},0,{caption_alignment},70,70,{caption_margin},1
+{callout_card_style_line(style, font_size, margin_v)}Style: Caption,{caption_style['font']},{caption_font_size},{ass_color(caption_style.get('primary'), '#FFFFFF')},{ass_color(caption_style.get('primary'), '#FFFFFF')},{ass_color(caption_style.get('outline'), '#111111')},{caption_back},0,0,0,0,100,100,0,0,{caption_border},{float(caption_style.get('outline_size', 2.0)):.1f},0,{caption_alignment},70,70,{caption_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -13991,6 +14146,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
         "repositioned": 0,
         "slot_reasons": {},
     }
+    # Cartão editorial (caixa + barra de acento), salvo se o estilo já tem caixa própria
+    # ou o utilizador o desligou. Mesma camada de texto: sem custo de render.
+    callout_card = bool(job.options.get("calloutCard", True)) and not style.get("box")
     for idx, cue in enumerate(cues):
         if use_intro_text and idx == 0:
             continue
@@ -14063,6 +14221,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             )
             if accent_line:
                 lines.append(accent_line)
+        if callout_card and cue_alignment == 2:
+            box_line, card_text = callout_card_dialogues(
+                text, seconds_to_ass_time(render_start), seconds_to_ass_time(cue.end),
+                cue_x, cue_y, style, font_size,
+            )
+            lines.append(box_line)
+            summary["callout_cards"] = int(summary.get("callout_cards") or 0) + 1
+            lines.append(
+                f"Dialogue: 2,{seconds_to_ass_time(render_start)},{seconds_to_ass_time(cue.end)},Default,,0,0,0,,{card_text}\n"
+            )
+            continue
         lines.append(
             f"Dialogue: 2,{seconds_to_ass_time(render_start)},{seconds_to_ass_time(cue.end)},Default,,0,0,0,,{{{''.join(tags)}}}{text}\n"
         )
@@ -14717,6 +14886,10 @@ def _seconds_to_ass_time(sec: float) -> str:
     return f"{hours}:{minutes:02d}:{seconds:05.2f}"
 
 
+_ASS_MOVE_RE = re.compile(r"\\move\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*(?:,[^)]*)?\)")
+_ASS_FAD_RE = re.compile(r"\\fad\(\s*(\d+)\s*,\s*(\d+)\s*\)")
+
+
 def slice_ass_for_chunk(
     base_ass_path: Path,
     chunk_start: float,
@@ -14745,6 +14918,13 @@ def slice_ass_for_chunk(
                         shifted_end = max(shifted_start + 0.05, min(chunk_duration, t_end - chunk_start))
                         parts[1] = _seconds_to_ass_time(shifted_start)
                         parts[2] = _seconds_to_ass_time(shifted_end)
+                        # Texto que atravessa a fronteira de blocos: sem repetir a entrada no
+                        # bloco seguinte nem apagar-se no corte (senão "pisca" a meio da frase).
+                        if t_start < chunk_start:
+                            parts[9] = _ASS_MOVE_RE.sub(lambda m: f"\\pos({m.group(3)},{m.group(4)})", parts[9])
+                            parts[9] = _ASS_FAD_RE.sub(lambda m: f"\\fad(0,{m.group(2)})", parts[9])
+                        if t_end > chunk_end:
+                            parts[9] = _ASS_FAD_RE.sub(lambda m: f"\\fad({m.group(1)},0)", parts[9])
                         out_lines.append(",".join(parts))
                 except Exception:
                     out_lines.append(line)
@@ -15085,6 +15265,10 @@ def compose_visual_chunks_parallel(
         c_segs = chunk_info["segments"]
         c_start = chunk_info["start_time"]
         c_dur = chunk_info["duration"]
+        if idx == len(chunks) - 1 and target_duration > c_start + 0.5:
+            # O planeador deixa ~2 s de margem; o último bloco termina com a narração
+            # em vez de mostrar imagem muda depois do fim do áudio.
+            c_dur = min(c_dur, target_duration - c_start)
         c_base = comp_base + idx * step_span
 
         chunk_raw = work / f"chunk_raw_{idx}.mp4"
@@ -15281,12 +15465,18 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
     if missing <= 60.0:
         try:
             tail_clip = work / "tail_pad_extension.mp4"
+            if missing <= 8.0:
+                # Últimos segundos em sentido inverso: o movimento continua a partir do último
+                # frame, sem saltar para a abertura do vídeo (o reverse fica em RAM: <= 8 s).
+                tail_input = ["-sseof", f"-{missing + 0.2:.4f}", "-i", str(video_source.resolve())]
+                tail_vf = f"fps=30,settb=AVTB,reverse,trim=duration={missing:.4f},setpts=PTS-STARTPTS"
+            else:
+                tail_input = ["-stream_loop", "2", "-ss", "0", "-i", str(video_source.resolve())]
+                tail_vf = f"fps=30,settb=AVTB,trim=duration={missing:.4f},setpts=PTS-STARTPTS"
             cmd_tail = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
-                "-stream_loop", "2",
-                "-ss", "0",
-                "-i", str(video_source.resolve()),
-                "-vf", f"fps=30,settb=AVTB,trim=duration={missing:.4f},setpts=PTS-STARTPTS",
+                *tail_input,
+                "-vf", tail_vf,
                 "-an",
                 *encoder_args,
                 "-t", f"{missing:.4f}",
@@ -15298,15 +15488,18 @@ def ensure_video_duration(job: Job, video_source: Path, target_duration: float, 
             run_cmd(job, cmd_tail, cwd=work, quiet_success=True)
             if tail_clip.exists() and tail_clip.stat().st_size > 0:
                 concat_list = work / "tail_concat_list.txt"
+                # outpoint = fim do stream de VÍDEO. Sem ele o concat usa a duração do contentor
+                # (que inclui o áudio, mais longo) e deixa um buraco = imagem congelada.
                 concat_list.write_text(
-                    f"file '{video_source.resolve().as_posix()}'\nfile '{tail_clip.resolve().as_posix()}'\n",
+                    f"file '{video_source.resolve().as_posix()}'\noutpoint {current_duration:.6f}\n"
+                    f"file '{tail_clip.resolve().as_posix()}'\n",
                     encoding="utf-8",
                 )
                 cmd_merge = [
                     FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
                     "-fflags", "+genpts",
                     "-f", "concat", "-safe", "0", "-i", str(concat_list.resolve()),
-                    "-c", "copy", "-avoid_negative_ts", "make_zero",
+                    "-map", "0:v:0", "-c", "copy", "-avoid_negative_ts", "make_zero",
                     str(repaired.resolve()),
                 ]
                 run_cmd(job, cmd_merge, cwd=work, quiet_success=True)
@@ -17898,6 +18091,137 @@ def api_save_settings(payload: dict[str, Any] | None = Body(None)):
     }
 
 
+# ---------------------------------------------------------------------------
+# Cobertura de material limpo (aviso antes do render)
+# Corre o MESMO filtro visual do render, em segundo plano e um clipe de cada vez.
+# As análises ficam no cache do filtro (chave pelo conteúdo), por isso o render
+# reutiliza-as. Pausa sozinho se um render começar; não escreve na fila.
+# ---------------------------------------------------------------------------
+CLEAN_COVERAGE: dict[str, dict[str, Any]] = {}
+CLEAN_COVERAGE_LOCK = threading.Lock()
+CLEAN_COVERAGE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="glide-clean-coverage")
+
+
+def _render_active() -> bool:
+    return any(getattr(job, "status", "") == "running" for job in list(JOBS.values()))
+
+
+def _project_coverage_inputs(project_id: str) -> tuple[list[tuple[Path, float]], float, list[SubtitleCue], dict[str, Any]]:
+    items = _load_project_media_index(project_id)
+    pdir = _project_media_dir(project_id)
+    pairs: list[tuple[Path, float]] = []
+    narration = 0.0
+    cues: list[SubtitleCue] = []
+    for item in items.values():
+        kind = str(item.get("kind") or "").lower()
+        path = pdir / str(item.get("file") or "")
+        if not path.is_file():
+            continue
+        if kind in {"video", "image"}:
+            pairs.append((path, max(0.1, float(item.get("duration") or (4.0 if kind == "image" else 0.0)) or 0.1)))
+        elif kind == "audio":
+            narration = max(narration, float(item.get("duration") or 0.0))
+        elif kind == "subtitle":
+            try:
+                cues = parse_srt_file(path)
+            except Exception:
+                cues = []
+    with QUEUE_LOCK:
+        project = _find_queue_project(project_id) or {}
+        options = dict(project.get("options") or {}) if isinstance(project.get("options"), dict) else {}
+    return pairs, narration, cues, options
+
+
+def _run_clean_coverage(project_id: str) -> None:
+    def update(**fields: Any) -> None:
+        with CLEAN_COVERAGE_LOCK:
+            CLEAN_COVERAGE.setdefault(project_id, {}).update(fields, updatedAt=_now_iso())
+
+    try:
+        pairs, narration, cues, options = _project_coverage_inputs(project_id)
+        if not pairs or narration <= 0:
+            update(status="unavailable", reason="Projeto sem narração ou sem mídia visual.")
+            return
+        work = UPLOAD_ROOT / f"coverage_{project_id}"
+        work.mkdir(parents=True, exist_ok=True)
+        # 1) Pré-análise sequencial (1 clipe de cada vez) que alimenta o cache do filtro.
+        for index, (path, duration) in enumerate(pairs, start=1):
+            if _render_active():
+                update(status="deferred", analyzed=index - 1, total=len(pairs),
+                       reason="Pausado: há um render em curso; retoma quando pedir de novo.")
+                return
+            kind = "image" if is_image_path(path) else "video"
+            try:
+                probe_visual_clean_health(path, duration, "normal", cwd=work, context=None, media_kind=kind)
+            except Exception:
+                pass
+            if index % 5 == 0 or index == len(pairs):
+                update(status="analyzing", analyzed=index, total=len(pairs))
+        # 2) Classificação real (zona + contexto do projeto), já só com acertos de cache.
+        job = Job(id=f"coverage_{project_id}", options=options, work=work)
+        job.subtitle_cues = cues
+        selected, summary = apply_visual_clean_filter(job, pairs, narration, work)
+        clean_seconds = round(sum(duration for _, duration in selected), 1)
+        needed = round(float(summary.get("needed_raw_seconds") or narration), 1)
+        deficit = round(max(0.0, needed - clean_seconds), 1)
+        update(
+            status="done",
+            cleanClips=len(selected),
+            totalClips=len(pairs),
+            cleanSeconds=clean_seconds,
+            neededSeconds=needed,
+            deficitSeconds=deficit,
+            coverage=round(min(1.0, clean_seconds / max(1.0, needed)), 3),
+            rejected={
+                key: int(summary.get(key) or 0)
+                for key in ("presenter_rejected", "rejected_text", "rejected_watermarks", "rejected_ui_screenshots",
+                            "rejected_banners", "rejected_outro_subscribe", "rejected_presentation_slides")
+            },
+        )
+    except Exception as exc:
+        update(status="error", reason=str(exc)[:300])
+    finally:
+        try:
+            shutil.rmtree(UPLOAD_ROOT / f"coverage_{project_id}", ignore_errors=True)
+        except Exception:
+            pass
+
+
+def schedule_clean_coverage(project_id: str) -> dict[str, Any]:
+    with CLEAN_COVERAGE_LOCK:
+        current = CLEAN_COVERAGE.get(project_id) or {}
+        if current.get("status") in {"queued", "analyzing"}:
+            return dict(current)
+        CLEAN_COVERAGE[project_id] = {"status": "queued", "updatedAt": _now_iso()}
+    CLEAN_COVERAGE_EXECUTOR.submit(_run_clean_coverage, project_id)
+    return {"status": "queued"}
+
+
+@app.post("/api/queue/projects/{project_id}/clean-coverage")
+def queue_project_clean_coverage_start(project_id: str):
+    with QUEUE_LOCK:
+        if not _find_queue_project(project_id):
+            raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado.")
+    result = {"ok": True, "projectId": project_id, **schedule_clean_coverage(project_id)}
+    # Transcrição da narração na GPU para alinhar os callouts (fica em cache para o render).
+    try:
+        items = _load_project_media_index(project_id)
+        pdir = _project_media_dir(project_id)
+        audio = next((pdir / str(i.get("file")) for i in items.values() if str(i.get("kind")) == "audio"), None)
+        srt = next((pdir / str(i.get("file")) for i in items.values() if str(i.get("kind")) == "subtitle"), None)
+        if audio and srt and audio.is_file() and srt.is_file():
+            result["narrationTranscription"] = "scheduled" if schedule_narration_transcription(audio, srt_language(srt)) else "engine_missing"
+    except Exception:
+        pass
+    return result
+
+
+@app.get("/api/queue/projects/{project_id}/clean-coverage")
+def queue_project_clean_coverage_status(project_id: str):
+    with CLEAN_COVERAGE_LOCK:
+        return {"ok": True, "projectId": project_id, **(CLEAN_COVERAGE.get(project_id) or {"status": "none"})}
+
+
 @app.post("/api/queue/preflight-plan")
 def queue_preflight_plan(payload: dict[str, Any] | None = Body(None)):
     data = payload or {}
@@ -20109,6 +20433,34 @@ def get_retention_pacing_parameters(
         return (3.2, 4.0, 5.0, "outro")
 
 
+TIMELINE_FPS = 30
+
+
+def quantize_plans_to_frame_grid(plans: list[Any], fps: int = TIMELINE_FPS) -> dict[str, Any]:
+    """Arredonda cada tomada a frames inteiros com difusão do erro acumulado.
+
+    Cada fronteira fica em round(t_acumulado * fps) / fps, por isso a timeline nunca
+    se afasta da narração mais de meio frame, e cada segmento tem uma duração exata
+    que o encoder consegue produzir (-frames:v). Antes, a diferença entre a duração
+    planeada e a real (~1 frame por clipe) acumulava ~5 s num vídeo de 37 min e
+    desalinhava imagem e legendas bloco a bloco.
+    """
+    elapsed = 0.0
+    start_frame = 0
+    drift_before = 0.0
+    for plan in plans:
+        target = max(0.0, float(getattr(plan, "target_duration", 0.0) or 0.0))
+        drift_before += abs(target * fps - round(target * fps))
+        elapsed += target
+        end_frame = max(start_frame + 2, int(round(elapsed * fps)))
+        frames = end_frame - start_frame
+        plan.target_duration = frames / float(fps)
+        plan.frame_count = frames
+        start_frame = end_frame
+    return {"fps": fps, "segments": len(plans), "total_frames": start_frame,
+            "offgrid_frames_before": round(drift_before, 2)}
+
+
 def build_segment_plan(
     video_files: list[Path],
     video_durs: list[float],
@@ -20612,8 +20964,14 @@ def build_segment_plan(
 
     # TRAVA MATEMÁTICA FINAL: Auditoria rígida pré-retorno
     max_allowed = 2 if (allow_audio_trim or force_short) else max(2, math.ceil(orig_audio_total / max(1.0, T_total_base))) + 1
+    usage_counts = list(asset_usage.values())
+    usage_spread = (max(usage_counts) - min(usage_counts)) if usage_counts else 0
     for fp, count in asset_usage.items():
         if count > max_allowed:
+            # Com pouco material limpo (o filtro nunca reinsere clipes barrados), o reuso
+            # uniforme é o esperado: só é violação se um clipe for usado muito mais que os outros.
+            if not (allow_audio_trim or force_short) and usage_spread <= 2:
+                continue
             raise RuntimeError(f"Violação da Regra de Repetição: asset {fp} apareceu {count} vezes (máximo permitido é {max_allowed}).")
 
     for p in plans:
@@ -21023,7 +21381,8 @@ def make_segments_smart(
         srt_path=srt_file,
         force_short=force_short,
         voice_emphasis_events=getattr(job, "voice_emphasis_events", None),
-        soft_rejected_media=getattr(job, "soft_rejected_media", None),
+        # Mídia barrada pelo filtro nunca volta à timeline (nem pela "fase 5" do planeador).
+        soft_rejected_media=None,
         hard_rejected_media=getattr(job, "hard_rejected_media", None),
     )
     # Auditoria Matemática Pré-Render da Timeline
@@ -21081,6 +21440,8 @@ def make_segments_smart(
             key: value for key, value in visual_window_summary.items() if key != "items"
         },
     })
+
+    summary["frame_grid"] = quantize_plans_to_frame_grid(plans)
 
     performance_budget = render_performance_budget(job, gpu, len(plans))
     worker_count = int(performance_budget.get("segment_workers") or efficient_segment_worker_count(job, gpu))
@@ -21199,6 +21560,7 @@ def make_segments_smart(
                 "-filter_complex", filter_complex,
                 "-map", "[vout]",
                 "-an", "-r", "30",
+                *(["-frames:v", str(plan.frame_count)] if plan.frame_count > 0 else []),
                 *encoder_args,
                 "-pix_fmt", "yuv420p",
                 str(out),
@@ -21247,13 +21609,19 @@ def make_segments_smart(
             if plan.source_offset > 0.0:
                 seek_args.extend(["-ss", f"{plan.source_offset:.3f}"])
             seek_args.extend(["-t", f"{input_limit:.3f}"])
+            frame_args: list[str] = []
+            if plan.frame_count > 0:
+                # Contagem exata de frames: se a fonte acabar 1-4 frames antes, o último frame
+                # é mantido (0,13 s, impercetível) em vez de encurtar a timeline.
+                vf += ",tpad=stop_mode=clone:stop_duration=0.15"
+                frame_args = ["-frames:v", str(plan.frame_count)]
             cmd = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *segment_thread_args,
                 *hwaccel_seg_args,
                 *seek_args,
                 "-i", str(plan.source),
                 "-vf", vf,
-                "-an", "-r", "30",
+                "-an", "-r", "30", *frame_args,
                 *encoder_args,
                 "-pix_fmt", "yuv420p",
                 str(out),
@@ -21410,6 +21778,8 @@ def make_segments_smart(
                     focal_point=focal,
                     safe_framing=safe_framing,
                 )
+                fill_plan.frame_count = max(2, int(round(target * TIMELINE_FPS)))
+                fill_plan.target_duration = fill_plan.frame_count / float(TIMELINE_FPS)
                 out, actual = render_one(fill_plan, next_segment_no)
                 next_segment_no += 1
                 if out:
@@ -21514,6 +21884,7 @@ def concat_segments_and_mux(
     audio_foundation_key: str = "",
     subtitles: list[Path] | None = None,
 ):
+    subtitle_ass = apply_late_narration_alignment(job, subtitle_ass)
     job.message = "Juntando tomadas em sequência MP4"
     job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
     set_stage(job, "rendering", "Montando sequência", job.message, percent=job.percent)
@@ -24373,6 +24744,9 @@ def render_worker(job_id: str):
                 captions[0] if captions and captions[0].is_absolute()
                 else (job.work / captions[0] if captions else None)
             )
+            narration_path = (audios[0] if audios[0].is_absolute() else job.work / audios[0]) if audios else None
+            prepare_narration_alignment(job, narration_path, subtitle_path)
+            job._ass_rebuild_args = (subtitle_path, timeline_total, w, h, job.work, caption_path)
             ass_key, ass_cached = graph.begin(
                 "subtitles_ass",
                 {
@@ -24387,6 +24761,8 @@ def render_worker(job_id: str):
                     "director_scene_fit": stable_hash(job.director_summary.get("scene_fit_plan") or {}),
                     "style_profile": stable_hash(job.options.get("_style_profile_effective") or reference_style_profile(job.options)),
                     "subtitle_layout_policy": "smart_safe_zones_v1",
+                    "callout_card": bool(job.options.get("calloutCard", True)),
+                    "narration_alignment": stable_hash(job.narration_words) if job.narration_words else None,
                     "pipeline": RENDER_PIPELINE_VERSION,
                 },
                 "ASS de Textos e Legendas",
