@@ -67,6 +67,31 @@ class CalloutAlignmentTests(unittest.TestCase):
         self.assertIn("163", glide_align.keywords("163 kW permanent-magnet"))
 
 
+class TranscriptionPolicyTests(unittest.TestCase):
+    """Medido: transcrever durante um render deixou-o ~21% mais lento. Nunca em paralelo."""
+
+    def test_no_transcription_starts_while_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "voz.wav"
+            audio.write_bytes(b"RIFF" + b"\0" * 4096)
+            with patch.object(app, "whisper_engine", return_value=(Path("w.exe"), Path("m.bin"))), \
+                 patch.object(app, "_render_active", return_value=True):
+                self.assertIsNone(app.schedule_narration_transcription(audio, "en"))
+
+    def test_render_uses_cache_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio, srt = Path(tmp) / "voz.wav", Path(tmp) / "a.srt"
+            audio.write_bytes(b"RIFF" + b"\0" * 4096)
+            srt.write_text("1\n00:00:01,000 --> 00:00:03,000\nOla\n", encoding="utf-8")
+            job = app.Job(id="policy")
+            job.options = {}
+            with patch.object(app, "whisper_engine", return_value=(Path("w.exe"), Path("m.bin"))), \
+                 patch.object(app, "schedule_narration_transcription") as scheduled:
+                app.prepare_narration_alignment(job, audio, srt)
+            scheduled.assert_not_called()
+            self.assertIsNone(job.narration_words)
+
+
 class CalloutCardTests(unittest.TestCase):
     def test_card_uses_box_style_and_same_layout_as_text(self):
         style = app.subtitle_style_from_options({})

@@ -1487,9 +1487,19 @@ function formatMinutes(seconds){
 function cleanCoverageOf(project){
   return state.cleanCoverage[project?.id] || project?.cleanCoverage || null;
 }
+function narrationSyncHtml(c){
+  const sync = c?.narrationSync;
+  if(sync === 'ready') return '<span class="queue-coverage ok">Textos sincronizados com a narração</span>';
+  if(sync === 'running') return '<span class="queue-coverage pending">A sincronizar textos com a narração (GPU)…</span>';
+  if(sync === 'pending') return '<span class="queue-coverage pending" title="Só corre com o PC livre, para não atrasar renders.">Sincronia dos textos pendente (corre com o PC livre)</span>';
+  return '';
+}
 function cleanCoverageHtml(project){
   const c = cleanCoverageOf(project);
   if(!c || !c.status || c.status === 'none') return '';
+  return cleanCoverageBodyHtml(c) + narrationSyncHtml(c);
+}
+function cleanCoverageBodyHtml(c){
   if(c.status === 'queued' || c.status === 'analyzing'){
     const prog = c.total ? ` ${c.analyzed || 0}/${c.total}` : '';
     return `<span class="queue-coverage pending">A verificar material limpo…${prog}</span>`;
@@ -1505,12 +1515,26 @@ function cleanCoverageHtml(project){
 let cleanCoverageTimer = null;
 async function pollCleanCoverage(){
   cleanCoverageTimer = null;
-  const pending = Object.entries(state.cleanCoverage).filter(([, c]) => ['queued', 'analyzing'].includes(c?.status)).map(([id]) => id);
+  const pending = Object.entries(state.cleanCoverage)
+    .filter(([, c]) => ['queued', 'analyzing'].includes(c?.status) || ['running', 'pending'].includes(c?.narrationSync))
+    .map(([id]) => id);
   if(!pending.length) return;
+  // Transcrição interrompida por um render: pede de novo quando o PC estiver livre (no máx. 1x/min).
+  if(!state.queueRendering && !state.renderActive){
+    const now = Date.now();
+    pending.filter(id => state.cleanCoverage[id]?.narrationSync === 'pending' && now - (state.cleanCoverage[id]._retryAt || 0) > 60000)
+      .forEach(id => {
+        state.cleanCoverage[id]._retryAt = now;
+        fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage`, {method: 'POST'}).catch(() => {});
+      });
+  }
   await Promise.all(pending.map(async id => {
     try{
       const r = await fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage`, {cache: 'no-store'});
-      if(r.ok) state.cleanCoverage[id] = await r.json();
+      if(r.ok){
+        const retryAt = state.cleanCoverage[id]?._retryAt;
+        state.cleanCoverage[id] = {...await r.json(), _retryAt: retryAt};
+      }
     }catch(_err){}
   }));
   state.projectQueueSignature = '';
@@ -1521,7 +1545,7 @@ async function pollCleanCoverage(){
 async function requestCleanCoverage(projectIds){
   for(const id of (projectIds || [])){
     try{
-      const r = await fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage`, {method: 'POST'});
+      const r = await fetch(`/api/queue/projects/${encodeURIComponent(id)}/clean-coverage?force=true`, {method: 'POST'});
       if(r.ok) state.cleanCoverage[id] = {status: 'queued'};
     }catch(_err){}
   }

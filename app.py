@@ -13840,8 +13840,9 @@ def split_caption_cues(cues: list[SubtitleCue], max_chars: int = 44) -> list[Sub
 
 # ---------------------------------------------------------------------------
 # Transcrição local da narração (whisper.cpp na GPU) para alinhar callouts.
-# Corre antes do render (quando o AUTO distribui) ou em paralelo com ele, nunca o
-# atrasa: sem transcrição pronta a tempo, os callouts mantêm os tempos do SRT.
+# Só corre com o PC livre (depois de o AUTO distribuir, antes do render): medido,
+# transcrever em paralelo com um render deixou-o ~21% mais lento. Se um render
+# começa, a transcrição é interrompida e retomada depois; o render usa só o cache.
 # ---------------------------------------------------------------------------
 WHISPER_TOOL_DIR = APP_DIR / "tools" / "whisper"
 ASR_CACHE_DIR = DATA_ROOT / "asr_cache"
@@ -13895,9 +13896,18 @@ def _transcribe_narration(audio: Path, language: str) -> list[tuple[float, str]]
         _run_hidden([FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", str(audio), "-vn", "-ac", "1",
                      "-ar", "16000", "-c:a", "pcm_s16le", str(wav)], priority="balanced", check=True, timeout=900)
         lang = language if language in {"pt", "en", "es", "fr", "de", "it"} else "auto"
-        _run_hidden([str(exe), "-m", str(model), "-f", str(wav), "-l", lang, "-ml", "1", "-sow", "-oj",
-                     "-of", str(tmp / "words"), "-t", "3", "-np"],
-                    cwd=WHISPER_TOOL_DIR, priority="balanced", check=True, timeout=5400, capture_output=True)
+        proc = _popen_hidden([str(exe), "-m", str(model), "-f", str(wav), "-l", lang, "-ml", "1", "-sow", "-oj",
+                              "-of", str(tmp / "words"), "-t", "3", "-np"],
+                             cwd=WHISPER_TOOL_DIR, priority="balanced",
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + 5400
+        while proc.poll() is None:
+            if _render_active() or time.time() > deadline:
+                _terminate_process(proc)
+                raise RuntimeError("transcrição interrompida (render em curso); será retomada depois")
+            time.sleep(1.0)
+        if proc.returncode != 0:
+            raise RuntimeError(f"whisper-cli terminou com código {proc.returncode}")
         words = glide_align.load_whisper_json(tmp / "words.json")
         ASR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
         atomic_write_text(
@@ -13913,7 +13923,7 @@ def _transcribe_narration(audio: Path, language: str) -> list[tuple[float, str]]
 def schedule_narration_transcription(audio: Path, language: str = "auto") -> Future | None:
     """Agenda (uma vez por áudio) a transcrição na GPU; devolve o Future ou None sem motor."""
     audio = Path(audio)
-    if not audio.is_file() or not whisper_engine():
+    if not audio.is_file() or not whisper_engine() or _render_active():
         return None
     try:
         sig = _audio_content_signature(audio)
@@ -13953,10 +13963,9 @@ def prepare_narration_alignment(job: Job, narration: Path | None, subtitle_path:
         job.narration_words = words
         _append_log(job, f"Sincronia de callouts: transcrição da narração em cache ({len(words)} palavras).")
         return
-    future = schedule_narration_transcription(Path(narration), srt_language(subtitle_path))
-    if future is not None:
-        job.narration_alignment_future = future
-        _append_log(job, "Sincronia de callouts: a transcrever a narração na GPU em paralelo com o render.")
+    # Não transcreve durante o render (atrasaria o render): usa só o que já está em cache.
+    if whisper_engine():
+        _append_log(job, "Sincronia de callouts: transcrição ainda não disponível; mantidos os tempos do SRT.")
 
 
 def apply_late_narration_alignment(job: Job, subtitle_ass: Path | None) -> Path | None:
@@ -18187,10 +18196,10 @@ def _run_clean_coverage(project_id: str) -> None:
             pass
 
 
-def schedule_clean_coverage(project_id: str) -> dict[str, Any]:
+def schedule_clean_coverage(project_id: str, force: bool = False) -> dict[str, Any]:
     with CLEAN_COVERAGE_LOCK:
         current = CLEAN_COVERAGE.get(project_id) or {}
-        if current.get("status") in {"queued", "analyzing"}:
+        if current.get("status") in {"queued", "analyzing"} or (current.get("status") == "done" and not force):
             return dict(current)
         CLEAN_COVERAGE[project_id] = {"status": "queued", "updatedAt": _now_iso()}
     CLEAN_COVERAGE_EXECUTOR.submit(_run_clean_coverage, project_id)
@@ -18198,11 +18207,11 @@ def schedule_clean_coverage(project_id: str) -> dict[str, Any]:
 
 
 @app.post("/api/queue/projects/{project_id}/clean-coverage")
-def queue_project_clean_coverage_start(project_id: str):
+def queue_project_clean_coverage_start(project_id: str, force: bool = False):
     with QUEUE_LOCK:
         if not _find_queue_project(project_id):
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado.")
-    result = {"ok": True, "projectId": project_id, **schedule_clean_coverage(project_id)}
+    result = {"ok": True, "projectId": project_id, **schedule_clean_coverage(project_id, force=force)}
     # Transcrição da narração na GPU para alinhar os callouts (fica em cache para o render).
     try:
         items = _load_project_media_index(project_id)
@@ -18216,10 +18225,28 @@ def queue_project_clean_coverage_start(project_id: str):
     return result
 
 
+def narration_sync_status(project_id: str) -> str:
+    """'ready' | 'running' | 'pending' | 'unavailable' para o cartão do projeto."""
+    try:
+        items = _load_project_media_index(project_id)
+        pdir = _project_media_dir(project_id)
+        audio = next((pdir / str(i.get("file")) for i in items.values() if str(i.get("kind")) == "audio"), None)
+        if not audio or not audio.is_file() or not whisper_engine():
+            return "unavailable"
+        if narration_words_cached(audio):
+            return "ready"
+        with _ASR_LOCK:
+            future = _ASR_FUTURES.get(_audio_content_signature(audio))
+        return "running" if future is not None and not future.done() else "pending"
+    except Exception:
+        return "unavailable"
+
+
 @app.get("/api/queue/projects/{project_id}/clean-coverage")
 def queue_project_clean_coverage_status(project_id: str):
     with CLEAN_COVERAGE_LOCK:
-        return {"ok": True, "projectId": project_id, **(CLEAN_COVERAGE.get(project_id) or {"status": "none"})}
+        data = dict(CLEAN_COVERAGE.get(project_id) or {"status": "none"})
+    return {"ok": True, "projectId": project_id, **data, "narrationSync": narration_sync_status(project_id)}
 
 
 @app.post("/api/queue/preflight-plan")
