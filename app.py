@@ -7584,27 +7584,25 @@ def enforce_clean_opening_protocol(
             except Exception:
                 scores_by_path[str(p)] = -100.0
 
-    clean_pool: list[tuple[Path, float]] = []
-    purged_count = 0
-    for path, dur in valid_pairs:
-        sc = scores_by_path.get(str(path), 0.0)
-        if sc > -500.0:
-            clean_pool.append((path, dur))
-        else:
-            purged_count += 1
-            _append_log(
-                job,
-                f"Sacred Hook Engine: Clipe poluído '{path.name}' (score {sc:.1f}) expurgado definitivamente da timeline.",
-            )
+    # O protocolo só ESCOLHE a abertura. Nunca remove clipes do conjunto: quem decide o que sai
+    # é o filtro visual (teto de 30%). Antes, esta etapa expurgava todo clipe com score baixo
+    # (apresentador parcial, texto, estático...), incluindo os que o filtro tinha mantido de
+    # propósito: 181 de 188 clipes foram removidos e o vídeo de 23 min usou só 7 clipes.
+    eligible: list[int] = [
+        i for i, (path, _dur) in enumerate(valid_pairs)
+        if scores_by_path.get(str(path), 0.0) > -500.0
+    ]
+    low_score_kept = len(valid_pairs) - len(eligible)
+    if not eligible:
+        return valid_pairs, {"enforced": False, "swapped": 0, "purged": 0, "low_score_kept": low_score_kept}
 
-    if not clean_pool:
-        clean_pool = list(valid_pairs)
+    clean_pool: list[tuple[int, Path, float]] = [(i, valid_pairs[i][0], valid_pairs[i][1]) for i in eligible]
+    swapped_count = 0
 
-    # 2. Slot #1 Forçado: O melhor clipe Hero B-roll (VÍDEO) disponível no projeto
-    swapped_count = purged_count
+    # 2. Slot #1: o melhor clipe Hero B-roll (VÍDEO) disponível no projeto
     best_hero_idx = -1
     best_hero_score = -9999.0
-    for idx, (path, dur) in enumerate(clean_pool):
+    for idx, (_orig, path, dur) in enumerate(clean_pool):
         if is_image_path(path):
             continue  # Slot #1 deve ser sempre vídeo Hero dinâmico
         sc = scores_by_path.get(str(path), 0.0)
@@ -7618,21 +7616,19 @@ def enforce_clean_opening_protocol(
         swapped_count += 1
         _append_log(
             job,
-            f"Sacred Hook Engine: Slot #1 coroado com Hero B-roll supremo '{hero_item[0].name}' (Hero Score: {best_hero_score:.1f}).",
+            f"Sacred Hook Engine: Slot #1 coroado com Hero B-roll supremo '{hero_item[1].name}' (Hero Score: {best_hero_score:.1f}).",
         )
 
-    # 3. Proteção do Gancho Editorial: Slots 1 a 6 (primeiros 15-25s) devem ter apenas B-rolls de alta qualidade
+    # 3. Gancho: os primeiros slots recebem os melhores B-rolls, trocando posições entre si
     opening_limit = min(len(clean_pool), max_opening_slots)
     for slot_idx in range(1, opening_limit):
-        path, dur = clean_pool[slot_idx]
+        _orig, path, dur = clean_pool[slot_idx]
         sc = scores_by_path.get(str(path), 0.0)
         if sc < 100.0:
-            # Buscar melhor substituto no restante da pool
             best_replacement_idx = -1
             best_replacement_score = sc
             for cand_idx in range(opening_limit, len(clean_pool)):
-                cand_p, cand_d = clean_pool[cand_idx]
-                cand_sc = scores_by_path.get(str(cand_p), 0.0)
+                cand_sc = scores_by_path.get(str(clean_pool[cand_idx][1]), 0.0)
                 if cand_sc > best_replacement_score and cand_sc >= 110.0:
                     best_replacement_score = cand_sc
                     best_replacement_idx = cand_idx
@@ -7640,20 +7636,28 @@ def enforce_clean_opening_protocol(
                 replacement = clean_pool.pop(best_replacement_idx)
                 demoted = clean_pool.pop(slot_idx)
                 clean_pool.insert(slot_idx, replacement)
+                # O rebaixado volta à posição original dele na ordem do projeto (não é descartado).
                 clean_pool.append(demoted)
                 swapped_count += 1
                 _append_log(
                     job,
-                    f"Sacred Hook Engine: Slot #{slot_idx + 1} promovido para Hero clipe '{replacement[0].name}' (Score: {best_replacement_score:.1f}), rebaixando '{demoted[0].name}'.",
+                    f"Sacred Hook Engine: Slot #{slot_idx + 1} promovido para Hero clipe '{replacement[1].name}' (Score: {best_replacement_score:.1f}), rebaixando '{demoted[1].name}'.",
                 )
+
+    opening = clean_pool[:opening_limit]
+    opening_ids = {item[0] for item in opening}
+    rest = [pair for i, pair in enumerate(valid_pairs) if i not in opening_ids]
+    result = [(path, dur) for _orig, path, dur in opening] + rest
+    assert len(result) == len(valid_pairs), "protocolo de abertura não pode perder clipes"
 
     summary = {
         "enforced": True,
         "opening_slots_checked": opening_limit,
         "swapped": swapped_count,
-        "purged": purged_count,
+        "purged": 0,
+        "low_score_kept": low_score_kept,
     }
-    return clean_pool, summary
+    return result, summary
 
 
 MEDIA_STOPWORDS = {
@@ -14270,6 +14274,16 @@ def resolve_effective_subtitle_cues(
     if not p_srt.exists():
         return [], {}, []
     original_cues = parse_srt_file(p_srt)
+    # Ficheiros "Footage Sync" (lista de links de clipes com tempos) não são textos para o ecrã:
+    # mostrá-los pôs URLs de YouTube a aparecer no vídeo.
+    url_re = re.compile(r"https?://|www\.|youtube\.com|youtu\.be", re.IGNORECASE)
+    linked = [cue for cue in original_cues if url_re.search(cue.text or "")]
+    if original_cues and linked:
+        if len(linked) >= 0.4 * len(original_cues):
+            _append_log(job, f"Textos ignorados: {len(linked)}/{len(original_cues)} linhas são links de clipes (ficheiro de footage sync, não textos de ecrã).")
+            job.subtitle_summary = {"ignored": "footage_sync_links", "links": len(linked)}
+            return [], job.subtitle_summary, []
+        original_cues = [cue for cue in original_cues if cue not in linked]
     alignment_stats: dict[str, Any] | None = None
     words = getattr(job, "narration_words", None)
     if words and bool(job.options.get("alignCallouts", True)) and not job.options.get("_smart_sample_windows"):
@@ -14419,6 +14433,27 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # Cartão editorial (caixa + barra de acento), salvo se o estilo já tem caixa própria
     # ou o utilizador o desligou. Mesma camada de texto: sem custo de render.
     callout_card = bool(job.options.get("calloutCard", True)) and not style.get("box")
+    # SRT que é a narração inteira (um cue a cada poucos segundos, texto no ecrã quase sempre):
+    # o cartão com barra é desenho para destaques pontuais; num fio contínuo fica pesado e
+    # parece um erro. Nesse caso usa-se legenda limpa e avisa-se que o ficheiro não é de destaques.
+    covered = sum(max(0.0, cue.end - cue.start) for cue in cues)
+    per_minute = len(cues) / max(1.0, total_duration / 60.0)
+    dense_track = bool(cues) and (covered / max(1.0, total_duration) >= 0.55 or per_minute >= 12.0)
+    summary["dense_track"] = {"dense": dense_track, "cues": len(cues), "coverage": round(covered / max(1.0, total_duration), 3), "per_minute": round(per_minute, 1)}
+    if dense_track:
+        callout_card = False
+        _append_log(
+            job,
+            f"Textos: o SRT tem {len(cues)} linhas ({round(100 * covered / max(1.0, total_duration))}% do vídeo) e parece a "
+            "narração completa, não textos de destaque. Usando legenda limpa em vez do cartão de destaque.",
+        )
+        if isinstance(job.preflight_summary, dict):
+            job.preflight_summary.setdefault("warnings", [])
+            if isinstance(job.preflight_summary["warnings"], list):
+                job.preflight_summary["warnings"].append(
+                    "O ficheiro de Textos (SRT) parece a narração completa: os textos ficam no ecrã quase o vídeo todo. "
+                    "Para destaques pontuais use o SRT de textos-chave."
+                )
     for idx, cue in enumerate(cues):
         if use_intro_text and idx == 0:
             continue

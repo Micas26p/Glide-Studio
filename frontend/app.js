@@ -6270,8 +6270,88 @@ function annotateAutomatorItems(items, batchStamp = Date.now()){
 
 function automatorNaturalNumber(item){
   const text = String(item?.name || item?.sourceName || '');
+  // Prefixo de ordem ("01 - Titulo", "1__VIZAN_001") vale mais do que o último número do
+  // nome: em "..._V8.6.mp3" o último número é a versão (6) e igual em todos os ficheiros.
+  const lead = text.match(/^\s*0*(\d{1,3})(?=\D|$)/);
+  if(lead) return Number(lead[1]);
   const matches = [...text.matchAll(/(\d+)/g)];
   return matches.length ? Number(matches[matches.length - 1][1]) : null;
+}
+
+// ---- Emparelhamento por nome (SRT <-> áudio <-> roteiro) ----------------------------
+// Cada listagem era ordenada à parte; com nomes como "01 - X_V8.6.mp3" e "X_V8.6.srt" as
+// ordens divergiam e o áudio de um canal caía no SRT de outro (vídeos com narração e
+// textos de assuntos/idiomas diferentes).
+const PAIR_STOP = new Set(['srt', 'mp3', 'wav', 'm4a', 'aac', 'mp4', 'pdf', 'txt', 'docx', 'footage', 'sync', 'footagesync',
+  'stillsync', 'final', 'audio', 'narracao', 'narration', 'roteiro', 'script', 'texto', 'textos', 'text', 'v', 'de', 'la', 'el',
+  'los', 'las', 'del', 'da', 'do', 'dos', 'das', 'le', 'di', 'the', 'and', 'of', 'in', 'vs', 'um', 'una', 'un', 'en', 'con', 'por', 'para']);
+function automatorPairTokens(name){
+  const base = String(name || '').replace(/\.[A-Za-z0-9]{1,5}$/, '');
+  const plain = base.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+    .replace(/([a-z])(\d)/g, '$1 $2').replace(/(\d)([a-z])/g, '$1 $2');
+  const out = new Set();
+  plain.split(/[^a-z0-9]+/).forEach(token => {
+    if(!token || PAIR_STOP.has(token)) return;
+    if(/^\d+$/.test(token) && token.length <= 2) return; // prefixos de ordem e versões
+    if(/^v\d+$/.test(token)) return;
+    out.add(token);
+  });
+  return out;
+}
+function automatorPairScore(a, b){
+  const ta = automatorPairTokens(a?.name);
+  const tb = automatorPairTokens(b?.name);
+  if(!ta.size || !tb.size) return 0;
+  let shared = 0;
+  ta.forEach(token => { if(tb.has(token)) shared++; });
+  return shared ? shared / Math.min(ta.size, tb.size) : 0;
+}
+// Reordena `list` para seguir a ordem de `anchor`. Só mexe quando todos os pares são claros.
+function automatorPairOrder(anchor, list){
+  if(anchor.length < 2 || anchor.length !== list.length) return null;
+  const pairs = [];
+  anchor.forEach((a, i) => list.forEach((b, j) => pairs.push([automatorPairScore(a, b), i, j])));
+  pairs.sort((x, y) => y[0] - x[0]);
+  const rowTaken = new Set();
+  const colTaken = new Set();
+  const assign = new Array(anchor.length).fill(-1);
+  for(const [score, i, j] of pairs){
+    if(score < 0.5) break;
+    if(rowTaken.has(i) || colTaken.has(j)) continue;
+    rowTaken.add(i); colTaken.add(j); assign[i] = j;
+  }
+  if(assign.some(j => j < 0)) return null;
+  return assign;
+}
+function autoPairAutomatorLists(force = false){
+  const a = state.automator;
+  if(!a?.srts?.length) return false;
+  let changed = false;
+  [['audio', 'audios'], ['script', 'scripts']].forEach(([type, key]) => {
+    const list = a[key];
+    if(!list?.length) return;
+    if(!force && automatorSortPreference(type).criterion === 'usage') return; // ordem manual do utilizador
+    const assign = automatorPairOrder(a.srts, list);
+    if(!assign) return;
+    if(assign.every((j, i) => j === i)) return;
+    const reordered = assign.map(j => list[j]);
+    list.splice(0, list.length, ...reordered);
+    changed = true;
+  });
+  return changed;
+}
+// Troca provável: o par atual não partilha nada e existe um par claro noutra linha.
+function automatorPairingIssues(rows){
+  const issues = [];
+  const withAudio = rows.filter(r => r.srt && r.audio);
+  withAudio.forEach(row => {
+    if(automatorPairScore(row.srt, row.audio) >= 0.2) return;
+    const better = withAudio.find(other => other !== row && automatorPairScore(row.srt, other.audio) >= 0.5);
+    if(better){
+      issues.push(`o áudio «${row.audio.name}» não combina com o SRT «${row.srt.name}» (parece pertencer a «${better.srt?.name || '?'}»)`);
+    }
+  });
+  return issues;
 }
 
 function automatorDuration(item, type){
@@ -6335,6 +6415,7 @@ function sortAutomatorItems(type, criterion = null, direction = null){
   list.splice(0, list.length, ...ordered);
   state.automator.sort[type] = next;
   saveAutomatorSortPreferences();
+  if(autoPairAutomatorLists() && dockSummary) dockSummary.textContent = 'AUTO: áudios e roteiros alinhados aos Textos (SRT) pelo nome do ficheiro.';
   updateAutomatorPreview();
 }
 
@@ -7258,6 +7339,10 @@ function automatorPlan(){
       folder: state.automator.folders?.[i] || null,
       occupied: false,
     });
+  }
+  const pairingIssues = automatorPairingIssues(rows);
+  if(pairingIssues.length){
+    warnings.push(`Pares trocados: ${pairingIssues.slice(0, 2).join('; ')}${pairingIssues.length > 2 ? ` (+${pairingIssues.length - 2})` : ''}. Use «Parear por nome» ou arraste os itens para a ordem certa.`);
   }
   return {startIndex, maxCount: targetCount, targetCount: rows.length, available, warnings, rows};
 }
@@ -9632,6 +9717,13 @@ document.getElementById('automatorActions')?.addEventListener('click', event => 
     void blocker.offsetWidth;
     blocker.classList.add('flash');
   }
+});
+document.getElementById('automatorPairBtn')?.addEventListener('click', () => {
+  const changed = autoPairAutomatorLists(true);
+  if(dockSummary) dockSummary.textContent = changed
+    ? 'AUTO: áudios e roteiros reordenados para combinar com o nome de cada SRT.'
+    : 'AUTO: os nomes já combinam, ou não há pares claros o suficiente para reordenar.';
+  updateAutomatorPreview();
 });
 if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
   applyAutomatorDistribution().catch(error => {

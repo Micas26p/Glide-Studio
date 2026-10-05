@@ -184,6 +184,7 @@ class Regressions(unittest.TestCase):
     def test_real_ffmpeg_cancel_releases_process(self):
         import threading
         import time
+        app.hardware_profile()  # no app real isto é aquecido no arranque; aqui custaria >5 s no 1.º comando
         job=app.Job(id='cancel-real',options={})
         errors=[]
         def run():
