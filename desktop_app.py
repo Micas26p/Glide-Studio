@@ -659,6 +659,63 @@ def _window_flags(hwnd: int) -> tuple[bool, bool]:
         return False, False
 
 
+ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
+
+
+def _child_process_ids(parent_pid: int) -> list[int]:
+    """Filhos diretos de um processo (Toolhelp32, sem lançar PowerShell)."""
+    import ctypes
+    from ctypes import wintypes
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
+    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+        return []
+    children: list[int] = []
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            if entry.th32ParentProcessID == parent_pid and entry.szExeFile.lower() == "msedgewebview2.exe":
+                children.append(int(entry.th32ProcessID))
+            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    return children
+
+
+def _boost_webview_priority(browser_pid: int) -> int:
+    """Interface acima do normal: com o PC carregado (render, outros apps), o Windows serve
+    primeiro o ecrã do Glide. Os processos de render ficam como estão, por isso não abranda o render."""
+    if os.name != "nt" or not browser_pid:
+        return 0
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    boosted = 0
+    for pid in [browser_pid, *_child_process_ids(browser_pid)]:
+        handle = kernel32.OpenProcess(0x0200 | 0x1000, False, int(pid))  # SET_INFORMATION | QUERY_LIMITED
+        if not handle:
+            continue
+        try:
+            if kernel32.GetPriorityClass(handle) != ABOVE_NORMAL_PRIORITY_CLASS:
+                if kernel32.SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS):
+                    boosted += 1
+        finally:
+            kernel32.CloseHandle(handle)
+    return boosted
+
+
 def _kill_webview_renderers(browser_pid: int) -> int:
     """Termina só os renderers filhos do WebView2 do Glide (dispara ProcessFailed -> recarregar)."""
     if not browser_pid:
@@ -701,10 +758,18 @@ def attach_page_crash_recovery(window: Any, url: str) -> None:
             import app as backend
         except Exception:
             return
+        last_boost = 0.0
         while True:
             time.sleep(5.0)
             if not attached["hwnd"]:
                 continue
+            if time.monotonic() - last_boost > 30.0:
+                # Renova a cada 30 s: um recarregamento cria um renderer novo.
+                last_boost = time.monotonic()
+                try:
+                    _boost_webview_priority(attached["browser_pid"])
+                except Exception:
+                    pass
             beat = backend.UI_HEARTBEAT
             minimized, foreground = _window_flags(attached["hwnd"])
             now = time.monotonic()

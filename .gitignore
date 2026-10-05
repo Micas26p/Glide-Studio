@@ -60,3 +60,8 @@ RESTAURAR_*.json
 sfx_timing_cache.json
 tools/whisper/
 asr_cache/
+
+# Dados locais do utilizador (nunca versionar)
+queue_backups/
+.glide_trash/
+automator_pool/

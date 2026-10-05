@@ -184,8 +184,10 @@ SAFE_AGED_DIR_POLICIES = {
     "__pycache__": 12 * 60 * 60,
     "build": 24 * 60 * 60,
 }
+# Só o perfil antigo do modo navegador. O webview_profile é o perfil ATIVO (rascunho AUTO,
+# preferências): a data da pasta raiz quase nunca muda, por isso a regra "mais de 7 dias"
+# apagava-o inteiro de tempos a tempos.
 SAFE_OLD_PROFILE_DIR_NAMES = {
-    "webview_profile",
     "browser_app_profile",
 }
 SAFE_TEMP_SUFFIXES = {
@@ -227,6 +229,12 @@ MEDIA_INDEX_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gli
 AUTOMATOR_SESSION_LOCK = threading.RLock()
 AUTOMATOR_SESSIONS: dict[str, dict[str, Any]] = {}
 AUTOMATOR_SESSION_TTL_SECONDS = 4 * 60 * 60
+# Depósito do rascunho AUTO: cada ficheiro escolhido sobe UMA vez (em segundo plano) e na
+# confirmação é movido, sem segunda cópia. Fica fora de temp_uploads (esvaziado ao fechar)
+# para o rascunho sobreviver a reinícios. Substitui a cópia dos vídeos no IndexedDB.
+AUTOMATOR_POOL_ROOT = DATA_ROOT / "automator_pool"
+AUTOMATOR_POOL_TTL_SECONDS = 7 * 24 * 60 * 60
+AUTOMATOR_POOL_LOCK = threading.RLock()
 
 
 def _maintenance_safe_child(path: Path) -> Path | None:
@@ -439,6 +447,15 @@ def safe_startup_cleanup() -> dict[str, Any]:
                 _remove_maintenance_item(folder, summary, "automator_sessions")
     except Exception as exc:
         summary["errors"].append(f"automator_sessions: {exc}")
+
+    pool_cutoff = time.time() - AUTOMATOR_POOL_TTL_SECONDS
+    try:
+        if AUTOMATOR_POOL_ROOT.exists():
+            for path in AUTOMATOR_POOL_ROOT.iterdir():
+                if path.is_file() and path.stat().st_mtime < pool_cutoff:
+                    _remove_maintenance_item(path, summary, "automator_sessions")
+    except Exception as exc:
+        summary["errors"].append(f"automator_pool: {exc}")
 
     log_cutoff = time.time() - 12 * 60 * 60
     for pattern in SAFE_STARTUP_LOG_PATTERNS:
@@ -1461,7 +1478,14 @@ def deliver_final_video(job: Job, source: Path) -> Path:
         # A entrega passa por um arquivo parcial e só vira visível com replace
         # atômico. Assim, uma interrupção nunca deixa um MP4 incompleto com o
         # nome final nem permite que a fila o marque como entregue.
-        shutil.copy2(source, temporary)
+        # Mesmo disco: liga o ficheiro (instantâneo, sem reescrever GBs no fim do render);
+        # o intermediário técnico é apagado logo a seguir. Outro disco: cópia normal.
+        try:
+            os.link(source, temporary)
+            summary["delivery_method"] = "hardlink"
+        except Exception:
+            shutil.copy2(source, temporary)
+            summary["delivery_method"] = "copy"
         copied_size = temporary.stat().st_size
         source_size = source.stat().st_size
         if copied_size <= 0 or copied_size < source_size:
@@ -1792,6 +1816,37 @@ def _default_queue_project(name: str | None = None) -> dict[str, Any]:
 
 
 _QUEUE_PROJECTS_DISK_DIGEST: str | None = None
+QUEUE_BACKUP_ROOT = DATA_ROOT / "queue_backups"
+QUEUE_BACKUP_KEEP = 40
+# IDs apagados pelo utilizador: um ecrã com estado antigo (aba esquecida, WebView depois
+# de um update, debounce pendente) não pode voltar a criá-los via snapshot.
+QUEUE_DELETED_IDS: list[str] = []
+_QUEUE_IDENTITY_ON_DISK: list[tuple[str, str]] | None = None
+
+
+def _queue_identity(projects: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(str(item.get("id") or ""), str(item.get("name") or "")) for item in projects if isinstance(item, dict)]
+
+
+def _backup_queue_file(reason: str) -> Path | None:
+    """Cópia datada da lista de canais/projetos (pequena, ~60 KB). Nunca apaga a atual."""
+    if not QUEUE_PROJECTS_FILE.exists():
+        return None
+    try:
+        QUEUE_BACKUP_ROOT.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = QUEUE_BACKUP_ROOT / f"queue_{stamp}_{reason}.json"
+        if target.exists():
+            return target  # várias mudanças no mesmo segundo: guarda a mais antiga (estado anterior)
+        shutil.copy2(QUEUE_PROJECTS_FILE, target)
+        # Rotação separada: mudanças em massa não empurram para fora os pontos de restauro diários.
+        for pattern, keep in (("queue_*_before-change.json", QUEUE_BACKUP_KEEP), ("queue_*_start.json", 14)):
+            backups = sorted(QUEUE_BACKUP_ROOT.glob(pattern), key=lambda p: p.name)
+            for old in backups[:-keep]:
+                old.unlink(missing_ok=True)
+        return target
+    except Exception:
+        return None
 
 
 def _queue_projects_digest(projects: list[dict[str, Any]]) -> str:
@@ -1800,12 +1855,20 @@ def _queue_projects_digest(projects: list[dict[str, Any]]) -> str:
 
 
 def _load_queue_projects() -> list[dict[str, Any]]:
-    global _QUEUE_PROJECTS_DISK_DIGEST
+    global _QUEUE_PROJECTS_DISK_DIGEST, _QUEUE_IDENTITY_ON_DISK
     projects = _load_queue_projects_from_disk()
     try:
         _QUEUE_PROJECTS_DISK_DIGEST = _queue_projects_digest(projects)
     except Exception:
         _QUEUE_PROJECTS_DISK_DIGEST = None
+    _QUEUE_IDENTITY_ON_DISK = _queue_identity(projects)
+    # Uma cópia por dia ao abrir (antes de qualquer migração): ponto de restauro após updates.
+    try:
+        today = datetime.now().strftime("%Y%m%d")
+        if projects and not any(QUEUE_BACKUP_ROOT.glob(f"queue_{today}-*_start.json")):
+            _backup_queue_file("start")
+    except Exception:
+        pass
     return projects
 
 
@@ -1819,6 +1882,9 @@ def _load_queue_projects_from_disk() -> list[dict[str, Any]]:
                 projects = data
             elif isinstance(data, dict):
                 projects = data.get("projects", [])
+                deleted = data.get("deletedIds")
+                if isinstance(deleted, list):
+                    QUEUE_DELETED_IDS[:] = [str(item) for item in deleted if item][-500:]
             else:
                 projects = []
             if isinstance(projects, list) and projects:
@@ -1839,7 +1905,7 @@ def _invalidate_queue_cache():
 
 
 def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
-    global _QUEUE_PROJECTS_DISK_DIGEST
+    global _QUEUE_PROJECTS_DISK_DIGEST, _QUEUE_IDENTITY_ON_DISK
     _invalidate_queue_cache()
     # Não reescreve a fila quando nada mudou: as migrações/reparações que correm ao
     # abrir o app gravavam sempre, mexendo nos ficheiros do utilizador sem necessidade.
@@ -1850,10 +1916,15 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
     if digest and digest == _QUEUE_PROJECTS_DISK_DIGEST and QUEUE_PROJECTS_FILE.exists():
         return
     QUEUE_PROJECTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    identity = _queue_identity(projects)
+    if _QUEUE_IDENTITY_ON_DISK is not None and identity != _QUEUE_IDENTITY_ON_DISK:
+        # Lista de canais (ids/nomes/ordem) vai mudar: guarda a versão anterior primeiro.
+        _backup_queue_file("before-change")
     payload = {
         "version": APP_VERSION,
         "updatedAt": _now_iso(),
         "projects": projects,
+        "deletedIds": QUEUE_DELETED_IDS[-500:],
     }
     # Only update .bak if primary file exists and is valid JSON, preventing corrupt primary from overwriting good backup
     try:
@@ -1870,6 +1941,7 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
     encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
     atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
     _QUEUE_PROJECTS_DISK_DIGEST = digest
+    _QUEUE_IDENTITY_ON_DISK = identity
 
 
 def _load_app_settings() -> dict[str, Any]:
@@ -3459,6 +3531,81 @@ def _resolve_persisted_manifest_item(
     return None
 
 
+TRASH_ROOT = DATA_ROOT / ".glide_trash"
+_TRASH_LOCK = threading.Lock()
+_TRASH_EVENT = threading.Event()
+_TRASH_THREAD: threading.Thread | None = None
+
+
+def _purge_trash_once() -> int:
+    """Apaga o conteúdo da lixeira interna; ficheiros presos (Defender, miniaturas) ficam para depois."""
+    left = 0
+    if not TRASH_ROOT.exists():
+        return 0
+    for entry in list(TRASH_ROOT.iterdir()):
+        try:
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+        except Exception:
+            pass
+        if entry.exists():
+            left += 1
+    return left
+
+
+def _trash_worker() -> None:
+    while True:
+        _TRASH_EVENT.wait(timeout=60)
+        _TRASH_EVENT.clear()
+        try:
+            if _purge_trash_once():
+                time.sleep(5)
+        except Exception:
+            pass
+
+
+def _wake_trash_purger() -> None:
+    global _TRASH_THREAD
+    with _TRASH_LOCK:
+        if _TRASH_THREAD is None or not _TRASH_THREAD.is_alive():
+            _TRASH_THREAD = threading.Thread(target=_trash_worker, name="glide-trash-purge", daemon=True)
+            _TRASH_THREAD.start()
+    _TRASH_EVENT.set()
+
+
+def _move_to_trash(path: Path) -> tuple[bool, list[str]]:
+    """Retira um caminho do sítio em O(1) (rename no mesmo disco); a remoção real corre em segundo plano.
+    Antes, apagar GBs dentro do QUEUE_LOCK bloqueava todos os endpoints e congelava a interface."""
+    errors: list[str] = []
+    TRASH_ROOT.mkdir(parents=True, exist_ok=True)
+    target = TRASH_ROOT / f"{path.name}_{uuid.uuid4().hex[:8]}"
+    try:
+        os.replace(path, target)
+        return True, errors
+    except Exception:
+        pass
+    if path.is_file():
+        try:
+            path.unlink()
+            return True, errors
+        except Exception as exc:
+            return False, [f"{path.name}: {exc}"]
+    # Pasta com algum ficheiro aberto: move ficheiro a ficheiro; os presos vão para a lista de erros.
+    target.mkdir(parents=True, exist_ok=True)
+    for item in list(path.rglob("*")):
+        if not item.is_file():
+            continue
+        try:
+            os.replace(item, target / f"{uuid.uuid4().hex[:8]}_{item.name}")
+        except Exception as exc:
+            errors.append(f"{item.name}: {exc}")
+    if not errors:
+        shutil.rmtree(path, ignore_errors=True)
+    return not errors, errors
+
+
 def _clear_queue_project_storage(project: dict[str, Any]) -> dict[str, Any]:
     removed = 0
     recovered = 0
@@ -3488,14 +3635,16 @@ def _clear_queue_project_storage(project: dict[str, Any]) -> dict[str, Any]:
             if key in seen or not resolved.exists():
                 continue
             seen.add(key)
-            recovered += path_size(resolved)
-            if resolved.is_dir():
-                shutil.rmtree(resolved)
-            else:
-                resolved.unlink(missing_ok=True)
-            removed += 1
+            size = path_size(resolved)
+            ok, move_errors = _move_to_trash(resolved)
+            errors.extend(move_errors[:5])
+            if ok:
+                recovered += size
+                removed += 1
         except Exception as exc:
             errors.append(f"{candidate.name}: {exc}")
+    if removed:
+        _wake_trash_purger()
     if job_id and active_job is None:
         JOBS.pop(job_id, None)
     return {"removed": removed, "bytes_recovered": recovered, "errors": errors}
@@ -4790,7 +4939,13 @@ DROPZONE_MANAGER = DropzoneManager()
 @app.on_event("startup")
 def application_startup_init():
     DROPZONE_MANAGER.start()
+    if TRASH_ROOT.exists():
+        _wake_trash_purger()
     def _warmup_caches():
+        try:
+            hardware_profile()  # pronto antes do primeiro render
+        except Exception:
+            pass
         try:
             cta_assets()
             preset_music_status()
@@ -6500,16 +6655,26 @@ def _detect_windows_gpus() -> list[dict[str, Any]]:
     return gpus
 
 
+_HARDWARE_PROFILE_COMPUTE_LOCK = threading.Lock()
+
+
 def hardware_profile(force_refresh: bool = False) -> dict[str, Any]:
+    # O hardware não muda com o app aberto: deteta uma vez por sessão (~11-14 s: WMI +
+    # testes de encoder na GPU). Antes expirava a cada 5 min e o comando FFmpeg seguinte
+    # do render ficava parado à espera, com testes NVENC a disputar a GPU com o render.
+    with _HARDWARE_PROFILE_LOCK:
+        if not force_refresh and _HARDWARE_PROFILE_CACHE:
+            return dict(_HARDWARE_PROFILE_CACHE)
+    with _HARDWARE_PROFILE_COMPUTE_LOCK:
+        with _HARDWARE_PROFILE_LOCK:
+            if _HARDWARE_PROFILE_CACHE and (not force_refresh or time.monotonic() - _HARDWARE_PROFILE_AT < 5.0):
+                return dict(_HARDWARE_PROFILE_CACHE)
+        return _compute_hardware_profile()
+
+
+def _compute_hardware_profile() -> dict[str, Any]:
     global _HARDWARE_PROFILE_CACHE, _HARDWARE_PROFILE_AT, _HARDWARE_PROFILE_WARMING
     now = time.monotonic()
-    with _HARDWARE_PROFILE_LOCK:
-        if (
-            not force_refresh
-            and _HARDWARE_PROFILE_CACHE
-            and now - _HARDWARE_PROFILE_AT < 300.0
-        ):
-            return dict(_HARDWARE_PROFILE_CACHE)
 
     cpu_count = max(1, int(os.cpu_count() or 1))
     cpu_name = (platform.processor() or platform.machine() or "CPU").strip()
@@ -6601,7 +6766,7 @@ def hardware_profile_quick() -> dict[str, Any]:
     global _HARDWARE_PROFILE_WARMING
     now = time.monotonic()
     with _HARDWARE_PROFILE_LOCK:
-        if _HARDWARE_PROFILE_CACHE and now - _HARDWARE_PROFILE_AT < 300.0:
+        if _HARDWARE_PROFILE_CACHE:
             profile = dict(_HARDWARE_PROFILE_CACHE)
             profile["profile_ready"] = True
             return profile
@@ -6645,7 +6810,7 @@ def hardware_profile_quick() -> dict[str, Any]:
 def _warm_hardware_profile_worker() -> None:
     global _HARDWARE_PROFILE_WARMING
     try:
-        hardware_profile(force_refresh=True)
+        hardware_profile()
     except Exception:
         with _HARDWARE_PROFILE_LOCK:
             _HARDWARE_PROFILE_WARMING = False
@@ -7037,8 +7202,10 @@ def compute_asset_fingerprint(path: Path | str, cwd: Path | None = None) -> str:
 
 def probe_has_audio(path: Path, cwd: Path | None = None) -> bool:
     source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
-    if not FFPROBE:
+    if not FFPROBE or not source.exists():
         return False
+    sz = source.stat().st_size if source.exists() else 0
+    probe_timeout = max(30, min(120, int((sz / (1024 * 1024)) * 2) or 30))
     cmd = [
         FFPROBE,
         "-v", "error",
@@ -7047,17 +7214,24 @@ def probe_has_audio(path: Path, cwd: Path | None = None) -> bool:
         "-of", "csv=p=0",
         str(source),
     ]
-    try:
-        p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=12)
-        return p.returncode == 0 and bool((p.stdout or "").strip())
-    except Exception:
-        return False
+    for attempt in range(3):
+        try:
+            p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=probe_timeout)
+            if p.returncode == 0 and bool((p.stdout or "").strip()):
+                return True
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(1.0)
+    return False
 
 
 def probe_has_video(path: Path, cwd: Path | None = None) -> bool:
     source = path if path.is_absolute() else ((cwd or DATA_ROOT) / path).resolve()
-    if not FFPROBE:
+    if not FFPROBE or not source.exists():
         return False
+    sz = source.stat().st_size if source.exists() else 0
+    probe_timeout = max(30, min(120, int((sz / (1024 * 1024)) * 2) or 30))
     cmd = [
         FFPROBE,
         "-v", "error",
@@ -7066,11 +7240,16 @@ def probe_has_video(path: Path, cwd: Path | None = None) -> bool:
         "-of", "csv=p=0",
         str(source),
     ]
-    try:
-        p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=12)
-        return p.returncode == 0 and bool((p.stdout or "").strip())
-    except Exception:
-        return False
+    for attempt in range(3):
+        try:
+            p = _run_hidden(cmd, capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=probe_timeout)
+            if p.returncode == 0 and bool((p.stdout or "").strip()):
+                return True
+        except Exception:
+            pass
+        if attempt < 2:
+            time.sleep(1.0)
+    return False
 
 
 def validate_final_output(job: Job, path: Path, expected_duration: float | None = None) -> dict[str, Any]:
@@ -7092,6 +7271,22 @@ def validate_final_output(job: Job, path: Path, expected_duration: float | None 
             errors.append("arquivo final pequeno demais")
         checks["has_video"] = probe_has_video(path)
         checks["has_audio"] = probe_has_audio(path)
+
+        # Se falhou checagem de stream no destino final (ex: Downloads), verificar se o source
+        # técnico intermediário é válido e idêntico em tamanho para evitar falsos positivos causados
+        # por locks transitórios do Windows Defender ou gerador de miniaturas do Windows Explorer.
+        source_str = summary.get("source")
+        if (not checks["has_video"] or not checks["has_audio"]) and source_str:
+            try:
+                src_p = Path(source_str)
+                if src_p.exists() and src_p.stat().st_size == checks.get("size_bytes", 0):
+                    if not checks["has_video"] and probe_has_video(src_p):
+                        checks["has_video"] = True
+                    if not checks["has_audio"] and probe_has_audio(src_p):
+                        checks["has_audio"] = True
+            except Exception:
+                pass
+
         if not checks["has_video"]:
             errors.append("stream de video ausente")
         if not checks["has_audio"]:
@@ -17043,8 +17238,12 @@ def _cleanup_automator_sessions() -> None:
         for session_id, session in AUTOMATOR_SESSIONS.items():
             if float(session.get("created_at") or 0.0) < cutoff:
                 stale_ids.append(session_id)
-        for session_id in stale_ids:
-            AUTOMATOR_SESSIONS.pop(session_id, None)
+        stale_sessions = [AUTOMATOR_SESSIONS.pop(session_id, None) for session_id in stale_ids]
+    for stale in stale_sessions:
+        if stale and stale.get("status") != "committed":
+            _return_session_files_to_pool(stale)
+    if not AUTOMATOR_STAGING_ROOT.exists():
+        return
     for folder in AUTOMATOR_STAGING_ROOT.iterdir():
         try:
             if folder.is_dir() and folder.stat().st_mtime < cutoff:
@@ -17070,6 +17269,170 @@ def _automator_kind_allowed(kind: str, suffix: str) -> bool:
     if kind in ("video", "image"):
         return suffix in VIDEO_EXTS or suffix in IMAGE_EXTS
     return False
+
+
+def _automator_pool_path(key: str, name: str = "") -> Path:
+    digest = hashlib.sha256(str(key).encode("utf-8", errors="ignore")).hexdigest()[:40]
+    suffix = Path(str(name or "")).suffix.lower()
+    if not re.fullmatch(r"\.[a-z0-9]{1,6}", suffix or ""):
+        suffix = ".bin"
+    return AUTOMATOR_POOL_ROOT / f"{digest}{suffix}"
+
+
+def _automator_pool_find(key: str) -> Path | None:
+    digest = hashlib.sha256(str(key).encode("utf-8", errors="ignore")).hexdigest()[:40]
+    try:
+        for path in AUTOMATOR_POOL_ROOT.glob(f"{digest}.*"):
+            if path.is_file() and not path.name.endswith(".part"):
+                return path
+    except Exception:
+        pass
+    return None
+
+
+def _automator_pool_key_size(key: str) -> int:
+    # Chave do ecrã: nome|tamanho|lastModified
+    parts = str(key).split("|")
+    try:
+        return int(parts[-2]) if len(parts) >= 3 else -1
+    except Exception:
+        return -1
+
+
+@app.post("/api/queue/automator/pool")
+async def automator_pool_upload(files: list[UploadFile] = File(...), keys: str = Form(...)):
+    try:
+        key_list = json.loads(keys)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Lista de chaves inválida.")
+    if not isinstance(key_list, list) or len(key_list) != len(files):
+        raise HTTPException(status_code=400, detail="Chaves e ficheiros não correspondem.")
+    AUTOMATOR_POOL_ROOT.mkdir(parents=True, exist_ok=True)
+    stored: list[str] = []
+    for upload, key in zip(files, key_list):
+        key = str(key or "")
+        try:
+            if not key:
+                continue
+            expected_size = _automator_pool_key_size(key)
+            existing = _automator_pool_find(key)
+            if existing and (expected_size < 0 or existing.stat().st_size == expected_size):
+                stored.append(key)
+                continue
+            target = _automator_pool_path(key, upload.filename or "")
+            part = target.with_name(target.name + f".{uuid.uuid4().hex[:6]}.part")
+            with part.open("wb") as handle:
+                while True:
+                    chunk = await upload.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            size = part.stat().st_size
+            if size <= 0 or (expected_size >= 0 and size != expected_size):
+                part.unlink(missing_ok=True)
+                continue
+            os.replace(part, target)
+            stored.append(key)
+        except Exception:
+            continue
+        finally:
+            try:
+                await upload.close()
+            except Exception:
+                pass
+    return {"ok": True, "stored": stored}
+
+
+@app.post("/api/queue/automator/pool/check")
+def automator_pool_check(payload: dict[str, Any] = Body(default={})):
+    keys = payload.get("keys") if isinstance(payload.get("keys"), list) else []
+    present = []
+    for key in keys[:20000]:
+        path = _automator_pool_find(str(key))
+        expected = _automator_pool_key_size(str(key))
+        if path and (expected < 0 or path.stat().st_size == expected):
+            present.append(str(key))
+    return {"ok": True, "present": present}
+
+
+@app.post("/api/queue/automator/pool/release")
+def automator_pool_release(payload: dict[str, Any] = Body(default={})):
+    """Liberta o depósito: tudo exceto `keep` (chaves ainda no rascunho)."""
+    keep = {
+        hashlib.sha256(str(key).encode("utf-8", errors="ignore")).hexdigest()[:40]
+        for key in (payload.get("keep") if isinstance(payload.get("keep"), list) else [])
+    }
+    removed = 0
+    freed = 0
+    with AUTOMATOR_POOL_LOCK:
+        if AUTOMATOR_POOL_ROOT.exists():
+            for path in list(AUTOMATOR_POOL_ROOT.iterdir()):
+                if not path.is_file() or path.name.split(".", 1)[0] in keep:
+                    continue
+                if path.name.endswith(".part") and path.stat().st_mtime > time.time() - 3600:
+                    continue  # envio ainda em curso
+                try:
+                    size = path.stat().st_size
+                    path.unlink()
+                    removed += 1
+                    freed += size
+                except Exception:
+                    pass
+    return {"ok": True, "removed": removed, "freed": human_bytes(freed)}
+
+
+@app.post("/api/queue/automator/sessions/{session_id}/from-pool")
+def automator_session_from_pool(session_id: str, payload: dict[str, Any] = Body(default={})):
+    """Regista slots da sessão a partir do depósito (move; sem reenviar pela rede)."""
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    with AUTOMATOR_SESSION_LOCK:
+        session = AUTOMATOR_SESSIONS.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Sessão AUTO expirada ou inexistente.")
+        if str(session.get("status") or "") != "uploading":
+            raise HTTPException(status_code=409, detail="A sessão AUTO não aceita novos ficheiros neste estado.")
+    registered: list[str] = []
+    missing: list[str] = []
+    staged_by_key: dict[str, Path] = session.setdefault("pool_staged", {})
+    for item in items:
+        slot = str((item or {}).get("slot") or "")
+        key = str((item or {}).get("key") or "")
+        expected = (session.get("expected") or {}).get(slot)
+        if not expected:
+            if slot in (session.get("skipped") or set()):
+                registered.append(slot)
+            else:
+                missing.append(slot)
+            continue
+        suffix = Path(str(expected.get("name") or "")).suffix.lower()
+        destination = Path(session["folder"]) / f"{slot}{suffix}"
+        try:
+            with AUTOMATOR_POOL_LOCK:
+                source = _automator_pool_find(key)
+                if source is not None:
+                    os.replace(source, destination)
+                elif key in staged_by_key and staged_by_key[key].exists():
+                    # Mesmo ficheiro em dois projetos: liga/copia a partir do já movido.
+                    try:
+                        os.link(staged_by_key[key], destination)
+                    except Exception:
+                        shutil.copy2(staged_by_key[key], destination)
+                else:
+                    missing.append(slot)
+                    continue
+            size = destination.stat().st_size
+            if size <= 0:
+                destination.unlink(missing_ok=True)
+                missing.append(slot)
+                continue
+            staged_by_key[key] = destination
+            with AUTOMATOR_SESSION_LOCK:
+                session["uploads"][slot] = {"path": destination, "size": size, "filename": expected.get("name")}
+                session.setdefault("pool_slots", {})[slot] = key
+            registered.append(slot)
+        except Exception:
+            missing.append(slot)
+    return {"ok": True, "registered": registered, "missing": missing}
 
 
 @app.post("/api/queue/automator/sessions")
@@ -17431,6 +17794,7 @@ def commit_automator_session(session_id: str):
         raise HTTPException(status_code=409, detail="A confirmação AUTO anterior ainda não terminou ou falhou. Tente novamente.")
 
     created_paths: list[Path] = []
+    created_slots: dict[str, str] = {}
     index_backups: dict[str, dict[str, Any]] = {}
     project_results: dict[str, dict[str, Any]] = {}
     try:
@@ -17487,6 +17851,7 @@ def commit_automator_session(session_id: str):
 
             for target, slot, spec in relocated:
                 created_paths.append(target)
+                created_slots[str(target)] = slot
                 project_id = str(spec["projectId"])
                 kind = str(spec["kind"])
                 rel_key = str(spec["rel"]).replace("\\", "/")
@@ -17611,9 +17976,17 @@ def commit_automator_session(session_id: str):
                 _save_project_media_index(project_id, backup)
             except Exception:
                 pass
+        pool_slots = dict(session.get("pool_slots") or {})
         for path in reversed(created_paths):
             try:
-                path.unlink(missing_ok=True)
+                key = pool_slots.get(created_slots.get(str(path), ""))
+                if key and path.exists():
+                    # Veio do depósito do rascunho: devolve-o em vez de apagar (permite repetir).
+                    AUTOMATOR_POOL_ROOT.mkdir(parents=True, exist_ok=True)
+                    os.replace(path, _automator_pool_path(key, path.name))
+                    session.get("uploads", {}).pop(created_slots.get(str(path), ""), None)
+                else:
+                    path.unlink(missing_ok=True)
             except Exception:
                 pass
         with AUTOMATOR_SESSION_LOCK:
@@ -17630,8 +18003,25 @@ def cancel_automator_session(session_id: str):
         return {"ok": True, "status": "missing"}
     if session.get("status") == "committed":
         return {"ok": True, "status": "committed"}
+    _return_session_files_to_pool(session)
     shutil.rmtree(Path(session["folder"]), ignore_errors=True)
     return {"ok": True, "status": "cancelled"}
+
+
+def _return_session_files_to_pool(session: dict[str, Any]) -> None:
+    pool_slots = dict(session.get("pool_slots") or {})
+    returned: set[str] = set()
+    for slot, key in pool_slots.items():
+        info = (session.get("uploads") or {}).get(slot) or {}
+        path = Path(str(info.get("path") or ""))
+        if key in returned or not path.is_file():
+            continue
+        try:
+            AUTOMATOR_POOL_ROOT.mkdir(parents=True, exist_ok=True)
+            os.replace(path, _automator_pool_path(key, path.name))
+            returned.add(key)
+        except Exception:
+            pass
 
 
 @app.get("/api/queue/projects")
@@ -18617,6 +19007,10 @@ def queue_snapshot_project(project_id: str, payload: dict[str, Any] | None = Bod
     with QUEUE_LOCK:
         project = _find_queue_project(project_id)
         if not project:
+            # Só cria quando o ecrã acabou de criar o projeto (create=true). Um snapshot de
+            # um ecrã com estado antigo não pode recriar/repor canais apagados ou de outra lista.
+            if not data.get("create") or project_id in QUEUE_DELETED_IDS:
+                raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
             project = _default_queue_project(str(data.get("name") or "Projeto"))
             project["id"] = safe_folder_component(project_id, uuid.uuid4().hex[:10])[:40]
             QUEUE_PROJECTS.append(project)
@@ -18825,6 +19219,8 @@ def queue_delete_project(project_id: str):
         QUEUE_PROJECTS[:] = [item for item in QUEUE_PROJECTS if item.get("id") != project_id]
         if len(QUEUE_PROJECTS) == before:
             raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
+        if project_id not in QUEUE_DELETED_IDS:
+            QUEUE_DELETED_IDS.append(project_id)
         _save_queue_projects(QUEUE_PROJECTS)
         return {"ok": True, "storage": storage, "projects": [_public_queue_project(item) for item in QUEUE_PROJECTS]}
 
@@ -18879,11 +19275,14 @@ def queue_clear_project_lane(project_id: str, payload: dict[str, Any] = Body(def
                 disk_file = media_dir / str(rec["file"])
                 try:
                     if disk_file.exists() and disk_file.is_file():
-                        recovered_bytes += disk_file.stat().st_size
-                        disk_file.unlink(missing_ok=True)
-                        removed_count += 1
+                        size = disk_file.stat().st_size
+                        if _move_to_trash(disk_file)[0]:
+                            recovered_bytes += size
+                            removed_count += 1
                 except Exception:
                     pass
+        if removed_count:
+            _wake_trash_purger()
 
         _save_project_media_index(project_id, index)
         media[lane] = []
@@ -22437,7 +22836,9 @@ def concat_segments_and_mux(
                 graph.commit(
                     stage="mux",
                     cache_key=mux_key,
-                    artifacts={"final.mp4": out_resolved},
+                    # O MP4 final já é entregue ao utilizador; guardá-lo também na cache
+                    # retinha até 8 GB (1 vídeo completo por render, 7 dias). O mux é rápido.
+                    artifacts={},
                     metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4), "direct_mux": True},
                 )
         else:
@@ -22460,7 +22861,9 @@ def concat_segments_and_mux(
                 graph.commit(
                     stage="mux",
                     cache_key=mux_key,
-                    artifacts={"final.mp4": out_resolved},
+                    # O MP4 final já é entregue ao utilizador; guardá-lo também na cache
+                    # retinha até 8 GB (1 vídeo completo por render, 7 dias). O mux é rápido.
+                    artifacts={},
                     metadata={"duration": round(audio_total, 4), "video_duration": round(video_duration, 4)},
                 )
     if graph:
@@ -25062,6 +25465,7 @@ def render_worker(job_id: str):
         sync_graph_summary(job, graph)
         performance_start(job, "delivery")
         try:
+            validate_final_output(job, technical_out_file, final_duration)
             out_file = deliver_final_video(job, technical_out_file)
             validate_final_output(job, out_file, final_duration)
             # Depois que o destino final passou pela validação, remova apenas o

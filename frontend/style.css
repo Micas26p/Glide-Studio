@@ -4652,3 +4652,22 @@ body.page-hidden *,body.page-hidden *::before,body.page-hidden *::after{animatio
 
 /* Botões desativados inequívocos em ambos os temas */
 .btn:disabled,.btn[disabled]{opacity:.4;filter:saturate(.25);box-shadow:none;cursor:not-allowed;transform:none}
+
+/* Motivo de bloqueio do AUTO, junto aos botões */
+#automatorActions button:disabled{pointer-events:none}
+.automation-blocker{
+  margin:12px 0 0;
+  padding:9px 14px;
+  border-radius:10px;
+  border:1px solid rgba(255,184,92,.34);
+  background:rgba(255,184,92,.09);
+  color:#ffe1ad;
+  font-size:12px;
+  font-weight:700;
+  line-height:1.45;
+}
+.automation-blocker.flash{animation:automationBlockerFlash .6s ease}
+@keyframes automationBlockerFlash{0%,100%{transform:none}25%{transform:translateX(-4px)}75%{transform:translateX(4px)}}
+@media (prefers-reduced-motion: reduce){.automation-blocker.flash{animation:none}}
+body[data-theme-resolved="light"] .automation-blocker,
+body[data-theme="light"] .automation-blocker{color:#7a5207;background:rgba(255,184,92,.14)}

@@ -247,7 +247,8 @@
         <div class="automation-preview" id="automatorPreview">
           <p class="queue-report-empty">Selecione Textos, áudios e pastas para ver a pré-visualização. Você pode arrastar pastas com vídeos e imagens, soltar arquivos nas listas e remover qualquer item no botão ✕ sem reiniciar.</p>
         </div>
-        <div class="modal-actions">
+        <p class="automation-blocker" id="automatorBlocker" role="status" aria-live="polite" hidden></p>
+        <div class="modal-actions" id="automatorActions">
           <button type="button" class="btn ghost" id="automatorCancelBtn">Cancelar</button>
           <button type="button" class="btn ghost auto-heal-btn" id="automatorAutoHealBtn" disabled title="Ajusta automaticamente todos os projetos com mídia curta usando sacrifício inteligente de áudio e ritmo saudável">🪄 Auto-Healer (Balancear Lote)</button>
           <button type="button" class="btn automation-confirm" id="automatorConfirmBtn" disabled>Confirmar</button>

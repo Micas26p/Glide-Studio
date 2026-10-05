@@ -163,6 +163,7 @@ class Regressions(unittest.TestCase):
     def test_script_guide_survives_snapshot_and_reload(self):
         response = self.client.post('/api/queue/projects/qa-script-guide/snapshot', json={
             'name':'Roteiro — ação',
+            'create':True,
             'media':{'videos':[], 'audios':[], 'script_guides':['roteiro ação.txt']},
         })
         self.assertEqual(response.status_code,200,response.text)

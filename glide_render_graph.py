@@ -298,6 +298,10 @@ class RenderGraph:
         total = sum(int(row.get("size_bytes") or 0) for row in rows)
         for row in rows:
             expired = float(row.get("expires_at") or 0) < now
+            # Versões antigas guardavam o MP4 final do "mux" (um vídeo inteiro por render);
+            # já não é reutilizado com artefacto, por isso sai já em vez de esperar 7 dias.
+            if str(row.get("stage") or "") == "mux" and int(row.get("size_bytes") or 0) > 50 * 1024 * 1024:
+                expired = True
             over_budget = total > self.max_bytes
             if not expired and not over_budget:
                 continue

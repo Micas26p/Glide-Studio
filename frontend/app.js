@@ -751,6 +751,8 @@ function createProjectModel(name = ''){
   const id = `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   return {
     id,
+    // Só projetos criados agora neste ecrã podem ser criados no servidor via snapshot.
+    isNew: true,
     name: name || `Projeto ${state.projects.length + 1}`,
     status: 'draft',
     files: emptyProjectFiles(),
@@ -814,6 +816,7 @@ function persistedMediaObject(projectId, meta = {}){
 function storedProjectToModel(raw = {}, index = 0){
   const project = createProjectModel(raw.name || `Projeto ${index + 1}`);
   project.id = raw.id || project.id;
+  project.isNew = false;
   project.name = raw.name || project.name;
   project.status = ['queued', 'preparing', 'rendering', 'ready', 'done', 'recovered', 'error', 'paused', 'cancelled'].includes(raw.status) ? raw.status : 'draft';
   project.files = emptyProjectFiles();
@@ -1137,6 +1140,10 @@ function scheduleActiveProjectDecorations(projectId){
 function captureActiveProject(){
   const project = state.projects.find(item => item.id === state.activeProjectId);
   if(!project) return null;
+  // O formulário (nome, mídias, opções) só pode ser gravado no projeto que ELE carregou.
+  // Se o "ativo" mudou sem recarregar o formulário, gravar aqui copiava o nome e as mídias
+  // de outro canal por cima deste — era assim que canais apareciam renomeados.
+  if(state.formProjectId !== project.id) return project;
   project.files = {
     videos: [...state.videos],
     audios: [...state.audios],
@@ -1250,6 +1257,7 @@ function loadProject(projectId, options = {}){
   if(!project) return;
   state.mediaAnalysisToken++;
   state.activeProjectId = project.id;
+  state.formProjectId = project.id;
   localStorage.setItem('glide_active_project_id', project.id);
   if(projectNameInput) projectNameInput.value = project.name || '';
   state.videos = [...(project.files?.videos || [])];
@@ -2015,6 +2023,24 @@ async function persistProjectOrder(){
   }
 }
 const projectSnapshotTimers = new Map();
+function cancelProjectSnapshot(projectId){
+  clearTimeout(projectSnapshotTimers.get(projectId));
+  projectSnapshotTimers.delete(projectId);
+}
+let queueResyncTimer = null;
+function scheduleQueueResync(){
+  if(queueResyncTimer) return;
+  queueResyncTimer = window.setTimeout(async () => {
+    queueResyncTimer = null;
+    if(state.queueRendering || state.automatorApplying) return;
+    captureActiveProject();
+    if(await loadStoredQueueProjects()){
+      const target = state.activeProjectId;
+      state.activeProjectId = null;
+      if(target) loadProject(target, {capture: false, force: true});
+    }
+  }, 400);
+}
 function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
   if(!project?.id) return;
   const media = {
@@ -2041,6 +2067,7 @@ function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
     retryCount: Number(project.retryCount || 0),
     retryHistory: project.retryHistory || [],
     ...(project.lastRenderSummary === null ? {lastRenderSummary: null, directorState: null, renderGraphRun: null} : {}),
+    ...(project.isNew ? {create: true} : {}),
   };
   const send = () => {
     projectSnapshotTimers.delete(project.id);
@@ -2058,6 +2085,15 @@ function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
       body,
       cache: 'no-store',
       keepalive: Boolean(immediate),
+    }).then(response => {
+      if(response.ok){
+        project.isNew = false;
+      }else if(response.status === 404 && !project.isNew){
+        // Este ecrã tinha um projeto que já não existe no servidor (apagado ou lista
+        // antiga): ressincroniza em vez de o recriar.
+        scheduleQueueResync();
+      }
+      return response;
     }).catch(() => null);
   };
   clearTimeout(projectSnapshotTimers.get(project.id));
@@ -2066,10 +2102,12 @@ function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
   return null;
 }
 
+let queueStoreReachable = false;
 async function loadStoredQueueProjects(){
   try{
     const r = await fetch('/api/queue/projects', {cache: 'no-store'});
     if(!r.ok) throw new Error(await r.text());
+    queueStoreReachable = true;
     const payload = await r.json();
     const stored = Array.isArray(payload.projects) ? payload.projects : [];
     if(!stored.length) return false;
@@ -2205,7 +2243,13 @@ async function importProjectsBackup(file){
 }
 
 async function initializeProjectQueue(){
-  await loadStoredQueueProjects();
+  // Se o motor ainda não respondeu, não inventa um "Projeto 1": espera pela lista real
+  // (senão o projeto vazio era gravado por cima da fila do utilizador).
+  for(let attempt = 0; attempt < 30; attempt++){
+    await loadStoredQueueProjects();
+    if(queueStoreReachable) break;
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
   ensureProject();
   const targetId = state.activeProjectId || state.projects[0]?.id;
   state.activeProjectId = null;
@@ -3825,6 +3869,9 @@ function addUniqueFile(file, forcedKind = null){
 
 async function persistImportedMedia(projectId, entries){
   if(!projectId || !entries?.length) return {saved: 0, failed: 0};
+  // Projeto acabado de criar neste ecrã: cria-o no motor antes de enviar a mídia (senão 404).
+  const owner = state.projects.find(item => item.id === projectId);
+  if(owner?.isNew) await syncProjectSnapshot(owner, {immediate: true});
   let saved = 0;
   let failed = 0;
   const poolSize = entries.length > 40 ? 4 : entries.length > 12 ? 3 : 2;
@@ -6817,21 +6864,122 @@ let automatorDraftTimer = null;
 function scheduleSaveAutomatorDraft(){
   clearTimeout(automatorDraftTimer);
   automatorDraftTimer = setTimeout(saveAutomatorDraftNow, 600);
+  scheduleAutomatorPoolSync();
+}
+
+// ---- Depósito do rascunho AUTO -------------------------------------------------------
+// Os ficheiros escolhidos sobem UMA vez para o motor local, em segundo plano e em pausa
+// durante renders (para não roubar disco/CPU ao render). Na confirmação são apenas
+// movidos. Antes eram copiados para o IndexedDB do WebView (GBs duplicados, ~1 h de
+// escrita em fundo que deixava o AUTO lento) e depois enviados outra vez ao confirmar.
+const automatorPool = {known: new Set(), running: false, dirty: false, timer: null};
+function automatorAllFiles(){
+  const a = state.automator || {};
+  return [...(a.srts || []), ...(a.audios || []), ...(a.scripts || []), ...(a.folders || []).flatMap(folder => folder.files || [])].filter(Boolean);
+}
+function automatorPoolBusy(){
+  return Boolean(state.renderActive || state.queueRendering || state.automatorApplying);
+}
+function scheduleAutomatorPoolSync(delay = 1500){
+  clearTimeout(automatorPool.timer);
+  automatorPool.timer = setTimeout(() => { automatorPoolSync().catch(() => {}); }, delay);
+}
+async function automatorPoolCheck(keys){
+  const present = new Set();
+  for(let i = 0; i < keys.length; i += 2000){
+    try{
+      const r = await fetch('/api/queue/automator/pool/check', {
+        method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
+        body: JSON.stringify({keys: keys.slice(i, i + 2000)}),
+      });
+      if(r.ok) ((await r.json()).present || []).forEach(key => present.add(key));
+    }catch(_){}
+  }
+  return present;
+}
+async function automatorPoolSync(){
+  if(automatorPool.running){ automatorPool.dirty = true; return; }
+  automatorPool.running = true;
+  try{
+    do{
+      automatorPool.dirty = false;
+      const real = automatorAllFiles().filter(file => file instanceof Blob);
+      let pending = real.filter(file => !automatorPool.known.has(automatorFileKey(file)));
+      if(!pending.length) break;
+      const present = await automatorPoolCheck(pending.map(automatorFileKey));
+      present.forEach(key => automatorPool.known.add(key));
+      pending = pending.filter(file => !present.has(automatorFileKey(file)));
+      let batch = [];
+      let batchBytes = 0;
+      const flush = async () => {
+        if(!batch.length) return;
+        while(automatorPoolBusy()) await new Promise(resolve => setTimeout(resolve, 5000));
+        const form = new FormData();
+        batch.forEach(file => form.append('files', file, file.name));
+        form.append('keys', JSON.stringify(batch.map(automatorFileKey)));
+        try{
+          const r = await fetch('/api/queue/automator/pool', {method: 'POST', body: form, cache: 'no-store'});
+          if(r.ok) ((await r.json()).stored || []).forEach(key => automatorPool.known.add(key));
+        }catch(_){}
+        batch = [];
+        batchBytes = 0;
+      };
+      for(const file of pending){
+        // A lista pode ter mudado entretanto (ficheiro removido): não envia o que já saiu.
+        if(!automatorAllFiles().includes(file)) continue;
+        if(batch.length && (batch.length >= 8 || batchBytes + Number(file.size || 0) > 64 * 1024 * 1024)) await flush();
+        batch.push(file);
+        batchBytes += Number(file.size || 0);
+      }
+      await flush();
+    }while(automatorPool.dirty);
+  }finally{
+    automatorPool.running = false;
+  }
+  // Regrava o rascunho para libertar cópias antigas assim que o depósito ficou completo.
+  saveAutomatorDraftNow().catch(() => {});
+}
+function releaseAutomatorPool(keepKeys = []){
+  automatorPool.known = new Set([...automatorPool.known].filter(key => keepKeys.includes(key)));
+  return fetch('/api/queue/automator/pool/release', {
+    method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
+    body: JSON.stringify({keep: keepKeys}),
+  }).catch(() => null);
 }
 
 // O structured clone do IndexedDB descarta propriedades "expando" de File
 // (_autoRelativePath, _autoDuration...), por isso guardamos esses metadados à parte.
 const AUTOMATOR_FILE_META_KEYS = ['_autoRelativePath', '_autoDuration', '_autoImportedAt', '_autoSelectionIndex', '_autoUsageIndex'];
 function automatorFileKey(file){
+  if(file?._poolKey) return file._poolKey;
   return [file?.name || '', Number(file?.size || 0), Number(file?.lastModified || 0)].join('|');
 }
 function automatorDraftFileEntry(file){
   const meta = {};
   AUTOMATOR_FILE_META_KEYS.forEach(key => { if(file?.[key] !== undefined) meta[key] = file[key]; });
   if(!meta._autoRelativePath && file?.webkitRelativePath) meta._autoRelativePath = file.webkitRelativePath;
-  return {key: automatorFileKey(file), meta};
+  return {
+    key: automatorFileKey(file),
+    name: file?.name || '',
+    size: Number(file?.size || 0),
+    lastModified: Number(file?.lastModified || 0),
+    type: file?.type || '',
+    meta,
+  };
 }
 function automatorFileFromDraftEntry(entry){
+  // Rascunho v4: só referência ao depósito do motor (sem conteúdo no IndexedDB).
+  if(entry && !(entry instanceof Blob) && !(entry.file instanceof Blob) && entry.key && entry.name){
+    const virtual = {
+      name: entry.name,
+      size: Number(entry.size || 0),
+      lastModified: Number(entry.lastModified || 0),
+      type: entry.type || '',
+      _poolKey: entry.key,
+    };
+    Object.entries(entry.meta || {}).forEach(([key, value]) => { virtual[key] = value; });
+    return virtual;
+  }
   // Compatível com rascunhos antigos (File direto ou {file, meta}).
   const file = entry instanceof Blob ? entry : entry?.file;
   if(!(file instanceof Blob)) return null;
@@ -6869,21 +7017,10 @@ async function saveAutomatorDraftOnce(){
     if(!srts.length && !audios.length && !scripts.length && !folders.length) return;
     const db = await openAutomatorDraftDB();
     if(!db) return;
-    const allFiles = [...srts, ...audios, ...scripts, ...folders.flatMap(folder => folder.files || [])];
-    const wanted = new Map(allFiles.filter(file => file instanceof Blob).map(file => [automatorFileKey(file), file]));
-    const keysReq = db.transaction(AUTOMATOR_FILES_STORE, 'readonly').objectStore(AUTOMATOR_FILES_STORE).getAllKeys();
-    const existingKeys = new Set((await idbRequest(keysReq)) || []);
-    // 1) Ficheiros novos: um por transação, para não segurar GBs numa só operação.
-    for(const [key, file] of wanted){
-      if(existingKeys.has(key)) continue;
-      const tx = db.transaction(AUTOMATOR_FILES_STORE, 'readwrite');
-      tx.objectStore(AUTOMATOR_FILES_STORE).put({key, file});
-      if(!await idbTxDone(tx)) return;
-    }
-    // 2) Rascunho leve (só referências + metadados)
+    // Rascunho v4: só referências + metadados. O conteúdo vai para o depósito do motor.
     const draft = {
       id: 'current_draft',
-      version: 3,
+      version: 4,
       savedAt: Date.now(),
       sort: state.automator?.sort || {},
       srts: srts.map(automatorDraftFileEntry),
@@ -6896,9 +7033,10 @@ async function saveAutomatorDraftOnce(){
     };
     const tx = db.transaction([AUTOMATOR_STORE_NAME, AUTOMATOR_FILES_STORE], 'readwrite');
     tx.objectStore(AUTOMATOR_STORE_NAME).put(draft);
-    // 3) Remove ficheiros que já não fazem parte do rascunho
-    const store = tx.objectStore(AUTOMATOR_FILES_STORE);
-    existingKeys.forEach(key => { if(!wanted.has(key)) store.delete(key); });
+    // Liberta as cópias de vídeos dos rascunhos antigos (v3) que ocupavam GBs no perfil,
+    // mas só quando tudo já está no depósito (um rascunho v3 restaurado ainda lê de lá).
+    const allPooled = automatorAllFiles().every(file => automatorPool.known.has(automatorFileKey(file)));
+    if(allPooled) tx.objectStore(AUTOMATOR_FILES_STORE).clear();
     await idbTxDone(tx);
   }catch(err){
     console.warn('Rascunho AUTO não foi gravado:', err);
@@ -6916,7 +7054,8 @@ async function loadAutomatorDraft(){
     // Resolve as referências (formato v3) dentro da mesma transação; formatos antigos passam direto.
     const filesStore = tx.objectStore(AUTOMATOR_FILES_STORE);
     const resolveEntry = entry => {
-      if(entry instanceof Blob || entry?.file instanceof Blob || !entry?.key) return Promise.resolve(entry);
+      // v4 (só referência ao depósito, com nome/tamanho) passa direto; v3 resolve o blob.
+      if(entry instanceof Blob || entry?.file instanceof Blob || !entry?.key || entry?.name) return Promise.resolve(entry);
       return idbRequest(filesStore.get(entry.key)).then(record => (record?.file ? {file: record.file, meta: entry.meta || {}} : null));
     };
     const resolveList = list => Promise.all((list || []).map(resolveEntry));
@@ -6990,13 +7129,33 @@ async function restoreAutomatorDraft(){
     sort: draft.sort || {},
   };
   if(draftBanner) draftBanner.hidden = true;
+  // Ficheiros só-referência (rascunho v4) têm de existir no depósito do motor.
+  const virtualKeys = automatorAllFiles().filter(file => file._poolKey).map(file => file._poolKey);
+  let missingFolders = [];
+  if(virtualKeys.length){
+    const present = await automatorPoolCheck(virtualKeys);
+    present.forEach(key => automatorPool.known.add(key));
+    const isMissing = file => file._poolKey && !present.has(file._poolKey);
+    ['srts', 'audios', 'scripts'].forEach(list => {
+      state.automator[list] = state.automator[list].filter(file => !isMissing(file));
+    });
+    state.automator.folders = state.automator.folders.map(folder => {
+      const kept = folder.files.filter(file => !isMissing(file));
+      if(kept.length < folder.files.length) missingFolders.push(folder.name || folder.label || 'pasta');
+      return {...folder, files: kept};
+    }).filter(folder => folder.files.length);
+  }
   updateAutomatorPreview();
   const total = state.automator.srts.length + state.automator.audios.length + state.automator.scripts.length + state.automator.folders.length;
-  if(dockSummary) dockSummary.textContent = `AUTO: rascunho restaurado (${total} item(ns)).`;
+  if(dockSummary) dockSummary.textContent = missingFolders.length
+    ? `AUTO: rascunho restaurado (${total} item(ns)); adicione de novo: ${missingFolders.slice(0, 4).join(', ')}.`
+    : `AUTO: rascunho restaurado (${total} item(ns)).`;
+  if(missingFolders.length) showToast('Rascunho incompleto', `Alguns ficheiros já não estão disponíveis. Adicione de novo: ${missingFolders.slice(0, 4).join(', ')}.`, 'error', 7000);
 }
 
 async function discardAutomatorDraft(){
   await clearAutomatorDraftNow();
+  releaseAutomatorPool([]);
   const draftBanner = document.getElementById('automatorDraftBanner');
   if(draftBanner) draftBanner.hidden = true;
   resetAutomator();
@@ -7049,6 +7208,10 @@ async function cancelAutomator(){
   automatorModal?.setAttribute('aria-hidden', 'true');
 }
 
+function automatorProjectIsEmpty(project){
+  return !(project?.files?.videos?.length || project?.files?.audios?.length || project?.files?.subtitles?.length);
+}
+
 function automatorPlan(){
   const activeIndex = Math.max(0, state.projects.findIndex(project => project.id === state.activeProjectId));
   const startIndex = activeIndex >= 0 ? activeIndex : 0;
@@ -7059,7 +7222,16 @@ function automatorPlan(){
   const requiredCounts = [srtCount, audioCount, folderCount];
   if(scriptCount > 0) requiredCounts.push(scriptCount);
   const targetCount = Math.max(...requiredCounts, 0);
-  const available = Math.max(0, state.projects.length - startIndex);
+  // Destinos: projetos VAZIOS a partir do selecionado; se não chegarem, os vazios da fila
+  // inteira, por ordem. Antes só contava a partir do selecionado e o botão ficava
+  // desativado sem razão visível ("cliquei em Confirmar e nada aconteceu").
+  const emptyFromActive = [];
+  for(let i = startIndex; i < state.projects.length; i++){
+    if(automatorProjectIsEmpty(state.projects[i])) emptyFromActive.push(state.projects[i]);
+  }
+  const emptyAll = state.projects.filter(automatorProjectIsEmpty);
+  const targets = emptyFromActive.length >= targetCount ? emptyFromActive : emptyAll;
+  const available = targets.length;
   const warnings = [];
   if(!state.projects.length) warnings.push('Crie pelo menos um projeto na fila.');
   if(!srtCount && !audioCount && !folderCount){
@@ -7073,32 +7245,39 @@ function automatorPlan(){
     warnings.push(`Quantidades diferentes: ${srtCount} Texto(s), ${audioCount} áudio(s), ${scriptCount} roteiro(s), ${folderCount} pasta(s) de mídia.`);
   }
   if(targetCount > available){
-    warnings.push(`Projetos insuficientes na fila: são necessários ${targetCount} projetos, mas apenas ${available} estão disponíveis a partir do selecionado.`);
+    warnings.push(`Projetos vazios insuficientes: são necessários ${targetCount}, mas só há ${available} vazio(s) na fila. Limpe ou crie mais ${targetCount - available} projeto(s).`);
   }
   const rows = [];
-  const displayCount = targetCount;
-  for(let i = 0; i < displayCount; i++){
-    const project = state.projects[startIndex + i] || null;
-    const occupied = Boolean(
-      project?.files?.videos?.length
-      || project?.files?.audios?.length
-      || project?.files?.subtitles?.length
-    );
-    if(occupied && project){
-      warnings.push(`Projeto ocupado: ${project?.name || `#${startIndex + i + 1}`}. O AUTO aceita somente projetos vazios.`);
-    }
+  for(let i = 0; i < targetCount; i++){
+    const project = targets[i] || null;
     rows.push({
       project,
       srt: state.automator.srts?.[i] || null,
       audio: state.automator.audios?.[i] || null,
       script: state.automator.scripts?.[i] || null,
       folder: state.automator.folders?.[i] || null,
-      occupied,
+      occupied: false,
     });
   }
   return {startIndex, maxCount: targetCount, targetCount: rows.length, available, warnings, rows};
 }
 
+// Motivo visível junto aos botões: um botão desativado não diz porquê, e o aviso no topo
+// do modal ficava fora de vista com listas longas.
+function automatorBlockReason(plan, allReady){
+  if(plan.warnings.length) return plan.warnings[0];
+  if(!plan.rows.length) return '';
+  const missing = plan.rows.find(r => !(r.srt && r.audio && r.folder && r.project));
+  if(missing) return `Linha incompleta: ${missing.project?.name || 'projeto'} precisa de Textos, áudio e pasta de mídia.`;
+  return allReady ? '' : 'Revise a tabela: há linhas incompletas.';
+}
+function updateAutomatorBlocker(plan, allReady){
+  const blocker = document.getElementById('automatorBlocker');
+  if(!blocker) return;
+  const reason = state.automatorApplying ? '' : automatorBlockReason(plan, allReady);
+  blocker.textContent = reason ? `Não é possível confirmar: ${reason}` : '';
+  blocker.hidden = !reason;
+}
 function updateAutomatorPreview(){
   const srtLen = state.automator.srts?.length || 0;
   const audioLen = state.automator.audios?.length || 0;
@@ -7117,6 +7296,7 @@ function updateAutomatorPreview(){
   const allReady = plan.rows.length > 0 && plan.rows.every(r => r.srt && r.audio && r.folder && !r.occupied && r.project);
 
   if(automatorAutoHealBtn) automatorAutoHealBtn.disabled = !plan.rows.length;
+  updateAutomatorBlocker(plan, allReady);
   if(automatorConfirmBtn) automatorConfirmBtn.disabled = !allReady || Boolean(plan.warnings.length);
   if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.disabled = !hasHealthy || (plan.available < plan.maxCount);
   if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.disabled = !allReady || Boolean(plan.warnings.length);
@@ -7160,9 +7340,15 @@ async function applyAutomatorDistribution(options = {}){
   const rowsToApply = onlyHealthy ? plan.rows.filter(r => automatorRowHealth(r).ready) : plan.rows;
   if(plan.warnings.length || !rowsToApply.length){
     updateAutomatorPreview();
+    const reason = automatorBlockReason(plan, false) || 'nenhuma linha pronta para aplicar.';
+    if(dockSummary) dockSummary.textContent = `AUTO não iniciou: ${reason}`;
+    showToast('AUTO não iniciou', reason, 'error');
     return false;
   }
-  if(state.automatorApplying) return false;
+  if(state.automatorApplying){
+    showToast('AUTO em curso', 'A distribuição anterior ainda está a ser aplicada.', 'info');
+    return false;
+  }
   let succeeded = false;
   state.automatorApplying = true;
   state.automatorAbortController = new AbortController();
@@ -7277,6 +7463,30 @@ async function applyAutomatorDistribution(options = {}){
     }
 
     const uploadedSlots = new Set();
+    // 1) O que já subiu em segundo plano para o depósito é só movido (sem reenviar GBs).
+    const poolCandidates = fileSpecs.filter(spec => spec.file?._poolKey || automatorPool.known.has(automatorFileKey(spec.file)));
+    if(poolCandidates.length){
+      progress(4, `A reutilizar ${poolCandidates.length} ficheiro(s) já enviados em segundo plano...`, true);
+      const present = await automatorPoolCheck(poolCandidates.map(spec => automatorFileKey(spec.file)));
+      const items = poolCandidates
+        .filter(spec => present.has(automatorFileKey(spec.file)))
+        .map(spec => ({slot: spec.slot, key: automatorFileKey(spec.file)}));
+      for(let i = 0; i < items.length; i += 400){
+        const r = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/from-pool`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({items: items.slice(i, i + 400)}),
+          cache: 'no-store',
+          signal: state.automatorAbortController.signal,
+        }, 120000);
+        if(r.ok) ((await r.json()).registered || []).forEach(slot => uploadedSlots.add(slot));
+      }
+      progress(5 + (uploadedSlots.size / Math.max(1, fileSpecs.length)) * 85, `${uploadedSlots.size}/${fileSpecs.length} ficheiro(s) prontos sem reenvio.`, true);
+    }
+    const unavailable = fileSpecs.filter(spec => !uploadedSlots.has(spec.slot) && !(spec.file instanceof Blob));
+    if(unavailable.length){
+      throw new Error(`${unavailable.length} ficheiro(s) do rascunho já não estão disponíveis (ex.: ${unavailable[0].name}). Remova e adicione essa pasta de novo.`);
+    }
     const MAX_FILES = fileSpecs.length > 200 ? 25 : (fileSpecs.length > 50 ? 16 : 8);
     const MAX_BYTES = 45 * 1024 * 1024;
     const batches = [];
@@ -7284,6 +7494,7 @@ async function applyAutomatorDistribution(options = {}){
     let currentBatchBytes = 0;
 
     for (const spec of fileSpecs) {
+      if (uploadedSlots.has(spec.slot)) continue;
       const sz = Number(spec.size || 0);
       if (currentBatch.length > 0 && (currentBatch.length >= MAX_FILES || currentBatchBytes + sz > MAX_BYTES)) {
         batches.push(currentBatch);
@@ -7440,6 +7651,7 @@ async function applyAutomatorDistribution(options = {}){
     clearTimeout(automatorDraftTimer);
     state.automator = {srts: [], audios: [], scripts: [], folders: [], sort: state.automator?.sort || {}};
     await clearAutomatorDraftNow();
+    releaseAutomatorPool([]);
     const draftBanner = document.getElementById('automatorDraftBanner');
     if(draftBanner) draftBanner.hidden = true;
     closeAutomator();
@@ -7675,6 +7887,7 @@ async function removeActiveProject(){
     return;
   }
   if(!window.confirm(`Remover ${current.name} da fila? Os arquivos originais no disco não serão apagados.`)) return;
+  cancelProjectSnapshot(current.id);
   try{
     const response = await fetch(`/api/queue/projects/${encodeURIComponent(current.id)}`, {method: 'DELETE', cache: 'no-store'});
     if(!response.ok) throw new Error(await response.text());
@@ -9403,6 +9616,22 @@ if(automatorAutoHealBtn) automatorAutoHealBtn.addEventListener('click', () => {
   updateAutomatorPreview();
   automatorAutoHealBtn.textContent = '✨ Lote Balanceado!';
   setTimeout(() => { if(automatorAutoHealBtn) automatorAutoHealBtn.textContent = '🪄 Auto-Healer (Balancear Lote)'; }, 3000);
+});
+document.getElementById('automatorActions')?.addEventListener('click', event => {
+  // Botões desativados não recebem cliques (pointer-events: none no CSS): o clique chega
+  // aqui e mostramos o motivo em vez de "não acontecer nada".
+  const target = event.target;
+  if(target.closest('button:not(:disabled)')) return;
+  const blocker = document.getElementById('automatorBlocker');
+  const plan = automatorPlan();
+  const reason = automatorBlockReason(plan, false) || (state.automatorApplying ? 'a distribuição anterior ainda está em curso.' : 'selecione Textos, áudios e pastas de mídia.');
+  if(blocker){
+    blocker.textContent = `Não é possível confirmar: ${reason}`;
+    blocker.hidden = false;
+    blocker.classList.remove('flash');
+    void blocker.offsetWidth;
+    blocker.classList.add('flash');
+  }
 });
 if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
   applyAutomatorDistribution().catch(error => {
