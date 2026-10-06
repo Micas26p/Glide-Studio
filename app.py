@@ -13227,8 +13227,9 @@ def seconds_to_ass_time(value: float) -> str:
 def ass_escape(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     text = text.replace("{", "(").replace("}", ")")
-    text = re.sub(r"\s+", " ", text).strip()
-    return text.replace("\\", "\\\\")
+    # Quebras de linha reais (textos de destaque em 2 linhas) viram \N do ASS.
+    parts = [re.sub(r"\s+", " ", part).strip() for part in str(text).split("\n")]
+    return "\\N".join(part.replace("\\", "\\\\") for part in parts if part)
 
 
 def ass_color(value: str | None, default: str, alpha: str = "00") -> str:
@@ -13659,7 +13660,9 @@ def split_cue_into_single_lines(cue: SubtitleCue, max_chars: int = 40) -> list[S
     return _split_recursive(raw_text, cue.start, cue.end)
 
 
-def parse_srt_file(path: Path) -> list[SubtitleCue]:
+def parse_srt_file(path: Path, keep_lines: bool = False) -> list[SubtitleCue]:
+    """keep_lines=True devolve cada bloco inteiro, com as quebras de linha, sem fatiar no tempo
+    (textos de destaque: título + descritor). Por omissão achata e divide em frases de 1 linha."""
     try:
         text = path.read_text(encoding="utf-8-sig", errors="replace")
     except Exception:
@@ -13680,6 +13683,11 @@ def parse_srt_file(path: Path) -> list[SubtitleCue]:
             end = srt_time_to_seconds(right.split()[0])
         except Exception:
             continue
+        if keep_lines:
+            body = "\n".join(lines[time_idx + 1:]).strip()
+            if body:
+                cues.append(SubtitleCue(start=start, end=max(start, end), text=body))
+            continue
         body = " ".join(lines[time_idx + 1:]).strip()
         if body:
             raw_cue = SubtitleCue(start=start, end=max(start, end), text=body)
@@ -13687,11 +13695,15 @@ def parse_srt_file(path: Path) -> list[SubtitleCue]:
     return cues
 
 
-def normalize_subtitles(cues: list[SubtitleCue], total_duration: float, min_duration: float = MIN_SUBTITLE_SECONDS) -> tuple[list[SubtitleCue], dict[str, Any]]:
-    # Garante que todas as cues passem pela divisão semântica de 1 linha
+def normalize_subtitles(cues: list[SubtitleCue], total_duration: float, min_duration: float = MIN_SUBTITLE_SECONDS, split: bool = True) -> tuple[list[SubtitleCue], dict[str, Any]]:
+    # Narração: todas as cues passam pela divisão semântica de 1 linha.
+    # Textos de destaque (split=False) mantêm o bloco e as quebras de linha.
     expanded_cues: list[SubtitleCue] = []
     for cue in cues:
-        expanded_cues.extend(split_cue_into_single_lines(cue, max_chars=40))
+        if split:
+            expanded_cues.extend(split_cue_into_single_lines(cue, max_chars=40))
+        else:
+            expanded_cues.append(cue)
 
     adjusted: list[SubtitleCue] = []
     removed_outside = 0
@@ -14015,27 +14027,28 @@ def callout_card_dialogues(
     style: dict[str, Any],
     font_size: int,
 ) -> tuple[str, str]:
-    """Cartão editorial: caixa translúcida (camada 1, estilo Card) + barra de acento em
-    desenho inline, e o texto por cima (camada 2) com o mesmo layout, por isso ficam
-    sempre alinhados. Entrada a deslizar com fade de ~7 frames.
-    Devolve (linha da caixa, texto com tags para a camada 2)."""
-    bar_w = max(5, int(round(font_size * 0.12)))
-    bar_h = max(10, int(round(font_size * 0.78)))
-    gap = max(8, int(round(font_size * 0.35)))
+    """Cartão editorial em 2 camadas com o MESMO texto (por isso sempre alinhadas):
+    1) caixa translúcida do libass (estilo Card) com o texto transparente;
+    2) o texto visível sem caixa.
+    A barra de acento é um glifo "|" no início da 1.ª linha, nas duas camadas: assim a caixa é
+    um só retângulo por linha. A barra desenhada (\\p1) criava uma caixa própria e fazia um degrau
+    no canto da caixa. Textos de 2 linhas: a 1.ª é o título; as seguintes ficam menores, sem negrito.
+    Devolve (linha da caixa, texto da camada 2 com tags)."""
     slide = max(16, int(round(font_size * 0.5)))
-    primary = str(style.get("primary") or "#FFFFFF").upper()
-    accent_hex = str(style.get("accent") or (primary if primary not in {"#FFFFFF", "#FFF", "#F5F5F7", "#FBF6EE"} else "#2FD4A7"))
+    primary_hex = str(style.get("primary") or "#FFFFFF").upper()
+    accent_hex = str(style.get("accent") or (primary_hex if primary_hex not in {"#FFFFFF", "#FFF", "#F5F5F7", "#FBF6EE"} else "#2FD4A7"))
     accent = "&H" + ass_color(accent_hex, "#2FD4A7")[4:] + "&"
+    primary = "&H" + ass_color(primary_hex, "#FFFFFF")[4:] + "&"
     anim = f"\\an2\\move({x - slide},{y},{x},{y},0,240)\\fad(200,180)"
-    bar = f"m 0 0 l {bar_w} 0 l {bar_w} {bar_h} l 0 {bar_h}"
-    spacer = f"m 0 0 l {gap} 0 l {gap} 1 l 0 1"
-    # Caixa + barra visíveis, texto invisível (só dá a largura à caixa)
-    box_line = (f"Dialogue: 1,{start},{end},Card,,0,0,0,,{{{anim}\\shad0}}"
-                f"{{\\1c{accent}\\1a&H00&\\p1}}{bar}{{\\p0}}{{\\1a&HFF&\\p1}}{spacer}{{\\p0}}{text_ass}\n")
-    # Texto visível com o mesmo prefixo (transparente), sem caixa
+    sub_size = max(20, int(round(font_size * 0.72)))
+    first, *rest = text_ass.split("\\N")
+    body = first + "".join(f"\\N{{\\fs{sub_size}\\b0}}{line}" for line in rest)
+    nbsp = "\u00a0"
+    # fscx alarga o glifo "|" para parecer uma barra; as duas camadas têm exatamente o mesmo prefixo.
+    prefix_hidden = f"{{\\fscx260}}|{{\\fscx100}}{nbsp}"
     outline = min(1.0, float(style.get("outline_size") or 0.6))
-    text_tagged = (f"{{{anim}\\bord{outline:.1f}\\shad0}}{{\\1a&HFF&\\3a&HFF&\\p1}}{bar}{{\\p0}}"
-                   f"{{\\p1}}{spacer}{{\\p0}}{{\\1a&H00&\\3a&H00&}}{text_ass}")
+    box_line = f"Dialogue: 1,{start},{end},Card,,0,0,0,,{{{anim}\\shad0\\1a&HFF&}}{prefix_hidden}{body}\n"
+    text_tagged = (f"{{{anim}\\bord{outline:.1f}\\shad0\\1c{accent}\\fscx260}}|{{\\1c{primary}\\fscx100}}{nbsp}{body}")
     return box_line, text_tagged
 
 
@@ -14274,6 +14287,19 @@ def resolve_effective_subtitle_cues(
     if not p_srt.exists():
         return [], {}, []
     original_cues = parse_srt_file(p_srt)
+    # Textos de destaque (poucas linhas, cada uma com título + descritor) mantêm as 2 linhas e
+    # o tempo inteiro; antes eram achatados e fatiados por tamanho ("4,69 m DI" | "LUNGHEZZA ...").
+    raw_blocks = parse_srt_file(p_srt, keep_lines=True)
+    raw_covered = sum(max(0.0, cue.end - cue.start) for cue in raw_blocks)
+    raw_per_minute = len(raw_blocks) / max(1.0, total_duration / 60.0)
+    highlight_mode = (
+        bool(raw_blocks)
+        and raw_per_minute < 6.0
+        and raw_covered / max(1.0, total_duration) < 0.35
+        and all(len(cue.text.split("\n")) <= 3 and len(cue.text) <= 110 for cue in raw_blocks)
+    )
+    if highlight_mode:
+        original_cues = raw_blocks
     # Ficheiros "Footage Sync" (lista de links de clipes com tempos) não são textos para o ecrã:
     # mostrá-los pôs URLs de YouTube a aparecer no vídeo.
     url_re = re.compile(r"https?://|www\.|youtube\.com|youtu\.be", re.IGNORECASE)
@@ -14301,7 +14327,8 @@ def resolve_effective_subtitle_cues(
         original_cues = remap_cues_for_smart_sample(original_cues, smart_sample_windows)
         if isinstance(job.subtitle_summary, dict):
             job.subtitle_summary["smart_sample_blocks"] = smart_sample_windows
-    cues, summary = normalize_subtitles(original_cues, narration_duration, min_duration=min_duration)
+    cues, summary = normalize_subtitles(original_cues, narration_duration, min_duration=min_duration, split=not highlight_mode)
+    summary["highlight_mode"] = highlight_mode
     if smart_sample_windows:
         summary["smart_sample_blocks"] = smart_sample_windows
         summary["smart_sample_mode"] = "blocos_narrativos"

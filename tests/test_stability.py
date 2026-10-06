@@ -234,6 +234,50 @@ class TextDensityTests(unittest.TestCase):
         self.assertFalse(job.subtitle_summary["dense_track"]["dense"])
 
 
+class HighlightTextTests(unittest.TestCase):
+    """SRT de destaques (título + descritor): fica inteiro, em 2 linhas, durante a cue toda."""
+
+    def test_two_line_highlight_is_not_flattened_or_time_sliced(self):
+        nl = chr(10)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            blocks = [
+                "1" + nl + "00:00:08,616 --> 00:00:14,616" + nl + "#10 - LANCIA FULVIA COUPE" + nl + "1965" + nl,
+                "2" + nl + "00:10:13,853 --> 00:10:19,853" + nl + "4,69 m DI LUNGHEZZA" + nl + "Ma visivamente bassissima" + nl,
+                "3" + nl + "00:20:00,000 --> 00:20:06,000" + nl + "#1 - ALFA ROMEO 33 STRADALE" + nl + "1967" + nl,
+            ]
+            srt = work / "destaques.srt"
+            srt.write_text(nl.join(blocks), encoding="utf-8")
+            job = app.Job(id="hl", work=work)
+            job.options = {}
+            job.preflight_summary = {}
+            cues, summary, _caps = app.resolve_effective_subtitle_cues(job, srt, 1800.0)
+            self.assertTrue(summary["highlight_mode"])
+            self.assertEqual(len(cues), 3)
+            self.assertEqual(cues[1].text, "4,69 m DI LUNGHEZZA" + nl + "Ma visivamente bassissima")
+            self.assertAlmostEqual(cues[1].end - cues[1].start, 6.0, places=2)
+            ass = app.build_ass_file(job, srt, 1800.0, 1920, 1080, work).read_text(encoding="utf-8")
+            self.assertIn("4,69 m DI LUNGHEZZA" + chr(92) + "N{" + chr(92) + "fs", ass)
+            self.assertEqual(ass.count(",Card,"), 3)  # uma caixa por destaque
+
+    def test_narration_srt_is_still_split_into_single_lines(self):
+        nl = chr(10)
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            blocks = []
+            for i in range(30):
+                a, b = i * 3.5, i * 3.5 + 3.4
+                blocks.append(str(i + 1) + nl + f"00:{int(a // 60):02d}:{int(a % 60):02d},000 --> 00:{int(b // 60):02d}:{int(b % 60):02d},400" + nl
+                              + "Esta e uma frase longa da narracao que tem de ser dividida em linhas curtas" + nl)
+            srt = work / "narracao.srt"
+            srt.write_text(nl.join(blocks), encoding="utf-8")
+            job = app.Job(id="nr", work=work)
+            job.options = {}
+            cues, summary, _caps = app.resolve_effective_subtitle_cues(job, srt, 120.0)
+            self.assertFalse(summary["highlight_mode"])
+            self.assertTrue(all(len(c.text) <= 44 for c in cues))
+
+
 class FootageSyncFileTests(unittest.TestCase):
     def test_link_list_srt_is_not_rendered_as_text(self):
         with tempfile.TemporaryDirectory() as tmp:

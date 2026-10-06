@@ -99,9 +99,20 @@ class CalloutCardTests(unittest.TestCase):
         self.assertIn(",Card,", box)
         self.assertIn("\\move(", box)
         self.assertIn("\\fad(200,180)", text)
-        # a barra existe nas duas camadas (visível na caixa, transparente no texto) => alinhados
-        self.assertEqual(box.count("\\p1"), text.count("\\p1"))
+        # sem desenhos vetoriais (criavam uma caixa própria e um degrau no canto): a barra é um glifo
+        self.assertNotIn("\\p1", box)
+        self.assertNotIn("\\p1", text)
+        self.assertTrue(box.endswith("Tesla says\n"))
+        self.assertTrue(text.endswith("Tesla says"))
         self.assertIn("Style: Card,", app.callout_card_style_line(style, 48, 120))
+
+    def test_two_line_callout_keeps_title_and_smaller_descriptor(self):
+        style = app.subtitle_style_from_options({})
+        source = "#8 - MASERATI MISTRAL\\N1963-1964"
+        box, text = app.callout_card_dialogues(source, "0:00:01.00", "0:00:04.00", 960, 900, style, 72)
+        expected = "\\N{\\fs52\\b0}1963-1964"
+        for layer in (box, text):
+            self.assertIn(expected, layer)
 
     def test_chunk_continuation_does_not_replay_entry(self):
         with tempfile.TemporaryDirectory() as tmp:
