@@ -206,7 +206,7 @@ class OpeningProtocolTests(unittest.TestCase):
 
 
 class TextDensityTests(unittest.TestCase):
-    def _ass(self, cues, total):
+    def _ass(self, cues, total, options=None):
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             def ts(x):
@@ -215,7 +215,7 @@ class TextDensityTests(unittest.TestCase):
             blocks = [f"{i + 1}" + chr(10) + f"{ts(a)} --> {ts(b)}" + chr(10) + text + chr(10) for i, (a, b, text) in enumerate(cues)]
             srt.write_text(chr(10).join(blocks), encoding="utf-8")
             job = app.Job(id="dens", work=work)
-            job.options = {}
+            job.options = dict(options or {})
             job.preflight_summary = {}
             ass = app.build_ass_file(job, srt, total, 1920, 1080, work)
             return ass.read_text(encoding="utf-8"), job
@@ -227,11 +227,18 @@ class TextDensityTests(unittest.TestCase):
         self.assertTrue(job.subtitle_summary["dense_track"]["dense"])
         self.assertTrue(job.preflight_summary.get("warnings"))
 
-    def test_sparse_highlights_keep_the_card(self):
+    def test_texts_follow_the_selected_style_by_default(self):
+        # Sem pedido explícito, nada de caixa escura nem barra: o vídeo segue a pré-visualização.
         cues = [(20 + i * 60.0, 24 + i * 60.0, f"Destaque {i} com 163 kW") for i in range(6)]
         text, job = self._ass(cues, 400.0)
-        self.assertIn(",Card,", text)
+        self.assertNotIn(",Card,", text)
+        self.assertNotIn("}|", text)
         self.assertFalse(job.subtitle_summary["dense_track"]["dense"])
+
+    def test_card_only_when_requested(self):
+        cues = [(20 + i * 60.0, 24 + i * 60.0, f"Destaque {i} com 163 kW") for i in range(6)]
+        text, _job = self._ass(cues, 400.0, {"calloutCard": True})
+        self.assertIn(",Card,", text)
 
 
 class HighlightTextTests(unittest.TestCase):
@@ -257,8 +264,8 @@ class HighlightTextTests(unittest.TestCase):
             self.assertEqual(cues[1].text, "4,69 m DI LUNGHEZZA" + nl + "Ma visivamente bassissima")
             self.assertAlmostEqual(cues[1].end - cues[1].start, 6.0, places=2)
             ass = app.build_ass_file(job, srt, 1800.0, 1920, 1080, work).read_text(encoding="utf-8")
-            self.assertIn("4,69 m DI LUNGHEZZA" + chr(92) + "N{" + chr(92) + "fs", ass)
-            self.assertEqual(ass.count(",Card,"), 3)  # uma caixa por destaque
+            self.assertIn("4,69 m DI LUNGHEZZA" + chr(92) + "NMa visivamente bassissima", ass)
+            self.assertEqual(ass.count(",Card,"), 0)  # por omissão segue o estilo escolhido
 
     def test_narration_srt_is_still_split_into_single_lines(self):
         nl = chr(10)
@@ -332,3 +339,48 @@ class HardwareProfileCacheTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GpuSafetyTests(unittest.TestCase):
+    """Sessões NVENC limitadas à memória livre da GPU (quedas do driver: BSOD 0x116)."""
+
+    def test_first_session_always_runs_extra_sessions_wait_for_free_memory(self):
+        gate = app._NvencGate()
+        gate.acquire()
+        self.assertEqual(gate.active, 1)
+        started = []
+
+        def second():
+            gate.acquire()
+            started.append(time.monotonic())
+
+        with patch.object(app, "gpu_free_vram_mb", return_value=300.0):
+            worker = threading.Thread(target=second)
+            worker.start()
+            time.sleep(0.8)
+            self.assertFalse(started, "com 300 MiB livres a 2.a sessão tem de esperar")
+            gate.release()  # a 1.a termina -> a 2.a pode correr
+            worker.join(timeout=3)
+        self.assertTrue(started)
+        gate.release()
+
+    def test_extra_session_runs_when_memory_is_free(self):
+        gate = app._NvencGate()
+        gate.acquire()
+        with patch.object(app, "gpu_free_vram_mb", return_value=2500.0):
+            gate.acquire()
+        self.assertEqual(gate.active, 2)
+        gate.release(); gate.release()
+
+    def test_no_hardware_decode_in_render_commands(self):
+        source = Path(app.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('["-hwaccel", "auto"]', source)
+
+    def test_transcription_waits_when_gpu_memory_is_low(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            audio = Path(tmp) / "voz.wav"
+            audio.write_bytes(b"RIFF" + b"0" * 4096)
+            with patch.object(app, "whisper_engine", return_value=(Path("w.exe"), Path("m.bin"))), \
+                 patch.object(app, "_render_active", return_value=False), \
+                 patch.object(app, "gpu_free_vram_mb", return_value=900.0):
+                self.assertIsNone(app.schedule_narration_transcription(audio, "pt"))

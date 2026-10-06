@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import ctypes
 import hashlib
@@ -6816,7 +6817,102 @@ def _warm_hardware_profile_worker() -> None:
             _HARDWARE_PROFILE_WARMING = False
 
 
-def run_cmd(
+_GPU_FREE_CACHE: dict[str, float] = {"at": 0.0, "free": -1.0}
+_GPU_FREE_LOCK = threading.Lock()
+
+
+def gpu_free_vram_mb() -> float | None:
+    """Memória livre da NVIDIA (MiB) via nvidia-smi, em cache 2 s; None se não houver NVIDIA."""
+    with _GPU_FREE_LOCK:
+        if time.monotonic() - _GPU_FREE_CACHE["at"] < 2.0:
+            value = _GPU_FREE_CACHE["free"]
+            return None if value < 0 else value
+    free = -1.0
+    try:
+        out = _run_hidden(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+                          capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            free = float(out.stdout.strip().splitlines()[0])
+    except Exception:
+        free = -1.0
+    with _GPU_FREE_LOCK:
+        _GPU_FREE_CACHE.update(at=time.monotonic(), free=free)
+    return None if free < 0 else free
+
+
+class _NvencGate:
+    """Limita sessões NVENC simultâneas à memória livre da GPU.
+
+    Cada sessão (descodificação + filtros + NVENC) chega a 400-670 MiB nesta placa de 4 GB.
+    Com outra app a ocupar a GPU (ex.: 2,1 GB do Auralis) e 3 blocos em paralelo, a memória
+    esgotava e o driver caía (BSOD 0x116 VIDEO_TDR_FAILURE, "recursos insuficientes").
+    Uma sessão corre sempre; as seguintes só com folga real."""
+
+    MIN_FREE_FOR_EXTRA_MB = 900.0
+
+    def __init__(self) -> None:
+        self._cond = threading.Condition()
+        self._active = 0
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    def acquire(self, job: Job | None = None) -> None:
+        waited = False
+        with self._cond:
+            while True:
+                if self._active == 0:
+                    break
+                free = gpu_free_vram_mb()
+                if free is None or free >= self.MIN_FREE_FOR_EXTRA_MB:
+                    break
+                if job is not None and job.cancel_requested:
+                    raise RenderCancelled("Render cancelado pelo usuario.")
+                if not waited and job is not None:
+                    _append_log(job, f"GPU com pouca memória livre ({int(free)} MiB): a aguardar antes de abrir outra sessão NVENC.")
+                waited = True
+                self._cond.wait(timeout=0.5)
+            self._active += 1
+
+    def release(self) -> None:
+        with self._cond:
+            self._active = max(0, self._active - 1)
+            self._cond.notify_all()
+
+
+NVENC_GATE = _NvencGate()
+
+
+def _uses_nvenc(cmd: list[str]) -> bool:
+    return any(str(arg).endswith("_nvenc") for arg in cmd)
+
+
+@contextlib.contextmanager
+def nvenc_slot(job: Job | None, cmd: list[str]):
+    """Ocupa uma vaga NVENC durante o bloco, se o comando codificar na NVIDIA."""
+    if not _uses_nvenc(cmd):
+        yield
+        return
+    NVENC_GATE.acquire(job)
+    try:
+        yield
+    finally:
+        NVENC_GATE.release()
+
+
+def run_cmd(job: Job, cmd: list[str], *args: Any, **kwargs: Any):
+    """Executa um comando FFmpeg; os que usam NVENC passam pelo limite de memória da GPU."""
+    if not _uses_nvenc(cmd):
+        return _run_cmd_impl(job, cmd, *args, **kwargs)
+    NVENC_GATE.acquire(job)
+    try:
+        return _run_cmd_impl(job, cmd, *args, **kwargs)
+    finally:
+        NVENC_GATE.release()
+
+
+def _run_cmd_impl(
     job: Job,
     cmd: list[str],
     total_duration: float | None = None,
@@ -14198,10 +14294,18 @@ def _transcribe_narration(audio: Path, language: str) -> list[tuple[float, str]]
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+ASR_MIN_FREE_VRAM_MB = 1500.0
+
+
 def schedule_narration_transcription(audio: Path, language: str = "auto") -> Future | None:
     """Agenda (uma vez por áudio) a transcrição na GPU; devolve o Future ou None sem motor."""
     audio = Path(audio)
     if not audio.is_file() or not whisper_engine() or _render_active():
+        return None
+    free_vram = gpu_free_vram_mb()
+    if free_vram is not None and free_vram < ASR_MIN_FREE_VRAM_MB:
+        # O modelo ocupa ~1 GB na GPU; com pouca memória livre (outras apps a usar a placa)
+        # arrancar a transcrição arriscava a queda do driver. Tenta-se de novo mais tarde.
         return None
     try:
         sig = _audio_content_signature(audio)
@@ -14459,7 +14563,9 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     }
     # Cartão editorial (caixa + barra de acento), salvo se o estilo já tem caixa própria
     # ou o utilizador o desligou. Mesma camada de texto: sem custo de render.
-    callout_card = bool(job.options.get("calloutCard", True)) and not style.get("box")
+    # O cartão (caixa escura + barra) só quando pedido: por omissão os textos seguem o estilo
+    # escolhido na pré-visualização do editor.
+    callout_card = bool(job.options.get("calloutCard", False)) and not style.get("box")
     # SRT que é a narração inteira (um cue a cada poucos segundos, texto no ecrã quase sempre):
     # o cartão com barra é desenho para destaques pontuais; num fio contínuo fica pesado e
     # parece um erro. Nesse caso usa-se legenda limpa e avisa-se que o ficheiro não é de destaques.
@@ -15366,9 +15472,9 @@ def compose_final_visuals(
         "-filter_threads", str(comp_filter_threads),
         "-filter_complex_threads", str(comp_filter_threads),
     ]
+    # Descodificação na CPU: "-hwaccel auto" escolhia DXVA2, foi mais lento nas medições
+    # (2 sessões: 22,9 s vs 15,1 s) e cada processo segurava mais memória da GPU.
     hwaccel_args: list[str] = []
-    if (bool(job.options.get("gpu", True)) or hw.get("preferred_gpu")) and not bool(job.options.get("_force_cpu")):
-        hwaccel_args = ["-hwaccel", "auto"]
     cmd: list[str] = [
         FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
         *filter_args,
@@ -20536,7 +20642,7 @@ def render_image_segment_subpixel(
         raise RenderCancelled("Render cancelado pelo usuario.")
     err_log = (Path(cwd) if cwd else out.parent) / f"{out.stem}.subpixel.log"
     code = -1
-    with err_log.open("wb") as err_handle:
+    with nvenc_slot(job, cmd), err_log.open("wb") as err_handle:
         proc = _popen_hidden(
             cmd, cwd=cwd, priority=render_priority(job),
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_handle,
@@ -22080,10 +22186,8 @@ def make_segments_smart(
         segment_filter_threads = max(1, int(performance_budget.get("segment_filter_threads") or 1))
         segment_threads = max(1, int(performance_budget.get("segment_threads") or 2))
         segment_thread_args = ["-threads", str(segment_threads), "-filter_threads", str(segment_filter_threads)]
-        # Decodificação por hardware (NVDEC/QSV) libera CPU para filtros — sem impacto na qualidade
+        # Descodificação na CPU (ver compose): mais rápida aqui e sem contextos extra na GPU.
         hwaccel_seg_args: list[str] = []
-        if performance_budget.get("hardware_active") and not bool(job.options.get("_force_cpu")):
-            hwaccel_seg_args = ["-hwaccel", "auto"]
         if plan.media_kind == "image" or is_image_path(plan.source):
             img_source = ensure_compatible_image_source(plan.source, work)
             img_w, img_h = probe_image_dimensions(img_source)
@@ -23209,14 +23313,15 @@ def generate_dual_shorts_export(job: Job, out_file: Path, final_duration: float)
             str(shorts_file)
         ]
 
-        res = _run_hidden(
-            cmd,
-            cwd=job.work,
-            priority=render_priority(job),
-            capture_output=True,
-            text=True,
-            timeout=360,
-        )
+        with nvenc_slot(job, cmd):
+            res = _run_hidden(
+                cmd,
+                cwd=job.work,
+                priority=render_priority(job),
+                capture_output=True,
+                text=True,
+                timeout=360,
+            )
         if res.returncode == 0 and shorts_file.exists() and shorts_file.stat().st_size > 1000:
             mb_size = shorts_file.stat().st_size / (1024 * 1024)
             _append_log(
@@ -25333,7 +25438,7 @@ def render_worker(job_id: str):
                     "director_scene_fit": stable_hash(job.director_summary.get("scene_fit_plan") or {}),
                     "style_profile": stable_hash(job.options.get("_style_profile_effective") or reference_style_profile(job.options)),
                     "subtitle_layout_policy": "smart_safe_zones_v1",
-                    "callout_card": bool(job.options.get("calloutCard", True)),
+                    "callout_card": bool(job.options.get("calloutCard", False)),
                     "narration_alignment": stable_hash(job.narration_words) if job.narration_words else None,
                     "pipeline": RENDER_PIPELINE_VERSION,
                 },
