@@ -2,7 +2,7 @@
   "version": "1.40.0",
   "global": {
     "theme": "system",
-    "uiMode": "simple",
+    "uiMode": "advanced",
     "renderPriority": "max",
     "uiSoundsEnabled": true,
     "uiSoundStyle": "glass_click",
@@ -14,15 +14,19 @@
         "direction": "desc"
       },
       "audio": {
-        "criterion": "name",
+        "criterion": "usage",
         "direction": "asc"
       },
       "folder": {
         "criterion": "name",
         "direction": "asc"
+      },
+      "script": {
+        "criterion": "smart",
+        "direction": "asc"
       }
     },
     "renderBudgetEnabled": true
   },
-  "updatedAt": "2026-09-12T20:49:19"
+  "updatedAt": "2026-10-11T00:07:11"
 }

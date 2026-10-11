@@ -1523,6 +1523,10 @@ function cleanCoverageBodyHtml(c){
 let cleanCoverageTimer = null;
 async function pollCleanCoverage(){
   cleanCoverageTimer = null;
+  if(state.queueRendering || state.renderActive){
+    cleanCoverageTimer = window.setTimeout(pollCleanCoverage, 15000);
+    return;
+  }
   const pending = Object.entries(state.cleanCoverage)
     .filter(([, c]) => ['queued', 'analyzing'].includes(c?.status) || ['running', 'pending'].includes(c?.narrationSync))
     .map(([id]) => id);
@@ -4976,8 +4980,12 @@ function formatEtaSummary(eta, status = 'running', currentPercent = 0){
     return `Decorrido ${elapsed} · finalizando etapas...`;
   }
 
-  if(rem > 0){
-    return `Decorrido ${elapsed} · restante aprox. ${formatTime(rem)}${speedText}${limitText}`;
+  if(rem > 2 || pct >= 92){
+    if(rem > 0){
+      return `Decorrido ${elapsed} · restante aprox. ${formatTime(rem)}${speedText}${limitText}`;
+    }
+  } else if(pct < 92 && rem <= 2){
+    return `Decorrido ${elapsed} · calculando tempo restante...${speedText}${limitText}`;
   }
   let min = Number(eta.remaining_min_seconds || 0);
   let max = Number(eta.remaining_max_seconds || 0);
@@ -6435,9 +6443,11 @@ async function hydrateAutomatorDurations(type, items){
 
 function automatorFolderGroups(fileList){
   const rootFiles = new Map();
+  const directFiles = new Map();
   const childFiles = new Map();
   const roots = new Set();
   const looseFiles = [];
+
   Array.from(fileList || []).forEach(file => {
     const kind = kindOfFile(file, 'video');
     if(kind !== 'video' && kind !== 'image') return;
@@ -6451,20 +6461,36 @@ function automatorFolderGroups(fileList){
     roots.add(root);
     if(!rootFiles.has(root)) rootFiles.set(root, []);
     rootFiles.get(root).push(file);
-    if(parts.length === 2) return;
+
+    if(parts.length === 2){
+      if(!directFiles.has(root)) directFiles.set(root, []);
+      directFiles.get(root).push(file);
+      return;
+    }
     const child = `${root}/${parts[1]}`;
     if(!childFiles.has(child)) childFiles.set(child, []);
     childFiles.get(child).push(file);
   });
-  const directRootVideoCount = Array.from(fileList || []).filter(file => {
-    const kind = kindOfFile(file, 'video');
-    const parts = String(file._autoRelativePath || file.webkitRelativePath || file.name || '').split(/[\\/]/).filter(Boolean);
-    return (kind === 'video' || kind === 'image') && parts.length === 2;
-  }).length;
-  const shouldSplitSingleParent = roots.size === 1 && directRootVideoCount === 0 && childFiles.size > 1;
-  const sourceGroups = shouldSplitSingleParent ? childFiles : rootFiles;
-  const result = Array.from(sourceGroups.entries()).map(([name, files]) => {
-    const visibleName = name.split('/').filter(Boolean).pop() || name || 'Pasta';
+
+  const finalGroups = new Map();
+
+  roots.forEach(root => {
+    const rootChildren = Array.from(childFiles.keys()).filter(k => k.startsWith(`${root}/`));
+    if(rootChildren.length > 0){
+      rootChildren.forEach(childKey => {
+        finalGroups.set(childKey, childFiles.get(childKey));
+      });
+      const direct = directFiles.get(root) || [];
+      if(direct.length){
+        looseFiles.push(...direct);
+      }
+    } else {
+      finalGroups.set(root, rootFiles.get(root) || []);
+    }
+  });
+
+  const result = Array.from(finalGroups.entries()).map(([name, files]) => {
+    const visibleName = name.split(/[\\/]/).filter(Boolean).pop() || name || 'Pasta';
     files.sort((a, b) => naturalCompare(a._autoRelativePath || a.webkitRelativePath || a.name, b._autoRelativePath || b.webkitRelativePath || b.name));
     let totalSize = 0;
     let newest = 0;
@@ -6665,7 +6691,7 @@ function renderAutomatorList(type, title, items){
   let addButtonsHtml = `<button type="button" class="automation-sort-add" data-automator-add="${type}" title="Acrescentar mais ficheiros a esta lista">+ Adicionar</button>`;
   if(type === 'folder'){
     addButtonsHtml = `
-      <button type="button" class="automation-sort-add" data-automator-add="folder" title="Acrescentar pastas com vídeos">+ Pasta</button>
+      <button type="button" class="automation-sort-add" data-automator-add="folder" title="Acrescentar pastas (selecione pasta com subpastas ou arraste várias)">+ Pasta</button>
       <button type="button" class="automation-sort-add" data-automator-add="video-files" title="Acrescentar ficheiros de vídeo/foto avulsos">+ Vídeos</button>
     `;
   }
@@ -7389,7 +7415,7 @@ function updateAutomatorPreview(){
   if(!automatorPreview) return;
   const hasAnySelection = srtLen || audioLen || scriptLen || folderLen;
   if(!hasAnySelection){
-    automatorPreview.innerHTML = '<p class="queue-report-empty">Selecione Textos, áudios, roteiros e pastas para ver a pré-visualização. Você também pode arrastar várias pastas de vídeos para o cartão de pastas.</p>';
+    automatorPreview.innerHTML = '<p class="queue-report-empty">Selecione Textos, áudios, roteiros e pastas para ver a pré-visualização. Dica: selecione a pasta mãe para carregar todas as subpastas de uma vez, ou selecione várias pastas no Explorador e arraste para o cartão de pastas.</p>';
     scheduleSaveAutomatorDraft();
     return;
   }
@@ -8155,7 +8181,7 @@ let isMonitoringBackendQueue = false;
 async function monitorBackendQueue(){
   if(isMonitoringBackendQueue) return;
   isMonitoringBackendQueue = true;
-  const pollInterval = 850;
+  const pollInterval = 1800;
   let lastRenderJobId = null;
   const knownCompletedIds = new Set(
     state.projects.filter(p => ['done', 'recovered'].includes(p.status)).map(p => p.id)
@@ -8169,21 +8195,27 @@ async function monitorBackendQueue(){
           const data = await res.json();
           const bq = data.backend_queue || {};
 
-          // 1. Sync project statuses and trigger completion chime whenever any project finishes
+          // 1. Sync project statuses and trigger completion chime only when something actually changes
+          let projectsChanged = false;
           if(Array.isArray(data.projects)){
             data.projects.forEach(bp => {
               const local = state.projects.find(p => p.id === bp.id);
               if(local){
                 const wasDone = ['done', 'recovered'].includes(local.status);
-                local.status = bp.status;
-                local.error = bp.error || '';
-                local.outputFile = bp.outputFile || local.outputFile;
-                local.outputDir = bp.outputDir || local.outputDir;
-                local.backendJobId = bp.jobId || local.backendJobId;
+                const hasDiff = local.status !== bp.status || local.error !== (bp.error || '') || local.outputFile !== (bp.outputFile || local.outputFile);
+                if(hasDiff){
+                  projectsChanged = true;
+                  local.status = bp.status;
+                  local.error = bp.error || '';
+                  local.outputFile = bp.outputFile || local.outputFile;
+                  local.outputDir = bp.outputDir || local.outputDir;
+                  local.backendJobId = bp.jobId || local.backendJobId;
+                }
 
                 const isNowDone = ['done', 'recovered'].includes(bp.status);
                 if(isNowDone && !wasDone && !knownCompletedIds.has(bp.id)){
                   knownCompletedIds.add(bp.id);
+                  projectsChanged = true;
                   // Play pleasant completion sound effect on each render!
                   playCompletionSound('project');
                   showToast('Render Concluído', `"${bp.name || local.name}" finalizado com sucesso!`, 'success');
@@ -8192,7 +8224,9 @@ async function monitorBackendQueue(){
                 }
               }
             });
-            renderProjectQueue();
+            if(projectsChanged){
+              renderProjectQueue();
+            }
           }
 
           if(bq.running){
@@ -8255,14 +8289,7 @@ async function monitorBackendQueue(){
               renderTitle.textContent = `Renderizando: ${curProject.name}`;
               renderMsg.textContent = cleanDisplayText(j.message || 'Processando render acelerado...');
 
-              // O marcador de etapa nunca recua dentro do mesmo job (a barra também é monótona).
-              const STAGE_SEQ = ['preparing','uploading','rendering','audio','cta','muxing','done'];
               let currentStage = normalizeRenderStage(j.stage || 'rendering');
-              const stageIdx = STAGE_SEQ.indexOf(currentStage);
-              if(stageIdx >= 0){
-                if(stageIdx < (state.renderMaxStageIdx ?? -1)) currentStage = STAGE_SEQ[state.renderMaxStageIdx];
-                else state.renderMaxStageIdx = stageIdx;
-              }
               setRenderStage(currentStage);
 
               const renderLabel = renderPriorityLabel(j.options?.renderPriority || curProject.options?.renderPriority);
@@ -9620,8 +9647,11 @@ function bindAutomatorPickerDrop(element, handler){
 bindAutomatorPickerDrop(automatorPickFolders, files => {
   const added = appendAutomatorFolders(files);
   if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
-  if(added) sortAutomatorItems('folder');
-  else updateAutomatorPreview();
+  if(added){
+    if(dockSummary) dockSummary.textContent = `AUTO: ${added} pasta(s) de mídia adicionada(s).`;
+    sortAutomatorItems('folder');
+    showToast('Pastas adicionadas', `${added} pasta(s) de mídia adicionada(s) ao AUTO.`, 'info');
+  } else updateAutomatorPreview();
 });
 
 bindAutomatorPickerDrop(automatorPickSrt, files => {
@@ -9676,8 +9706,11 @@ if(automatorVideoFolderInput) automatorVideoFolderInput.addEventListener('change
   const added = appendAutomatorFolders(event.target.files || []);
   if(!added && dockSummary) dockSummary.textContent = 'AUTO: nenhuma pasta nova com vídeos foi encontrada.';
   event.target.value = '';
-  if(added) sortAutomatorItems('folder');
-  else updateAutomatorPreview();
+  if(added){
+    if(dockSummary) dockSummary.textContent = `AUTO: ${added} pasta(s) de mídia adicionada(s).`;
+    sortAutomatorItems('folder');
+    showToast('Pastas adicionadas', `${added} pasta(s) de mídia adicionada(s) ao AUTO.`, 'info');
+  } else updateAutomatorPreview();
 });
 if(automatorVideoFileInput) automatorVideoFileInput.addEventListener('change', event => {
   const files = Array.from(event.target.files || []).filter(file => {

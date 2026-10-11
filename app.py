@@ -1676,6 +1676,73 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+def _cleanup_job_work_dir(job: Any) -> None:
+    """Limpa imediatamente a pasta temporária de trabalho (chunks, wavs intermediários) do job."""
+    if not job or not getattr(job, "work", None):
+        return
+    try:
+        work_dir = Path(job.work).resolve()
+        upload_root_resolved = UPLOAD_ROOT.resolve()
+        # Garante estritamente que a pasta está dentro de UPLOAD_ROOT (temp_uploads)
+        if work_dir.exists() and work_dir.is_dir() and (upload_root_resolved in work_dir.parents or work_dir.parent == upload_root_resolved):
+            shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:
+        pass
+
+
+def _auto_cleanup_scratch_space() -> int:
+    """Limpa pastas de trabalho órfãs em temp_uploads e poda o cache de render para recuperar espaço em disco."""
+    reclaimed = 0
+    try:
+        active_work_dirs = {
+            Path(j.work).resolve()
+            for j in list(JOBS.values())
+            if getattr(j, "work", None) and str(getattr(j, "status", "")) in {"uploading", "ready", "running", "preparing"}
+        }
+    except Exception:
+        active_work_dirs = set()
+
+    try:
+        if UPLOAD_ROOT.exists():
+            for child in UPLOAD_ROOT.iterdir():
+                try:
+                    if child.is_dir() and child.resolve() not in active_work_dirs:
+                        sz = sum(os.path.getsize(os.path.join(r, f)) for r, d, files in os.walk(child) for f in files)
+                        shutil.rmtree(child, ignore_errors=True)
+                        reclaimed += sz
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        trimmed = _trim_render_graph_cache(200 * 1024 * 1024)
+        reclaimed += int(trimmed.get("reclaimed_bytes") or 0)
+    except Exception:
+        pass
+    return reclaimed
+
+
+def check_free_disk_space(target_path: Path = DATA_ROOT, min_required_bytes: int = 10 * 1024 * 1024 * 1024) -> tuple[bool, int, str]:
+    """Verifica se há espaço livre suficiente no disco para renderizar com segurança."""
+    try:
+        usage = shutil.disk_usage(target_path)
+        free_bytes = usage.free
+        if free_bytes < min_required_bytes:
+            # Tenta limpeza automática imediata
+            _auto_cleanup_scratch_space()
+            usage = shutil.disk_usage(target_path)
+            free_bytes = usage.free
+        if free_bytes < min_required_bytes:
+            free_gb = free_bytes / (1024 ** 3)
+            req_gb = min_required_bytes / (1024 ** 3)
+            drive_name = target_path.drive or "C:"
+            return False, free_bytes, f"Espaço em disco insuficiente na unidade {drive_name} ({free_gb:.1f} GB livres, mínimo necessário: {req_gb:.0f} GB). Libere espaço para continuar."
+        return True, free_bytes, ""
+    except Exception as exc:
+        return True, 0, ""
+
+
 def clean_ui_text(value: Any) -> Any:
     if isinstance(value, str):
         text = value.replace("Â·", "-").replace("Â ", " ")
@@ -1938,11 +2005,13 @@ def _save_queue_projects(projects: list[dict[str, Any]]) -> None:
                 pass
     except Exception:
         pass
-    # Compact JSON eliminates 46% of disk footprint and speeds up serialization
-    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
-    atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
-    _QUEUE_PROJECTS_DISK_DIGEST = digest
-    _QUEUE_IDENTITY_ON_DISK = identity
+    try:
+        encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        atomic_write_text(QUEUE_PROJECTS_FILE, encoded)
+        _QUEUE_PROJECTS_DISK_DIGEST = digest
+        _QUEUE_IDENTITY_ON_DISK = identity
+    except Exception as exc:
+        pass
 
 
 def _load_app_settings() -> dict[str, Any]:
@@ -3885,6 +3954,8 @@ def recommended_error_actions(error: str | None, project: dict[str, Any] | None 
         if not any(item.get("action") == action for item in actions):
             actions.append({"action": action, "label": label, "reason": reason, "primary": primary})
 
+    if any(token in text for token in ("no space left", "errno 28", "disco cheio", "espaço insuficiente", "espaco insuficiente")):
+        add("cleanup_space", "Liberar espaço em disco", "A partição C: está sem espaço suficiente para renderizar.", True)
     if any(token in text for token in ("hevc", "h265", "nvenc", "encoder", "codec", "tag:v")):
         add("retry_h264_cpu", "Tentar H.264 CPU", "Falha parece relacionada ao codec/aceleracao.", True)
     if any(token in text for token in ("invalid", "sem frames", "no frame", "moov", "corrupt", "invalid data", "clipe")):
@@ -5948,9 +6019,8 @@ def _windows_priority_flag(priority: str | None = None) -> int:
     value = str(priority or "balanced").strip().lower()
     if value in {"light", "leve", "idle"}:
         return getattr(subprocess, "IDLE_PRIORITY_CLASS", 0x00000040)
-    if value in {"max", "maximum", "speed", "fast"}:
-        # NORMAL_PRIORITY_CLASS: render rápido sem roubar prioridade da UI
-        return getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0x00000020)
+    # BELOW_NORMAL_PRIORITY_CLASS: permite 100% de uso de CPU/GPU em processos ociosos,
+    # garantindo que o loop de eventos e janelas do WebView2/Edge nunca congelem.
     return getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
 
 
@@ -12212,15 +12282,21 @@ def build_event_timeline(job: Job) -> dict[str, Any]:
         },
     }
     if job.export_dir:
-        atomic_write_text(job.export_dir / "event_timeline.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
-        atomic_write_text(job.export_dir / "event_timeline_v2.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        try:
+            atomic_write_text(job.export_dir / "event_timeline.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            atomic_write_text(job.export_dir / "event_timeline_v2.json", json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        except Exception:
+            pass
     return payload
 
 
 def job_last_render_summary(job: Job) -> dict[str, Any]:
     visual = (job.timeline_summary or {}).get("visual_clean_summary") or {}
     project_id = str(job.options.get("queueProjectId") or "")
-    event_timeline = build_event_timeline(job)
+    try:
+        event_timeline = build_event_timeline(job)
+    except Exception:
+        event_timeline = {}
     return clean_ui_text({
         "jobId": job.id,
         "status": job.status,
@@ -12274,26 +12350,32 @@ def persist_job_summary_to_queue(job: Job) -> None:
     if not project_id:
         return
     with QUEUE_LOCK:
-        project = _find_queue_project(project_id)
-        if not project:
-            return
-        project["lastRenderSummary"] = job_last_render_summary(job)
-        project["directorState"] = compact_director_summary(job.director_summary) if job.director_summary else project.get("directorState")
-        project["confidenceSummary"] = dict(job.confidence_summary) if job.confidence_summary else None
-        project["audioMasterSummary"] = dict(job.audio_master_summary) if job.audio_master_summary else None
-        project["renderGraphRun"] = compact_render_graph_run(job.render_graph_run) if job.render_graph_run else None
-        if job.status in {"done", "cancelled", "error"}:
-            project["status"] = (
-                "recovered"
-                if job.status == "done" and bool(job.recovery_summary.get("recovered"))
-                else job.status
-            )
-        project["error"] = job.error
-        project["jobId"] = job.id
-        project["outputFile"] = Path(job.output).name if job.output else project.get("outputFile")
-        project["outputDir"] = job.output_dir or project.get("outputDir")
-        project["updatedAt"] = _now_iso()
-        _save_queue_projects(QUEUE_PROJECTS)
+        try:
+            project = _find_queue_project(project_id)
+            if not project:
+                return
+            try:
+                project["lastRenderSummary"] = job_last_render_summary(job)
+            except Exception:
+                pass
+            project["directorState"] = compact_director_summary(job.director_summary) if job.director_summary else project.get("directorState")
+            project["confidenceSummary"] = dict(job.confidence_summary) if job.confidence_summary else None
+            project["audioMasterSummary"] = dict(job.audio_master_summary) if job.audio_master_summary else None
+            project["renderGraphRun"] = compact_render_graph_run(job.render_graph_run) if job.render_graph_run else None
+            if job.status in {"done", "cancelled", "error"}:
+                project["status"] = (
+                    "recovered"
+                    if job.status == "done" and bool(job.recovery_summary.get("recovered"))
+                    else job.status
+                )
+            project["error"] = job.error
+            project["jobId"] = job.id
+            project["outputFile"] = Path(job.output).name if job.output else project.get("outputFile")
+            project["outputDir"] = job.output_dir or project.get("outputDir")
+            project["updatedAt"] = _now_iso()
+            _save_queue_projects(QUEUE_PROJECTS)
+        except Exception:
+            pass
 
 
 def media_display_name(job: Job, path: Path | str) -> str:
@@ -18646,11 +18728,23 @@ def queue_import_backup(payload: dict[str, Any] | None = Body(None)):
         }
 
 
+def _compact_queue_project_status(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": item.get("id"),
+        "name": item.get("name") or "Projeto",
+        "status": item.get("status") or "draft",
+        "error": item.get("error"),
+        "outputFile": item.get("outputFile"),
+        "outputDir": item.get("outputDir"),
+        "jobId": item.get("jobId"),
+    }
+
+
 @app.get("/api/queue/status")
 def queue_status():
     active_jobs = [job for job in JOBS.values() if job.status in {"uploading", "ready", "running"}]
     with QUEUE_LOCK:
-        projects = [_public_queue_project(item) for item in QUEUE_PROJECTS]
+        projects = [_compact_queue_project_status(item) for item in QUEUE_PROJECTS]
     mgr_status = BACKEND_QUEUE_MANAGER.status() if "BACKEND_QUEUE_MANAGER" in globals() else {}
     cur_job_id = mgr_status.get("current_job_id")
     if cur_job_id and cur_job_id in JOBS:
@@ -23512,6 +23606,12 @@ def human_render_error(exc: Exception) -> str:
         return "CTA indisponivel ou nao selecionado. Escolha um CTA no painel antes de renderizar."
     if "cinematic precisa" in lowered:
         return "A abertura cinematografica pode usar um Texto forte ou seguir apenas com fade-in."
+    if any(token in lowered for token in ("no space left", "errno 28", "disco cheio", "espaço em disco insuficiente", "espaco em disco insuficiente")):
+        return (
+            "Espaço em disco insuficiente no computador. "
+            "O render de vídeos em lote precisa de espaço livre temporário para áudios e segmentos. "
+            "Libere espaço na unidade do sistema (disco C:) e retome a fila."
+        )
     if "video final ficou curto" in lowered:
         return raw
     return raw
@@ -25740,8 +25840,16 @@ def render_worker(job_id: str):
             _append_log(job, f"Antirrepeticao: historico visual nao foi atualizado ({exc}).")
         record_render_performance(job, final_duration)
         _append_log(job, f"FINAL: {out_file}")
-        (job.export_dir / "render_log.txt").write_text("\n".join(job.log), encoding="utf-8", errors="ignore")
-        persist_job_summary_to_queue(job)
+        try:
+            if job.export_dir:
+                (job.export_dir / "render_log.txt").write_text("\n".join(job.log), encoding="utf-8", errors="ignore")
+        except Exception:
+            pass
+        try:
+            persist_job_summary_to_queue(job)
+        except Exception:
+            pass
+        _cleanup_job_work_dir(job)
     except RenderBudgetExceeded as exc:
         if graph:
             graph.fail_running(str(exc))
@@ -26413,7 +26521,13 @@ class BackendQueueManager:
                     p["updatedAt"] = _now_iso()
                     _save_queue_projects(QUEUE_PROJECTS)
 
+            job = None
             try:
+                # Pre-flight disk space check: garante que há espaço antes de iniciar o render
+                has_space, free_bytes, space_msg = check_free_disk_space(DATA_ROOT, min_required_bytes=10 * 1024 * 1024 * 1024)
+                if not has_space:
+                    raise RuntimeError(space_msg)
+
                 with QUEUE_LOCK:
                     p = _find_queue_project(project_id)
                     if p:
@@ -26483,6 +26597,12 @@ class BackendQueueManager:
                 # CRITICAL: Do NOT break or abort! Always proceed deterministically to next project!
 
             finally:
+                if job:
+                    _cleanup_job_work_dir(job)
+                try:
+                    _trim_render_graph_cache(300 * 1024 * 1024)
+                except Exception:
+                    pass
                 with self.lock:
                     self.current_job_id = None
                     self.current_project_id = None
@@ -26729,22 +26849,28 @@ def status(job_id: str):
             dt = max(dt_wall, dt_elapsed)
             if 0.0 < dt < 60.0:
                 expected_eta = max(1.0, last_eta - dt)
-                if raw_remaining < expected_eta:
+                if last_eta <= 3.0 and raw_remaining > 10.0:
+                    # Destravar estimativa travada em 1s ou transição para nova etapa pesada
+                    smoothed = raw_remaining
+                elif abs(raw_remaining - expected_eta) > max(35.0, expected_eta * 0.45):
+                    # Mudança expressiva na taxa de render ou etapa: convergir rapidamente
+                    smoothed = 0.35 * expected_eta + 0.65 * raw_remaining
+                elif raw_remaining < expected_eta:
                     smoothed = 0.60 * expected_eta + 0.40 * raw_remaining
                 else:
-                    smoothed = expected_eta
+                    smoothed = 0.70 * expected_eta + 0.30 * raw_remaining
                 remaining = max(1.0, round(smoothed, 1))
             else:
-                remaining = round(raw_remaining, 1)
+                remaining = max(1.0, round(raw_remaining, 1))
         else:
-            remaining = round(raw_remaining, 1)
+            remaining = max(1.0, round(raw_remaining, 1))
 
         job._last_status_eta_sec = remaining
         job._last_status_time = now_ts
         job._last_status_elapsed = elapsed
 
-        if job.render_budget_seconds > 0:
-            budget_ceiling = max(5.0, (job.render_budget_seconds * 1.05) - elapsed)
+        if job.render_budget_seconds > 0 and (job.render_budget_seconds * 1.05) > elapsed:
+            budget_ceiling = max(15.0, (job.render_budget_seconds * 1.05) - elapsed)
             remaining = min(remaining, budget_ceiling)
 
         estimated_total = elapsed + remaining
