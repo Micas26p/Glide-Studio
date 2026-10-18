@@ -17529,8 +17529,34 @@ def _automator_pool_path(key: str, name: str = "") -> Path:
     return AUTOMATOR_POOL_ROOT / f"{digest}{suffix}"
 
 
+def _automator_pool_index() -> dict[str, Path]:
+    index: dict[str, Path] = {}
+    if not AUTOMATOR_POOL_ROOT.exists():
+        return index
+    try:
+        with os.scandir(AUTOMATOR_POOL_ROOT) as it:
+            for entry in it:
+                if entry.is_file() and not entry.name.endswith(".part"):
+                    stem = entry.name.split(".", 1)[0]
+                    index[stem] = Path(entry.path)
+    except Exception:
+        pass
+    return index
+
+
 def _automator_pool_find(key: str) -> Path | None:
     digest = hashlib.sha256(str(key).encode("utf-8", errors="ignore")).hexdigest()[:40]
+    parts = str(key).split("|")
+    if parts:
+        suffix = Path(parts[0]).suffix.lower()
+        if not re.fullmatch(r"\.[a-z0-9]{1,6}", suffix or ""):
+            suffix = ".bin"
+        direct = AUTOMATOR_POOL_ROOT / f"{digest}{suffix}"
+        try:
+            if direct.is_file():
+                return direct
+        except Exception:
+            pass
     try:
         for path in AUTOMATOR_POOL_ROOT.glob(f"{digest}.*"):
             if path.is_file() and not path.name.endswith(".part"):
@@ -17596,12 +17622,23 @@ async def automator_pool_upload(files: list[UploadFile] = File(...), keys: str =
 @app.post("/api/queue/automator/pool/check")
 def automator_pool_check(payload: dict[str, Any] = Body(default={})):
     keys = payload.get("keys") if isinstance(payload.get("keys"), list) else []
+    if not keys or not AUTOMATOR_POOL_ROOT.exists():
+        return {"ok": True, "present": []}
+    pool_index = _automator_pool_index()
+    if not pool_index:
+        return {"ok": True, "present": []}
     present = []
     for key in keys[:20000]:
-        path = _automator_pool_find(str(key))
-        expected = _automator_pool_key_size(str(key))
-        if path and (expected < 0 or path.stat().st_size == expected):
-            present.append(str(key))
+        key_str = str(key)
+        digest = hashlib.sha256(key_str.encode("utf-8", errors="ignore")).hexdigest()[:40]
+        path = pool_index.get(digest)
+        if path:
+            expected = _automator_pool_key_size(key_str)
+            try:
+                if expected < 0 or path.stat().st_size == expected:
+                    present.append(key_str)
+            except Exception:
+                pass
     return {"ok": True, "present": present}
 
 
@@ -17644,23 +17681,26 @@ def automator_session_from_pool(session_id: str, payload: dict[str, Any] = Body(
     registered: list[str] = []
     missing: list[str] = []
     staged_by_key: dict[str, Path] = session.setdefault("pool_staged", {})
-    for item in items:
-        slot = str((item or {}).get("slot") or "")
-        key = str((item or {}).get("key") or "")
-        expected = (session.get("expected") or {}).get(slot)
-        if not expected:
-            if slot in (session.get("skipped") or set()):
-                registered.append(slot)
-            else:
-                missing.append(slot)
-            continue
-        suffix = Path(str(expected.get("name") or "")).suffix.lower()
-        destination = Path(session["folder"]) / f"{slot}{suffix}"
-        try:
-            with AUTOMATOR_POOL_LOCK:
-                source = _automator_pool_find(key)
-                if source is not None:
+    with AUTOMATOR_POOL_LOCK:
+        pool_index = _automator_pool_index()
+        for item in items:
+            slot = str((item or {}).get("slot") or "")
+            key = str((item or {}).get("key") or "")
+            expected = (session.get("expected") or {}).get(slot)
+            if not expected:
+                if slot in (session.get("skipped") or set()):
+                    registered.append(slot)
+                else:
+                    missing.append(slot)
+                continue
+            suffix = Path(str(expected.get("name") or "")).suffix.lower()
+            destination = Path(session["folder"]) / f"{slot}{suffix}"
+            try:
+                digest = hashlib.sha256(key.encode("utf-8", errors="ignore")).hexdigest()[:40]
+                source = pool_index.get(digest)
+                if source is not None and source.exists():
                     os.replace(source, destination)
+                    pool_index.pop(digest, None)
                 elif key in staged_by_key and staged_by_key[key].exists():
                     # Mesmo ficheiro em dois projetos: liga/copia a partir do já movido.
                     try:
@@ -17670,18 +17710,18 @@ def automator_session_from_pool(session_id: str, payload: dict[str, Any] = Body(
                 else:
                     missing.append(slot)
                     continue
-            size = destination.stat().st_size
-            if size <= 0:
-                destination.unlink(missing_ok=True)
+                size = destination.stat().st_size
+                if size <= 0:
+                    destination.unlink(missing_ok=True)
+                    missing.append(slot)
+                    continue
+                staged_by_key[key] = destination
+                with AUTOMATOR_SESSION_LOCK:
+                    session["uploads"][slot] = {"path": destination, "size": size, "filename": expected.get("name")}
+                    session.setdefault("pool_slots", {})[slot] = key
+                registered.append(slot)
+            except Exception:
                 missing.append(slot)
-                continue
-            staged_by_key[key] = destination
-            with AUTOMATOR_SESSION_LOCK:
-                session["uploads"][slot] = {"path": destination, "size": size, "filename": expected.get("name")}
-                session.setdefault("pool_slots", {})[slot] = key
-            registered.append(slot)
-        except Exception:
-            missing.append(slot)
     return {"ok": True, "registered": registered, "missing": missing}
 
 

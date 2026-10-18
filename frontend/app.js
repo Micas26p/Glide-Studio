@@ -6979,7 +6979,7 @@ function scheduleSaveAutomatorDraft(){
 // durante renders (para não roubar disco/CPU ao render). Na confirmação são apenas
 // movidos. Antes eram copiados para o IndexedDB do WebView (GBs duplicados, ~1 h de
 // escrita em fundo que deixava o AUTO lento) e depois enviados outra vez ao confirmar.
-const automatorPool = {known: new Set(), running: false, dirty: false, timer: null};
+const automatorPool = {known: new Set(), running: false, dirty: false, timer: null, abortController: null};
 function automatorAllFiles(){
   const a = state.automator || {};
   return [...(a.srts || []), ...(a.audios || []), ...(a.scripts || []), ...(a.folders || []).flatMap(folder => folder.files || [])].filter(Boolean);
@@ -6988,63 +6988,90 @@ function automatorPoolBusy(){
   return Boolean(state.renderActive || state.queueRendering || state.automatorApplying);
 }
 function scheduleAutomatorPoolSync(delay = 1500){
+  if(automatorPoolBusy()) return;
   clearTimeout(automatorPool.timer);
   automatorPool.timer = setTimeout(() => { automatorPoolSync().catch(() => {}); }, delay);
 }
-async function automatorPoolCheck(keys){
+async function automatorPoolCheck(keys, signal = null){
   const present = new Set();
-  for(let i = 0; i < keys.length; i += 2000){
+  const chunkSize = 1000;
+  for(let i = 0; i < keys.length; i += chunkSize){
+    if(signal?.aborted) break;
+    const controller = new AbortController();
+    const onAbort = () => controller.abort(signal?.reason);
+    if(signal) signal.addEventListener('abort', onAbort);
+    const timer = setTimeout(() => controller.abort(new Error('Timeout de verificação do depósito')), 15000);
     try{
       const r = await fetch('/api/queue/automator/pool/check', {
-        method: 'POST', headers: {'Content-Type': 'application/json'}, cache: 'no-store',
-        body: JSON.stringify({keys: keys.slice(i, i + 2000)}),
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        cache: 'no-store',
+        body: JSON.stringify({keys: keys.slice(i, i + chunkSize)}),
+        signal: controller.signal,
       });
-      if(r.ok) ((await r.json()).present || []).forEach(key => present.add(key));
-    }catch(_){}
+      if(r.ok){
+        const data = await r.json();
+        (data.present || []).forEach(key => present.add(key));
+      }
+    }catch(_){
+      // Falha ou timeout na verificação não bloqueia: os ficheiros continuam normalmente via upload
+    }finally{
+      clearTimeout(timer);
+      if(signal) signal.removeEventListener('abort', onAbort);
+    }
   }
   return present;
 }
 async function automatorPoolSync(){
   if(automatorPool.running){ automatorPool.dirty = true; return; }
+  if(automatorPoolBusy()) return;
   automatorPool.running = true;
+  automatorPool.abortController = new AbortController();
+  const syncSignal = automatorPool.abortController.signal;
   try{
     do{
+      if(automatorPoolBusy() || syncSignal.aborted) break;
       automatorPool.dirty = false;
       const real = automatorAllFiles().filter(file => file instanceof Blob);
       let pending = real.filter(file => !automatorPool.known.has(automatorFileKey(file)));
       if(!pending.length) break;
-      const present = await automatorPoolCheck(pending.map(automatorFileKey));
+      const present = await automatorPoolCheck(pending.map(automatorFileKey), syncSignal);
+      if(automatorPoolBusy() || syncSignal.aborted) break;
       present.forEach(key => automatorPool.known.add(key));
       pending = pending.filter(file => !present.has(automatorFileKey(file)));
       let batch = [];
       let batchBytes = 0;
       const flush = async () => {
         if(!batch.length) return;
-        while(automatorPoolBusy()) await new Promise(resolve => setTimeout(resolve, 5000));
+        if(automatorPoolBusy() || syncSignal.aborted) return;
         const form = new FormData();
         batch.forEach(file => form.append('files', file, file.name));
         form.append('keys', JSON.stringify(batch.map(automatorFileKey)));
         try{
-          const r = await fetch('/api/queue/automator/pool', {method: 'POST', body: form, cache: 'no-store'});
+          const r = await fetch('/api/queue/automator/pool', {method: 'POST', body: form, cache: 'no-store', signal: syncSignal});
           if(r.ok) ((await r.json()).stored || []).forEach(key => automatorPool.known.add(key));
         }catch(_){}
         batch = [];
         batchBytes = 0;
       };
       for(const file of pending){
+        if(automatorPoolBusy() || syncSignal.aborted) break;
         // A lista pode ter mudado entretanto (ficheiro removido): não envia o que já saiu.
         if(!automatorAllFiles().includes(file)) continue;
         if(batch.length && (batch.length >= 8 || batchBytes + Number(file.size || 0) > 64 * 1024 * 1024)) await flush();
         batch.push(file);
         batchBytes += Number(file.size || 0);
       }
-      await flush();
-    }while(automatorPool.dirty);
+      if(!automatorPoolBusy() && !syncSignal.aborted) await flush();
+    }while(automatorPool.dirty && !automatorPoolBusy() && !syncSignal.aborted);
   }finally{
     automatorPool.running = false;
+    automatorPool.abortController = null;
   }
   // Regrava o rascunho para libertar cópias antigas assim que o depósito ficou completo.
-  saveAutomatorDraftNow().catch(() => {});
+  if(!automatorPoolBusy()){
+    saveAutomatorDraftNow().catch(() => {});
+  }
 }
 function releaseAutomatorPool(keepKeys = []){
   automatorPool.known = new Set([...automatorPool.known].filter(key => keepKeys.includes(key)));
@@ -7295,12 +7322,19 @@ async function openAutomator(){
 }
 
 function closeAutomator(){
-  if(state.automatorApplying) return;
+  if(state.automatorApplying){
+    cancelAutomator();
+    return;
+  }
   automatorModal?.classList.remove('show');
   automatorModal?.setAttribute('aria-hidden', 'true');
 }
 
 async function cancelAutomator(){
+  clearTimeout(automatorPool.timer);
+  if(automatorPool.abortController){
+    try { automatorPool.abortController.abort(); } catch(_){}
+  }
   state.automatorAbortController?.abort();
   const sessionId = state.automatorSessionId;
   state.automatorApplying = false;
@@ -7463,6 +7497,10 @@ async function applyAutomatorDistribution(options = {}){
   let succeeded = false;
   state.automatorApplying = true;
   state.automatorAbortController = new AbortController();
+  clearTimeout(automatorPool.timer);
+  if(automatorPool.abortController){
+    try { automatorPool.abortController.abort(); } catch(_){}
+  }
   if(automatorConfirmBtn){
     automatorConfirmBtn.disabled = true;
     automatorConfirmBtn.textContent = 'Preparando...';
@@ -7577,22 +7615,35 @@ async function applyAutomatorDistribution(options = {}){
     // 1) O que já subiu em segundo plano para o depósito é só movido (sem reenviar GBs).
     const poolCandidates = fileSpecs.filter(spec => spec.file?._poolKey || automatorPool.known.has(automatorFileKey(spec.file)));
     if(poolCandidates.length){
-      progress(4, `A reutilizar ${poolCandidates.length} ficheiro(s) já enviados em segundo plano...`, true);
-      const present = await automatorPoolCheck(poolCandidates.map(spec => automatorFileKey(spec.file)));
+      progress(4, `Verificando ${poolCandidates.length} ficheiro(s) em cache...`, true);
+      const present = await automatorPoolCheck(poolCandidates.map(spec => automatorFileKey(spec.file)), state.automatorAbortController.signal);
       const items = poolCandidates
         .filter(spec => present.has(automatorFileKey(spec.file)))
         .map(spec => ({slot: spec.slot, key: automatorFileKey(spec.file)}));
-      for(let i = 0; i < items.length; i += 400){
-        const r = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/from-pool`, {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({items: items.slice(i, i + 400)}),
-          cache: 'no-store',
-          signal: state.automatorAbortController.signal,
-        }, 120000);
-        if(r.ok) ((await r.json()).registered || []).forEach(slot => uploadedSlots.add(slot));
+      if(items.length > 0){
+        for(let i = 0; i < items.length; i += 400){
+          if(state.automatorAbortController?.signal?.aborted) break;
+          const chunkNum = Math.min(items.length, i + 400);
+          const chunkPct = 4 + Math.round((chunkNum / items.length) * 6);
+          progress(chunkPct, `A reutilizar ficheiro(s) locais (${chunkNum}/${items.length})...`, true);
+          try {
+            const r = await fetchWithTimeout(`/api/queue/automator/sessions/${encodeURIComponent(state.automatorSessionId)}/from-pool`, {
+              method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({items: items.slice(i, i + 400)}),
+              cache: 'no-store',
+              signal: state.automatorAbortController.signal,
+            }, 30000);
+            if(r.ok) ((await r.json()).registered || []).forEach(slot => uploadedSlots.add(slot));
+          } catch(err){
+            console.warn('Erro ao mover ficheiros do depósito:', err);
+            break;
+          }
+        }
       }
-      progress(5 + (uploadedSlots.size / Math.max(1, fileSpecs.length)) * 85, `${uploadedSlots.size}/${fileSpecs.length} ficheiro(s) prontos sem reenvio.`, true);
+      if(uploadedSlots.size > 0){
+        progress(5 + (uploadedSlots.size / Math.max(1, fileSpecs.length)) * 85, `${uploadedSlots.size}/${fileSpecs.length} ficheiro(s) prontos sem reenvio.`, true);
+      }
     }
     const unavailable = fileSpecs.filter(spec => !uploadedSlots.has(spec.slot) && !(spec.file instanceof Blob));
     if(unavailable.length){
