@@ -6342,10 +6342,15 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     # Orçamento dinâmico de alta performance com auto-calibração térmica de hardware
     if priority == "max":
         if is_laptop:
-            # Em notebooks (RTX Laptop + Core i7/i9), 2 workers em paralelo previnem thermal throttle a 93C
-            # permitindo que a CPU sustente turbo boost acima de 3.8-4.5GHz em vez de throttling a 1.59GHz
-            workers = 2
-            cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.60)))
+            if hardware_active and logical_cpus >= 12:
+                workers = 4
+                cpu_thread_budget = max(4, min(12, int(logical_cpus * 0.70)))
+            elif hardware_active and logical_cpus >= 8:
+                workers = 3
+                cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.65)))
+            else:
+                workers = 2
+                cpu_thread_budget = max(4, min(8, int(logical_cpus * 0.55)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
@@ -6367,8 +6372,15 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
         complex_threads = max(1, min(2, cpu_thread_budget // max(1, workers)))
     else:  # balanced
         if is_laptop:
-            workers = 2
-            cpu_thread_budget = max(3, min(6, int(logical_cpus * 0.45)))
+            if hardware_active and logical_cpus >= 12:
+                workers = 3
+                cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.60)))
+            elif hardware_active and logical_cpus >= 8:
+                workers = 2
+                cpu_thread_budget = max(3, min(8, int(logical_cpus * 0.50)))
+            else:
+                workers = 2
+                cpu_thread_budget = max(3, min(6, int(logical_cpus * 0.45)))
         elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
             workers = 4
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.70)))
@@ -6918,7 +6930,7 @@ class _NvencGate:
     esgotava e o driver caía (BSOD 0x116 VIDEO_TDR_FAILURE, "recursos insuficientes").
     Uma sessão corre sempre; as seguintes só com folga real."""
 
-    MIN_FREE_FOR_EXTRA_MB = 900.0
+    MIN_FREE_FOR_EXTRA_MB = 450.0
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
@@ -6990,6 +7002,7 @@ def _run_cmd_impl(
     span: float = 100.0,
     cwd: Path | None = None,
     quiet_success: bool = False,
+    progress_callback: Any = None,
 ):
     priority = render_priority(job)
     if job.cancel_requested:
@@ -7047,22 +7060,21 @@ def _run_cmd_impl(
         if not quiet_success:
             _append_log(job, line)
         if total_duration:
-            if line.startswith("out_time_ms="):
+            if line.startswith("out_time_ms=") or line.startswith("out_time_us="):
                 try:
                     seconds = float(line.split("=", 1)[1]) / 1_000_000.0
                     job.stage_progress_seconds = max(job.stage_progress_seconds, seconds)
-                    job.percent = max(job.percent, min(99.0, base + (seconds / total_duration) * span))
-                except Exception:
-                    pass
-            elif line.startswith("out_time_us="):
-                try:
-                    seconds = float(line.split("=", 1)[1]) / 1_000_000.0
-                    job.stage_progress_seconds = max(job.stage_progress_seconds, seconds)
-                    job.percent = max(job.percent, min(99.0, base + (seconds / total_duration) * span))
+                    if callable(progress_callback):
+                        progress_callback(min(1.0, seconds / total_duration))
+                    else:
+                        job.percent = max(job.percent, min(99.0, base + (seconds / total_duration) * span))
                 except Exception:
                     pass
             elif line.startswith("progress=end"):
-                job.percent = max(job.percent, min(99.0, base + span))
+                if callable(progress_callback):
+                    progress_callback(1.0)
+                else:
+                    job.percent = max(job.percent, min(99.0, base + span))
 
     try:
         while True:
@@ -8454,7 +8466,7 @@ def _probe_visual_clean_frames(path: Path, duration: float, cwd: Path | None = N
         if cap.isOpened():
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
             if total_frames > 2:
-                sample_count = 3 if duration < 3.0 else (5 if duration < 15.0 else 6)
+                sample_count = 2 if duration < 4.0 else (3 if duration < 15.0 else 4)
                 step = max(1, total_frames // (sample_count + 1))
                 indices = [min(total_frames - 1, step * (i + 1)) for i in range(sample_count)]
                 extracted: list[bytes] = []
@@ -11319,14 +11331,14 @@ def apply_visual_clean_filter(
         source_context = visual_filter_source_context(job, source, project_context)
         tasks.append((idx, source, duration, zone, work, source_context, media_kind))
 
-    cur_pct = getattr(job, "percent", 22.0) or 22.0
+    cur_pct = getattr(job, "percent", 8.0) or 8.0
     total_tasks = max(1, len(tasks))
     set_stage(
         job,
         "rendering",
         f"Filtro visual anti-poluição (0/{total_tasks})" if tasks else "Filtro visual anti-poluição",
         f"Validando qualidade e integridade visual ({total_tasks} clipes)..." if tasks else "Verificando integridade visual...",
-        percent=max(cur_pct, 22.0),
+        percent=max(cur_pct, 8.0),
     )
 
     if len(tasks) > 1:
@@ -11336,7 +11348,7 @@ def apply_visual_clean_filter(
             any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
             for g in hw.get("gpus", [])
         ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-        max_workers = min(8, logical_cpus) if _is_laptop else min(12, logical_cpus)
+        max_workers = min(12, logical_cpus) if (_is_laptop and logical_cpus >= 12) else (min(8, logical_cpus) if _is_laptop else min(12, logical_cpus))
         completed_tasks = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
@@ -11354,9 +11366,9 @@ def apply_visual_clean_filter(
                 except Exception:
                     pass
                 if completed_tasks % 2 == 0 or completed_tasks == total_tasks:
-                    step_pct = round(22.0 + (completed_tasks / total_tasks) * 6.0, 1)
+                    step_pct = round(8.0 + (completed_tasks / total_tasks) * 5.0, 1)
                     if hasattr(job, "percent"):
-                        job.percent = max(getattr(job, "percent", 22.0), step_pct)
+                        job.percent = max(getattr(job, "percent", 8.0), step_pct)
                     if hasattr(job, "stage_label"):
                         job.stage_label = f"Filtro visual anti-poluição ({completed_tasks}/{total_tasks})"
                     if hasattr(job, "message"):
@@ -11368,7 +11380,7 @@ def apply_visual_clean_filter(
         except Exception:
             pass
         if hasattr(job, "percent"):
-            job.percent = max(getattr(job, "percent", 22.0), 28.0)
+            job.percent = max(getattr(job, "percent", 8.0), 13.0)
         if hasattr(job, "stage_label"):
             job.stage_label = "Filtro visual anti-poluição (1/1)"
         if hasattr(job, "message"):
@@ -15530,6 +15542,7 @@ def compose_final_visuals(
     base: float | None = None,
     span: float | None = None,
     log_summary: bool = True,
+    progress_callback: Any = None,
 ) -> Path:
     if log_summary:
         label = "Composição Render Studio"
@@ -15643,6 +15656,7 @@ def compose_final_visuals(
         span=comp_span,
         cwd=work,
         quiet_success=True,
+        progress_callback=progress_callback,
     )
     composed_duration = safe_probe_duration(out)
     if log_summary:
@@ -15773,12 +15787,26 @@ def compose_visual_chunks_parallel(
         any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q"))
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
-    max_workers = min(3, len(chunks)) if is_laptop else min(4, len(chunks))
+    hardware_active = bool(best_hardware_encoder("h264"))
+    max_workers = min(4, len(chunks)) if (hardware_active and logical_cpus >= 12) else (min(3, len(chunks)) if is_laptop else min(4, len(chunks)))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
 
     comp_base = 65.0
     comp_span = 30.0
     step_span = comp_span / max(1, len(chunks))
+
+    chunk_progress: dict[int, float] = {ch["index"]: 0.0 for ch in chunks}
+    chunk_lock = threading.Lock()
+
+    def update_chunk_progress(c_idx: int, fraction: float):
+        with chunk_lock:
+            chunk_progress[c_idx] = max(chunk_progress.get(c_idx, 0.0), min(1.0, fraction))
+            overall_chunk_ratio = sum(chunk_progress.values()) / max(1, len(chunks))
+            pct = comp_base + overall_chunk_ratio * comp_span
+            job.percent = max(job.percent, min(95.0, round(pct, 1)))
+            done_cnt = sum(1 for v in chunk_progress.values() if v >= 0.999)
+            job.stage_label = f"Composição visual ({int(overall_chunk_ratio * 100)}%)"
+            job.message = f"Composição visual: {done_cnt}/{len(chunks)} blocos ({int(job.percent)}%)"
 
     def render_single_chunk(chunk_info: dict[str, Any]) -> Path:
         idx = chunk_info["index"]
@@ -15821,7 +15849,7 @@ def compose_visual_chunks_parallel(
 
         out_name = f"chunk_visual_{idx}.mp4"
         try:
-            return compose_final_visuals(
+            res_chunk = compose_final_visuals(
                 job=job,
                 video_source=chunk_raw,
                 cta=cta if c_times else None,
@@ -15833,10 +15861,13 @@ def compose_visual_chunks_parallel(
                 base=c_base,
                 span=step_span,
                 log_summary=False,
+                progress_callback=lambda fraction: update_chunk_progress(idx, fraction),
             )
+            update_chunk_progress(idx, 1.0)
+            return res_chunk
         except Exception as exc:
             _append_log(job, f"Aviso no chunk {idx} ({exc}), tentando repassagem isolada...")
-            return compose_final_visuals(
+            res_chunk = compose_final_visuals(
                 job=job,
                 video_source=chunk_raw,
                 cta=cta if c_times else None,
@@ -15848,10 +15879,11 @@ def compose_visual_chunks_parallel(
                 base=c_base,
                 span=step_span,
                 log_summary=False,
+                progress_callback=lambda fraction: update_chunk_progress(idx, fraction),
             )
+            update_chunk_progress(idx, 1.0)
+            return res_chunk
 
-    completed_count = 0
-    chunk_lock = threading.Lock()
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_chunk = {executor.submit(render_single_chunk, ch): ch for ch in chunks}
         rendered_chunk_paths: dict[int, Path] = {}
@@ -15859,10 +15891,7 @@ def compose_visual_chunks_parallel(
             ch = future_to_chunk[future]
             chunk_path = future.result()
             rendered_chunk_paths[ch["index"]] = chunk_path
-            with chunk_lock:
-                completed_count += 1
-                pct = comp_base + (completed_count / len(chunks)) * comp_span
-                job.percent = max(job.percent, min(95.0, round(pct, 1)))
+            update_chunk_progress(ch["index"], 1.0)
 
     _append_log(job, "Todos os chunks renderizados; executando fusao instantanea via stream copy.")
     final_concat_txt = work / "chunks_visual_concat.txt"
@@ -20183,10 +20212,10 @@ def choose_segment_video_args(mode: str, gpu: bool, job: Job, worker_count: int 
             label = "H.264 NVENC ultra-rápido térmico" if turbo_enabled(job) else "H.264 NVENC otimizado térmico"
             args = [
                 "-c:v", hardware_encoder,
-                "-preset", "p2",
-                "-tune", "hq",
+                "-preset", "p1",
+                "-tune", "ll",
                 "-rc", "constqp",
-                "-qp", "19",
+                "-qp", "18",
                 "-g", "60",
                 "-threads", str(segment_threads),
             ]
@@ -22018,7 +22047,7 @@ def make_segments_smart(
         imported_count=len(video_files),
     )
     # Semantic B-Roll Matcher: alinha tematicamente clipes com as falas da narracao
-    set_stage(job, "rendering", "Alinhando B-roll semântico", "Alinhando mídias à narração...", percent=28.2)
+    set_stage(job, "rendering", "Alinhando B-roll semântico", "Alinhando mídias à narração...", percent=13.2)
     cues_for_matching = list(job.subtitle_cues or [])
     if not cues_for_matching and subtitles:
         for srt_f in subtitles:
@@ -22028,7 +22057,7 @@ def make_segments_smart(
     valid_pairs, semantic_b_roll_summary = match_media_to_subtitles(job, valid_pairs, cues_for_matching, audio_total)
     job.preflight_summary["semantic_b_roll"] = semantic_b_roll_summary
     # Clean Opening Protocol: protege estritamente os primeiros 10 slots com B-roll limpo
-    set_stage(job, "rendering", "Protegendo abertura", "Aplicando protocolo de abertura limpa...", percent=28.5)
+    set_stage(job, "rendering", "Protegendo abertura", "Aplicando protocolo de abertura limpa...", percent=13.5)
     valid_pairs, clean_opening_summary = enforce_clean_opening_protocol(job, valid_pairs, work, max_opening_slots=10)
     job.preflight_summary["clean_opening"] = clean_opening_summary
     performance_stop(job, "visual_analysis")
@@ -22058,13 +22087,13 @@ def make_segments_smart(
 
     original_video_count = len(video_files)
     performance_start(job, "continuity")
-    set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=28.8)
+    set_stage(job, "rendering", "Ajustando continuidade", "Verificando continuidade visual dos cortes...", percent=13.8)
     continuity_filters, continuity_summary = continuity_adjustments(job, valid_pairs, work)
     performance_stop(job, "continuity")
     job.continuity_summary = continuity_summary
     video_files = [item[0] for item in valid_pairs]
     video_durs = [item[1] for item in valid_pairs]
-    set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=29.1)
+    set_stage(job, "rendering", "Calibrando cortes ideais", "Verificando pontos de entrada dos clipes...", percent=14.1)
     source_offsets: dict[str, float] = {}
 
     def _probe_single_offset(pair: tuple[Path, float]) -> tuple[str, float] | None:
@@ -22105,7 +22134,7 @@ def make_segments_smart(
     }
     window_scores_by_source: dict[str, dict[str, Any]] = {}
     if visual_window_summary["enabled"]:
-        set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=29.4)
+        set_stage(job, "rendering", "Avaliando janelas visuais", "Selecionando os melhores trechos dos clipes...", percent=14.4)
         performance_start(job, "visual_windows")
         candidate_set = set(candidate_sources) if candidate_sources else None
 
@@ -22178,7 +22207,7 @@ def make_segments_smart(
                 break
     if not srt_file and getattr(job, "srt_path", None) and Path(str(job.srt_path)).exists():
         srt_file = Path(str(job.srt_path))
-    set_stage(job, "rendering", "Planejando linha do tempo", "Montando plano de tomadas, cortes e ritmo...", percent=29.7)
+    set_stage(job, "rendering", "Planejando linha do tempo", "Montando plano de tomadas, cortes e ritmo...", percent=14.7)
     plans, summary = build_segment_plan(
         video_files,
         video_durs,
@@ -22262,7 +22291,7 @@ def make_segments_smart(
     segments: list[Path] = []
     accepted_plans: list[SegmentPlan] = []
     failed_sources: set[str] = set()
-    set_stage(job, "rendering", "Preparando segmentos", f"Iniciando renderização de {len(plans)} tomada(s)...", percent=30.0)
+    set_stage(job, "rendering", "Preparando segmentos", f"Iniciando renderização de {len(plans)} tomada(s)...", percent=15.0)
     _append_log(job, (
         f"Motor v0.8 otimizado: áudio={summary.get('audio_duration', audio_total):.2f}s | "
         f"vídeo bruto={summary.get('raw_video_duration', 0.0):.2f}s | velocidade={summary.get('playback_speed', 1.0):.2f}x | "
@@ -22473,10 +22502,8 @@ def make_segments_smart(
             job.rendered_timeline_duration = completed_planned_duration
             job.total_timeline_duration = max(1.0, audio_total)
             has_comp = getattr(job, "has_visual_composition", False)
-            # Banda dos segmentos: 5-60% com composição (áudio 61-65, CTA/legendas 65-95,
-            # mux 96-99). 85% deixava a barra parada durante áudio + CTA.
-            max_seg_pct = 60.0 if has_comp else 92.0
-            seg_base = 5.0
+            max_seg_pct = 65.0 if has_comp else 95.0
+            seg_base = 15.0
             seg_span = max_seg_pct - seg_base
             seg_progress = min(1.0, completed_planned_duration / max(1.0, audio_total))
             pct = min(max_seg_pct, seg_base + (seg_progress * seg_span))
@@ -22673,7 +22700,7 @@ def make_segments_smart(
             f"(marcas neutralizadas)."
         ))
     job.accepted_plans = list(accepted_plans)
-    job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
+    job.percent = max(job.percent, 65.0 if getattr(job, "has_visual_composition", False) else 95.0)
     return segments
 
 
@@ -22692,7 +22719,7 @@ def concat_segments_and_mux(
 ):
     subtitle_ass = apply_late_narration_alignment(job, subtitle_ass)
     job.message = "Juntando tomadas em sequência MP4"
-    job.percent = max(job.percent, 60.0 if getattr(job, "has_visual_composition", False) else 92.0)
+    job.percent = max(job.percent, 65.0 if getattr(job, "has_visual_composition", False) else 95.0)
     set_stage(job, "rendering", "Montando sequência", job.message, percent=job.percent)
     concat_list = work / "concat_segments.txt"
     # segment paths are relative to work in this file to keep Windows commands short
@@ -26813,7 +26840,7 @@ def status(job_id: str):
 
         est_post = est_post_stage
 
-        if rendered_sec <= 0.0 and pct < 28.0:
+        if rendered_sec <= 0.0 and pct < 15.0:
             # Pre-encoding phase: audio mix, visual analysis, director indexing are running,
             # but the GPU encoder hasn't started yet. Use stage_forecast to show a realistic
             # preparation-aware estimate instead of an inflated crude fallback.

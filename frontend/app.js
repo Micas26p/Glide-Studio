@@ -5827,7 +5827,7 @@ async function pollStatus(jobId, context = {}){
         status: j.stage_label || j.stage || '',
       });
       const rawPct = Math.max(0, Math.min(100, j.percent || 0));
-      if (j.stage === 'preparing' && (state.renderMaxPercent || 0) > 28) {
+      if (j.stage === 'preparing' && (state.renderMaxPercent || 0) > 15) {
         state.renderMaxPercent = rawPct;
       } else if (j.stage === 'recovery' || (j.recovery_count || 0) > (state._lastRecoveryCount || 0)) {
         state._lastRecoveryCount = j.recovery_count || 0;
