@@ -1574,7 +1574,7 @@ function confirmCleanCoverage(projectIds){
     const c = cleanCoverageOf(p);
     return `• ${p.name}: ${formatMinutes(c.cleanSeconds)} de material aproveitável para ${formatMinutes(c.neededSeconds)} de narração`;
   }).join(String.fromCharCode(10));
-  return window.confirm(
+  const confirmed = window.confirm(
     `Material insuficiente mesmo com 3 usos por clipe:
 ${lines}
 
@@ -1582,6 +1582,10 @@ Para cobrir a narração, alguns clipes vão aparecer mais de 3 vezes (repartido
 
 Renderizar mesmo assim? (Cancelar para adicionar mais clipes antes.)`
   );
+  if(!confirmed){
+    showToast('Renderização Suspensa', 'Renderização cancelada pelo utilizador para adicionar mais clipes.', 'info');
+  }
+  return confirmed;
 }
 function reportReasonRows(report){
   const items = Array.isArray(report?.details?.items) ? report.details.items : [];
@@ -7372,6 +7376,16 @@ function automatorPlan(){
   }
   const emptyAll = state.projects.filter(automatorProjectIsEmpty);
   const targets = emptyFromActive.length >= targetCount ? emptyFromActive : emptyAll;
+  if(targetCount > targets.length && targetCount > 0 && !state.automatorApplying){
+    const needed = targetCount - targets.length;
+    for(let k = 0; k < needed; k++){
+      const newP = createProjectModel(`Projeto ${state.projects.length + 1}`);
+      state.projects.push(newP);
+      syncProjectSnapshot(newP, {immediate: true});
+      targets.push(newP);
+    }
+    renderProjectQueue();
+  }
   const available = targets.length;
   const warnings = [];
   if(!state.projects.length) warnings.push('Crie pelo menos um projeto na fila.');
@@ -7814,12 +7828,15 @@ async function applyAutomatorDistribution(options = {}){
     state.automator = {srts: [], audios: [], scripts: [], folders: [], sort: state.automator?.sort || {}};
     await clearAutomatorDraftNow();
     releaseAutomatorPool([]);
-    const draftBanner = document.getElementById('automatorDraftBanner');
-    if(draftBanner) draftBanner.hidden = true;
+    succeeded = rowsToApply.map(row => row.project.id);
+    succeeded.forEach(id => {
+      state.cleanCoverage[id] = {status: 'queued'};
+      const p = state.projects.find(proj => proj.id === id);
+      if(p) p.cleanCoverage = {status: 'queued'};
+    });
+    requestCleanCoverage(succeeded);
     closeAutomator();
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
-    succeeded = rowsToApply.map(row => row.project.id);
-    requestCleanCoverage(succeeded);
   }catch(error){
     const cancelled = error?.name === 'AbortError';
     const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
@@ -7831,7 +7848,7 @@ finally{
     state.automatorApplying = false;
     state.automatorAbortController = null;
     if(automatorConfirmBtn){
-      automatorConfirmBtn.textContent = 'Confirmar';
+      automatorConfirmBtn.textContent = 'Confirmar & Renderizar';
       automatorConfirmBtn.disabled = Boolean(automatorPlan().warnings.length);
     }
     if(automatorConfirmHealthyBtn){
@@ -8457,8 +8474,11 @@ async function monitorBackendQueue(){
 }
 
 async function renderQueue(config = {}){
-  if(state.queueRendering || state.renderActive) return;
-  if(!confirmCleanCoverage(config.projectIds)) return;
+  if(state.queueRendering || state.renderActive){
+    showToast('Fila em Andamento', 'Já existe uma renderização em execução.', 'info');
+    return;
+  }
+  if(!config.fromAutomator && !confirmCleanCoverage(config.projectIds)) return;
 
   // Unlock Web Audio Context during user gesture click
   try {
@@ -9809,32 +9829,53 @@ document.getElementById('automatorPairBtn')?.addEventListener('click', () => {
     : 'AUTO: os nomes já combinam, ou não há pares claros o suficiente para reordenar.';
   updateAutomatorPreview();
 });
-if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', () => {
-  applyAutomatorDistribution().catch(error => {
-    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
-  });
+if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', async () => {
+  try{
+    const appliedIds = await applyAutomatorDistribution();
+    if(!appliedIds) return;
+    showToast('AUTO Aplicado', `${appliedIds.length} projeto(s) prontos. A iniciar renderização...`, 'success');
+    renderQueue({projectIds: appliedIds, fromAutomator: true}).catch(err => {
+      const msg = err.message || err;
+      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${msg}`;
+      showToast('Erro ao iniciar render', msg, 'error');
+    });
+  }catch(error){
+    const msg = error.message || error;
+    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${msg}`;
+    showToast('Falha no AUTO', msg, 'error');
+  }
 });
 if(automatorConfirmHealthyBtn) automatorConfirmHealthyBtn.addEventListener('click', async () => {
   try{
     // Só renderiza depois de a distribuição ter sido confirmada e verificada no servidor.
     const appliedIds = await applyAutomatorDistribution({onlyHealthy: true});
     if(!appliedIds) return;
-    renderQueue({projectIds: appliedIds}).catch(err => {
-      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
+    showToast('AUTO Saudáveis Aplicado', `${appliedIds.length} projeto(s) saudáveis prontos. A iniciar renderização...`, 'success');
+    renderQueue({projectIds: appliedIds, healthyOnly: true, fromAutomator: true}).catch(err => {
+      const msg = err.message || err;
+      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${msg}`;
+      showToast('Erro ao iniciar render', msg, 'error');
     });
   }catch(error){
-    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
+    const msg = error.message || error;
+    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${msg}`;
+    showToast('Falha no AUTO', msg, 'error');
   }
 });
 if(automatorConfirmAndRenderBtn) automatorConfirmAndRenderBtn.addEventListener('click', async () => {
   try{
     const appliedIds = await applyAutomatorDistribution();
     if(!appliedIds) return;
-    renderQueue({projectIds: appliedIds}).catch(err => {
-      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${err.message || err}`;
+    showToast('AUTO Aplicado', `${appliedIds.length} projeto(s) prontos. A iniciar renderização...`, 'success');
+    renderQueue({projectIds: appliedIds, fromAutomator: true}).catch(err => {
+      const msg = err.message || err;
+      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${msg}`;
+      showToast('Erro ao iniciar render', msg, 'error');
     });
   }catch(error){
-    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${error.message || error}`;
+    const msg = error.message || error;
+    if(dockSummary) dockSummary.textContent = `AUTO falhou: ${msg}`;
+    showToast('Falha no AUTO', msg, 'error');
   }
 });
 if(retryFailedBtn) retryFailedBtn.addEventListener('click', retryFailedRenders);
