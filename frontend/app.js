@@ -785,6 +785,7 @@ function createProjectModel(name = ''){
 function persistedMediaObject(projectId, meta = {}){
   const serverRel = String(meta.rel || meta.name || '');
   const contentUrl = `/api/queue/projects/${encodeURIComponent(projectId)}/media-content?rel=${encodeURIComponent(serverRel)}`;
+  const thumbnailUrl = `/api/queue/projects/${encodeURIComponent(projectId)}/media-thumbnail?rel=${encodeURIComponent(serverRel)}`;
   return {
     name: meta.name || serverRel.split('/').pop() || 'media',
     size: Number(meta.size || 0),
@@ -793,6 +794,7 @@ function persistedMediaObject(projectId, meta = {}){
     webkitRelativePath: serverRel,
     _serverRel: serverRel,
     _contentUrl: contentUrl,
+    _thumbnailUrl: thumbnailUrl,
     _forcedKind: meta.kind || '',
     _persisted: true,
     _persistedProjectId: meta.persistedProjectId || projectId || '',
@@ -928,7 +930,7 @@ async function rehydrateProjectMedia(project){
     }));
     videos.forEach(file => {
       const image = isImage(file);
-      if(image && file._contentUrl) project.maps.thumbs.set(rel(file), file._contentUrl);
+      if(image && (file._thumbnailUrl || file._contentUrl)) project.maps.thumbs.set(rel(file), file._thumbnailUrl || file._contentUrl);
       project.maps.mediaStatus.set(rel(file), {
         kind: image ? 'image' : (file._duration > 0 ? 'metadata_ok' : 'no_preview'),
         label: image
@@ -4639,7 +4641,7 @@ function createVideoTimelineCard(file, idx, total){
   card.innerHTML = `
     <button class="remove-file" type="button" title="Remover este clip" aria-label="Remover este clip"></button>
     <div class="clip-index">#${String(idx + 1).padStart(2, '0')}</div>
-    <div class="thumb${thumbClass}">${thumb ? `<img src="${thumb}" alt="thumb"/>` : `<span>${videoPlaceholder(status)}</span>`}</div>
+    <div class="thumb${thumbClass}">${thumb ? `<img src="${thumb}" loading="lazy" decoding="async" alt="thumb"/>` : `<span>${videoPlaceholder(status)}</span>`}</div>
     <div class="clip-body">
       <div class="clip-title" title="${safeRel}">${safeName}</div>
       <div class="clip-meta"><span>${formatTime(state.durations.get(r) || 0)}</span><span>${formatSize(file.size)}</span></div>
@@ -4649,9 +4651,9 @@ function createVideoTimelineCard(file, idx, total){
   return card;
 }
 
-function appendVideoTimelineChunk(files, startIndex, signature, generation){
+function appendVideoTimelineChunk(files, startIndex, signature, generation, maxCardsLimit = 60){
   if(generation !== state.timelineRenderGeneration || signature !== state.videoListSignature) return;
-  const end = Math.min(files.length, startIndex + 36);
+  const end = Math.min(files.length, Math.min(startIndex + 30, maxCardsLimit));
   const frag = document.createDocumentFragment();
   for(let idx = startIndex; idx < end; idx++){
     frag.appendChild(createVideoTimelineCard(files[idx], idx, files.length));
@@ -4661,9 +4663,26 @@ function appendVideoTimelineChunk(files, startIndex, signature, generation){
     videoTimeline.dataset.complete = '1';
     return;
   }
-  const resume = () => appendVideoTimelineChunk(files, end, signature, generation);
+  if(end >= maxCardsLimit){
+    videoTimeline.dataset.complete = '1';
+    const remaining = files.length - end;
+    const footer = document.createElement('div');
+    footer.className = 'timeline-capped-notice';
+    footer.style.cssText = 'grid-column: 1 / -1; padding: 12px 16px; margin: 8px 0; background: rgba(255,255,255,0.04); border: 1px dashed rgba(255,255,255,0.14); border-radius: 8px; display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 13px; color: #a1a1aa;';
+    footer.innerHTML = `<span>Exibindo os primeiros ${end} de ${files.length} clipes (otimizado para memória e fluidez).</span><button type="button" class="btn ghost btn-sm" style="padding: 5px 14px; font-size: 12px; cursor: pointer; border: 1px solid rgba(255,255,255,0.2);">Carregar mais 60 clipes (+${remaining})</button>`;
+    const btn = footer.querySelector('button');
+    if(btn){
+      btn.addEventListener('click', () => {
+        footer.remove();
+        appendVideoTimelineChunk(files, end, signature, generation, maxCardsLimit + 60);
+      });
+    }
+    videoTimeline.appendChild(footer);
+    return;
+  }
+  const resume = () => appendVideoTimelineChunk(files, end, signature, generation, maxCardsLimit);
   if('requestIdleCallback' in window) window.requestIdleCallback(resume, {timeout: 140});
-  else window.setTimeout(resume, 12);
+  else window.setTimeout(resume, 20);
 }
 
 function renderLists({updatePreview = true} = {}){

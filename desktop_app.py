@@ -64,6 +64,10 @@ def _apply_low_memory_webview_flags() -> None:
         "--disable-component-update",
         "--disable-domain-reliability",
         "--disable-sync",
+        "--disable-gpu-rasterization",
+        "--js-flags=--max-old-space-size=512",
+        "--renderer-process-limit=1",
+        "--disable-image-animation-resync",
     ])
     existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
     if existing:

@@ -18173,7 +18173,7 @@ def commit_automator_session(session_id: str):
                 final_tgt = _normalize_and_relocate_media_file(src, tgt)
                 return final_tgt, sl, sp
 
-            max_workers = min(8, max(1, len(items_to_relocate)))
+            max_workers = min(3, max(1, os.cpu_count() or 2))
             if max_workers > 1:
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     relocated = list(executor.map(_relocate_item, items_to_relocate))
@@ -18215,9 +18215,11 @@ def commit_automator_session(session_id: str):
             # sem bloquear o commit (commit responde em ~1s) e com throttling térmico para não aquecer CPU
             if needs_probe:
                 def _bg_probe_automator_videos(probes: list[tuple[str, str, Path, dict[str, Any]]]) -> None:
-                    for _pid, _rel, tgt, _ in probes:
+                    # Limita a 50 sondagens assíncronas para não sobrecarregar disco e CPU
+                    capped_probes = probes[:50]
+                    for _pid, _rel, tgt, _ in capped_probes:
                         try:
-                            time.sleep(0.015)  # Throttling térmico suave para manter o PC frio e ágil
+                            time.sleep(0.06)  # Throttling térmico seguro para manter o PC frio e ágil
                             cur_index = _load_project_media_index(_pid)
                             if float((cur_index.get(_rel) or {}).get("duration") or 0.0) > 0:
                                 continue
@@ -18296,6 +18298,11 @@ def commit_automator_session(session_id: str):
             session["status"] = "committed"
             session["result"] = result_payload
         shutil.rmtree(Path(session["folder"]), ignore_errors=True)
+        try:
+            import gc
+            gc.collect()
+        except Exception:
+            pass
         return result_payload
     except Exception as exc:
         with QUEUE_LOCK:
@@ -18631,6 +18638,68 @@ def queue_project_media_content(project_id: str, rel: str):
             if matches and matches[0].is_file():
                 return FileResponse(matches[0], filename=Path(rel_key).name)
     raise HTTPException(status_code=404, detail="Midia persistida nao encontrada")
+
+
+@app.get("/api/queue/projects/{project_id}/media-thumbnail")
+def queue_project_media_thumbnail(project_id: str, rel: str):
+    """Retorna uma miniatura ultraleve (160x90, ~3KB) em cache, economizando 99.9% de memória no navegador."""
+    rel_key = str(rel or "").replace("\\", "/")
+    candidate = None
+    stable = _load_project_media_index(project_id).get(rel_key)
+    if stable:
+        stored_file = Path(str(stable.get("file") or "")).name
+        c = _project_media_dir(project_id) / stored_file
+        if c.exists() and c.is_file():
+            candidate = c
+    if not candidate:
+        with QUEUE_LOCK:
+            project = _find_queue_project(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Projeto da fila nao encontrado")
+            project_copy = json.loads(json.dumps(project, ensure_ascii=False, default=str))
+        source_job_id = str(project_copy.get("jobId") or "").strip()
+        manifest = _project_export_manifest(project_copy)
+        for index, item in enumerate(manifest):
+            item_rel = str(item.get("rel") or item.get("name") or "").replace("\\", "/")
+            if item_rel != rel_key and Path(item_rel).name != Path(rel_key).name:
+                continue
+            if source_job_id:
+                matches = list((UPLOAD_ROOT / source_job_id).glob(f"u{index:04d}.*"))
+                if matches and matches[0].is_file():
+                    candidate = matches[0]
+                    break
+    if not candidate or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Midia nao encontrada")
+
+    ext = candidate.suffix.lower()
+    if ext in IMAGE_EXTS:
+        thumbs_dir = _project_media_dir(project_id) / ".thumbs"
+        thumbs_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            mtime = candidate.stat().st_mtime
+            fsize = candidate.stat().st_size
+        except Exception:
+            mtime = 0
+            fsize = 0
+        digest = hashlib.sha256(f"{candidate.name}_{fsize}_{mtime}".encode("utf-8")).hexdigest()[:20]
+        thumb_path = thumbs_dir / f"{digest}.jpg"
+        if thumb_path.exists() and thumb_path.stat().st_size > 0:
+            return FileResponse(thumb_path, media_type="image/jpeg")
+        try:
+            from PIL import Image, ImageOps
+            with Image.open(str(candidate)) as img:
+                try:
+                    img = ImageOps.exif_transpose(img)
+                except Exception:
+                    pass
+                rgb = img.convert("RGB")
+                rgb.thumbnail((160, 90), Image.Resampling.BILINEAR)
+                rgb.save(str(thumb_path), format="JPEG", quality=75, optimize=True)
+            return FileResponse(thumb_path, media_type="image/jpeg")
+        except Exception:
+            return FileResponse(candidate, media_type="image/jpeg")
+
+    raise HTTPException(status_code=404, detail="Sem miniatura para este tipo")
 
 
 @app.post("/api/queue/projects/{project_id}/media-file")
