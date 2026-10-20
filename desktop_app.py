@@ -932,7 +932,10 @@ def main():
             write_smoke_trace("runtime:stopped")
             return
         try:
-            run_native_app(runtime)
+            if "--browser" in sys.argv or os.environ.get("GLIDE_BROWSER_MODE") == "1":
+                run_browser_app(runtime)
+            else:
+                run_native_app(runtime)
         except Exception:
             run_browser_app(runtime)
     except Exception as exc:
