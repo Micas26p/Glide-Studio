@@ -1522,6 +1522,9 @@ def deliver_final_video(job: Job, source: Path) -> Path:
 def find_bin(name: str) -> str | None:
     exe_name = name + (".exe" if os.name == "nt" and not name.lower().endswith(".exe") else "")
     for folder in (DATA_ROOT, APP_DIR, SOURCE_ROOT, RESOURCE_ROOT):
+        in_tools = folder / "tools" / exe_name
+        if in_tools.exists():
+            return str(in_tools)
         local = folder / exe_name
         if local.exists():
             return str(local)
@@ -14856,7 +14859,9 @@ def cta_public_info(key: str) -> dict[str, Any]:
 
 @app.get("/api/cta-assets")
 def cta_assets():
-    return {"required": CTA_REQUIRED, "occurrences": CTA_OCCURRENCES, "items": [cta_public_info(key) for key in CTA_LANGUAGES]}
+    with ThreadPoolExecutor(max_workers=min(8, len(CTA_LANGUAGES))) as ex:
+        items = list(ex.map(cta_public_info, CTA_LANGUAGES))
+    return {"required": CTA_REQUIRED, "occurrences": CTA_OCCURRENCES, "items": items}
 
 
 def cta_cache_path(key: str, suffix: str, source: Path | None = None) -> Path:

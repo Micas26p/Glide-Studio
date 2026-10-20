@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Instalador Oficial do Glide Studio para Windows
+Instalador Oficial do Glide Studio para Windows (Versão Nativa 100% Desacoplada de WebView2)
 Instala o Glide Studio localmente em %LOCALAPPDATA%\\Programs\\Glide Studio,
-migra todas as configurações e projetos, cria atalhos oficiais na Área de Trabalho
+migra todas as configurações, projetos e mídias, cria o atalho oficial na Área de Trabalho
 e no Menu Iniciar, e registra o desinstalador no Windows.
 """
 
@@ -44,7 +44,7 @@ def create_windows_shortcut(target_path: Path, shortcut_path: Path, icon_path: P
     $s.Save();
     """
     try:
-        res = subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, check=True)
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_script], capture_output=True, text=True, check=True)
         return shortcut_path.exists()
     except Exception as exc:
         print(f"Erro ao criar atalho {shortcut_path.name}: {exc}", file=sys.stderr)
@@ -86,7 +86,7 @@ if /i not "%CONFIRM%"=="S" (
 )
 
 echo.
-echo Removendo atalhos da Area de Trabalho...
+echo Removendo atalho da Area de Trabalho...
 del /f /q "{desktop}\\Glide Studio.lnk" 2>nul
 del /f /q "{desktop}\\Glide Studio (Modo Navegador).lnk" 2>nul
 
@@ -122,7 +122,6 @@ def perform_installation(
     source_dir: Path,
     dest_dir: Path,
     desktop_shortcut: bool = True,
-    browser_shortcut: bool = True,
     start_menu: bool = True,
     migrate_data: bool = True,
     progress_callback = None,
@@ -137,29 +136,18 @@ def perform_installation(
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Localizar o executável compilado
-    exe_source = source_dir / "Glide Studio.exe"
+    exe_source = source_dir / "dist" / "Glide Studio.exe"
     if not exe_source.exists():
-        exe_source = source_dir / "dist" / "Glide Studio.exe"
+        exe_source = source_dir / "Glide Studio.exe"
     if not exe_source.exists():
-        raise FileNotFoundError(f"Não foi possível encontrar Glide Studio.exe em {source_dir} nem em {source_dir / 'dist'}")
+        raise FileNotFoundError(f"Não foi possível encontrar Glide Studio.exe em {source_dir / 'dist'} nem em {source_dir}")
 
-    update(15, "Instalando binário principal (Glide Studio.exe)...")
+    update(15, "Instalando aplicativo principal (Glide Studio.exe)...")
     shutil.copy2(exe_source, dest_dir / "Glide Studio.exe")
 
-    # 2. Copiar lançador do Modo Navegador
-    update(25, "Instalando lançador do Modo Navegador...")
-    bat_source = source_dir / "Glide Studio (Modo Navegador).bat"
-    if bat_source.exists():
-        shutil.copy2(bat_source, dest_dir / "Glide Studio (Modo Navegador).bat")
-    else:
-        (dest_dir / "Glide Studio (Modo Navegador).bat").write_text(
-            '@echo off\r\ntitle Glide Studio (Modo Navegador)\r\nstart "" "%~dp0Glide Studio.exe" --browser\r\n',
-            encoding="utf-8"
-        )
-
-    # 3. Copiar assets essenciais
-    update(35, "Instalando pastas de recursos e assets...")
-    for folder_name in ["assets", "frontend", "tools", "model_packs"]:
+    # 2. Copiar assets e ferramentas essenciais (FFmpeg, Whisper, modelos, etc.)
+    update(30, "Instalando recursos do sistema (FFmpeg, modelos de IA, assets)...")
+    for folder_name in ["tools", "model_packs", "assets", "frontend", "reference_styles"]:
         s_folder = source_dir / folder_name
         d_folder = dest_dir / folder_name
         if s_folder.exists() and s_folder.is_dir():
@@ -167,14 +155,17 @@ def perform_installation(
                 shutil.rmtree(d_folder, ignore_errors=True)
             shutil.copytree(s_folder, d_folder)
 
-    # 4. Migrar dados e projetos existentes com segurança
+    # 3. Migrar dados e projetos existentes com segurança
     if migrate_data:
-        update(55, "Migrando e preservando projetos, históricos e mídias...")
+        update(50, "Migrando e preservando projetos, históricos e mídias...")
         data_files = [
             "queue_projects.json",
             "music_history.json",
             "render_performance.json",
             "visual_clean_cache.json",
+            "app_settings.json",
+            "glide_studio.db",
+            "glide_intelligence.sqlite3",
         ]
         for fname in data_files:
             s_file = source_dir / fname
@@ -186,7 +177,6 @@ def perform_installation(
             "project_media",
             "DROPZONE",
             "OUTPUT",
-            "reference_styles",
             "exports",
             "queue_backups",
         ]
@@ -203,22 +193,39 @@ def perform_installation(
                         else:
                             shutil.copy2(item, dest_item)
 
+    # 4. Limpeza de artefatos legados ou obsoletos
+    update(70, "Limpando artefatos antigos e garantindo pasta organizada...")
+    old_files_to_remove = [
+        dest_dir / "Glide Studio (Modo Navegador).bat",
+        dest_dir / "Glide Studio.old.exe",
+    ]
+    for old_f in old_files_to_remove:
+        if old_f.exists():
+            old_f.unlink(missing_ok=True)
+
+    old_wv = dest_dir / "webview_profile"
+    if old_wv.exists():
+        shutil.rmtree(old_wv, ignore_errors=True)
+
     # 5. Criar script de desinstalação
-    update(75, "Gerando script de desinstalação...")
+    update(80, "Gerando script de desinstalação oficial...")
     create_uninstall_script(dest_dir)
 
     # 6. Registrar no Windows
-    update(82, "Registrando aplicação no Windows...")
+    update(85, "Registrando aplicação no Painel do Windows...")
     icon_path = dest_dir / "assets" / "glide_studio.ico"
     register_windows_uninstall(dest_dir, icon_path)
 
-    # 7. Criar Atalhos
-    update(90, "Criando atalhos na Área de Trabalho e Menu Iniciar...")
+    # 7. Criar Atalho Único na Área de Trabalho e Menu Iniciar
+    update(92, "Criando atalho na Área de Trabalho e Menu Iniciar...")
     desktop_dir = Path(os.environ.get("USERPROFILE", Path.home())) / "Desktop"
     start_menu_dir = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming")) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Glide Studio"
 
+    # Remove qualquer atalho antigo do Modo Navegador
+    (desktop_dir / "Glide Studio (Modo Navegador).lnk").unlink(missing_ok=True)
+    (start_menu_dir / "Glide Studio (Modo Navegador).lnk").unlink(missing_ok=True)
+
     installed_exe = dest_dir / "Glide Studio.exe"
-    installed_browser_bat = dest_dir / "Glide Studio (Modo Navegador).bat"
 
     if desktop_shortcut:
         create_windows_shortcut(
@@ -228,14 +235,6 @@ def perform_installation(
             description="Glide Studio - Editor e Renderizador de Vídeo Local",
             work_dir=dest_dir,
         )
-    if browser_shortcut:
-        create_windows_shortcut(
-            target_path=installed_browser_bat,
-            shortcut_path=desktop_dir / "Glide Studio (Modo Navegador).lnk",
-            icon_path=icon_path,
-            description="Glide Studio (Modo Navegador - Sem WebView2)",
-            work_dir=dest_dir,
-        )
 
     if start_menu:
         create_windows_shortcut(
@@ -243,13 +242,6 @@ def perform_installation(
             shortcut_path=start_menu_dir / "Glide Studio.lnk",
             icon_path=icon_path,
             description="Glide Studio - Editor e Renderizador de Vídeo Local",
-            work_dir=dest_dir,
-        )
-        create_windows_shortcut(
-            target_path=installed_browser_bat,
-            shortcut_path=start_menu_dir / "Glide Studio (Modo Navegador).lnk",
-            icon_path=icon_path,
-            description="Glide Studio (Modo Navegador - Sem WebView2)",
             work_dir=dest_dir,
         )
 
@@ -264,12 +256,11 @@ def run_gui():
     source_dir = get_source_dir()
 
     root = tk.Tk()
-    root.title(f"{APP_NAME} - Instalador Local do Windows")
-    root.geometry("620x520")
+    root.title(f"{APP_NAME} - Instalador Oficial")
+    root.geometry("620x480")
     root.resizable(False, False)
     root.configure(bg="#0d1117")
 
-    # Ícone da janela se disponível
     ico = source_dir / "assets" / "glide_studio.ico"
     if ico.exists():
         try:
@@ -284,7 +275,7 @@ def run_gui():
 
     title_lbl = tk.Label(header_frame, text=f"Instalador do {APP_NAME} v{APP_VERSION}", font=("Segoe UI", 16, "bold"), fg="#58a6ff", bg="#161b22")
     title_lbl.pack(anchor="w", padx=24, pady=(16, 2))
-    sub_lbl = tk.Label(header_frame, text="Instalação nativa local sem dependência de pastas soltas", font=("Segoe UI", 9), fg="#8b949e", bg="#161b22")
+    sub_lbl = tk.Label(header_frame, text="Versão nativa local sem dependência de WebView2", font=("Segoe UI", 9), fg="#8b949e", bg="#161b22")
     sub_lbl.pack(anchor="w", padx=24)
 
     # Conteúdo Principal
@@ -315,21 +306,23 @@ def run_gui():
     opts_lbl.pack(anchor="w", pady=(0, 6))
 
     chk_desktop_var = tk.BooleanVar(value=True)
-    chk_browser_var = tk.BooleanVar(value=True)
     chk_start_var = tk.BooleanVar(value=True)
     chk_migrate_var = tk.BooleanVar(value=True)
 
     chk_style = {"bg": "#0d1117", "fg": "#f0f6fc", "activebackground": "#0d1117", "activeforeground": "#58a6ff", "selectcolor": "#21262d", "font": ("Segoe UI", 9)}
 
     tk.Checkbutton(content_frame, text="Criar atalho na Área de Trabalho (Glide Studio)", variable=chk_desktop_var, **chk_style).pack(anchor="w", pady=2)
-    tk.Checkbutton(content_frame, text="Criar atalho para Modo Navegador Dedicado (Chrome/Edge sem WebView2)", variable=chk_browser_var, **chk_style).pack(anchor="w", pady=2)
     tk.Checkbutton(content_frame, text="Adicionar ao Menu Iniciar do Windows", variable=chk_start_var, **chk_style).pack(anchor="w", pady=2)
-    tk.Checkbutton(content_frame, text="Migrar todos os projetos, históricos e configurações existentes", variable=chk_migrate_var, **chk_style).pack(anchor="w", pady=2)
+    tk.Checkbutton(content_frame, text="Migrar e preservar todos os projetos, históricos e mídias existentes", variable=chk_migrate_var, **chk_style).pack(anchor="w", pady=2)
+
+    # Info de arquitetura
+    info_box = tk.Label(content_frame, text="Execução Nativa: O aplicativo roda em janela nativa dedicada (Zero WebView2, sem vazamento de memória).", font=("Segoe UI", 8), fg="#7ee787", bg="#0d1117", wraplength=570, justify="left")
+    info_box.pack(anchor="w", pady=(8, 0))
 
     # Barra de Progresso
     status_var = tk.StringVar(value="Pronto para iniciar a instalação.")
     status_lbl = tk.Label(content_frame, textvariable=status_var, font=("Segoe UI", 9), fg="#8b949e", bg="#0d1117")
-    status_lbl.pack(anchor="w", pady=(18, 4))
+    status_lbl.pack(anchor="w", pady=(14, 4))
 
     progress = ttk.Progressbar(content_frame, orient="horizontal", mode="determinate")
     progress.pack(fill="x", pady=(0, 16))
@@ -352,7 +345,6 @@ def run_gui():
                 source_dir=source_dir,
                 dest_dir=dest_path,
                 desktop_shortcut=chk_desktop_var.get(),
-                browser_shortcut=chk_browser_var.get(),
                 start_menu=chk_start_var.get(),
                 migrate_data=chk_migrate_var.get(),
                 progress_callback=callback,
@@ -362,11 +354,8 @@ def run_gui():
                 f"O {APP_NAME} foi instalado com sucesso em:\n{dest_path}\n\nDeseja abrir o {APP_NAME} agora?"
             )
             if ans:
-                installed_bat = dest_path / "Glide Studio (Modo Navegador).bat"
                 installed_exe = dest_path / "Glide Studio.exe"
-                if chk_browser_var.get() and installed_bat.exists():
-                    subprocess.Popen(["cmd.exe", "/c", str(installed_bat)], cwd=str(dest_path))
-                elif installed_exe.exists():
+                if installed_exe.exists():
                     subprocess.Popen([str(installed_exe)], cwd=str(dest_path))
             root.destroy()
         except Exception as exc:

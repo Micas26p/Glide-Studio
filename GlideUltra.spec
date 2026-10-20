@@ -7,6 +7,7 @@ ROOT = Path(SPECPATH)
 datas = [
     (str(ROOT / "frontend"), "frontend"),
     (str(ROOT / "assets"), "assets"),
+    (str(ROOT / "model_packs"), "model_packs"),
 ]
 
 hiddenimports = [
@@ -14,11 +15,6 @@ hiddenimports = [
     "uvicorn.loops.auto",
     "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets.auto",
-    "webview",
-    "webview.platforms.edgechromium",
-    "webview.platforms.winforms",
-    "pythonnet",
-    "clr_loader",
     "cv2",
     "numpy",
     "pypdf",
@@ -36,7 +32,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["scipy", "torch", "torchvision"],
+    excludes=["scipy", "torch", "torchvision", "webview", "clr_loader", "pythonnet", "tkinter.test"],
     noarchive=False,
     optimize=0,
 )

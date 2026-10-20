@@ -47,56 +47,14 @@ _INSTANCE_MUTEX = None
 WINDOW_TITLE = "Glide Studio - App Local"
 
 
-def _apply_low_memory_webview_flags() -> None:
-    """Configure WebView2 (Edge Chromium) to eliminate bloat without starving UI performance.
-
-    Disables background networking, crashpad, autofill, and unused browser features.
-    GPU hardware compositing is kept ENABLED so the GPU accelerates UI rendering smoothly
-    without burning CPU cycles on software rasterization.
-    """
-    flags = " ".join([
-        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication",
-        "--disable-background-networking",
-        "--disable-client-side-phishing-detection",
-        "--disable-default-apps",
-        "--no-pings",
-        "--disable-breakpad",
-        "--disable-component-update",
-        "--disable-domain-reliability",
-        "--disable-sync",
-        "--disable-gpu-rasterization",
-        "--js-flags=--max-old-space-size=512",
-        "--renderer-process-limit=1",
-        "--disable-image-animation-resync",
-    ])
-    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
-    if existing:
-        flags = existing + " " + flags
-    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = flags
-
-
-def _cleanup_webview_caches_on_boot() -> None:
-    """Aggressively clean WebView2 caches before starting the UI.
-
-    The webview_profile directory accumulates hundreds of MB of shader caches,
-    code caches, blob storage, etc. across sessions.  Cleaning these on boot
-    prevents stale caches from inflating RAM usage.
-    """
-    root = default_data_root()
-    profile = root / "webview_profile"
-    if not profile.exists():
-        return
-    for name in WEBVIEW_CACHE_DIR_NAMES:
-        target = profile / name
-        if target.is_dir():
-            shutil.rmtree(target, ignore_errors=True)
-    # Also clean nested EBWebView caches
-    ebwv = profile / "EBWebView"
-    if ebwv.is_dir():
-        for name in WEBVIEW_CACHE_DIR_NAMES:
-            target = ebwv / name
-            if target.is_dir():
-                shutil.rmtree(target, ignore_errors=True)
+def _cleanup_legacy_webview() -> None:
+    """Remove legacy WebView2 artifacts if present to free disk space."""
+    try:
+        legacy = default_data_root() / "webview_profile"
+        if legacy.exists():
+            shutil.rmtree(legacy, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def app_dir() -> Path:
@@ -548,11 +506,23 @@ def browser_candidates() -> list[tuple[str, Path]]:
         Path(os.environ.get("ProgramFiles(x86)", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "Edge" / "Application" / "msedge.exe",
     ]
+    brave_paths = [
+        shutil.which("brave"),
+        shutil.which("brave.exe"),
+        Path(os.environ.get("ProgramFiles", "")) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "BraveSoftware" / "Brave-Browser" / "Application" / "brave.exe",
+    ]
     for item in chrome_paths:
         add("Chrome", item)
     for item in edge_paths:
         add("Edge", item)
+    for item in brave_paths:
+        add("Brave", item)
     return candidates
+
+
+def app_profile_root() -> Path:
+    return data_root() / "app_profile"
 
 
 def launch_browser_app(browser: Path, label: str, url: str, profile_dir: Path) -> subprocess.Popen:
@@ -562,10 +532,14 @@ def launch_browser_app(browser: Path, label: str, url: str, profile_dir: Path) -
         f"--app={url}",
         f"--user-data-dir={profile_dir}",
         "--no-first-run",
+        "--no-default-browser-check",
         "--disable-background-mode",
         "--disable-translate",
         "--disable-component-extensions-with-background-pages",
-        "--disable-features=Translate",
+        "--disable-features=Translate,OptimizationHints,MediaRouter",
+        "--disable-sync",
+        "--app-id=GlideStudio",
+        "--window-size=1440,900",
     ]
     options = hidden_subprocess_kwargs()
     return subprocess.Popen(
@@ -581,294 +555,32 @@ def launch_browser_app(browser: Path, label: str, url: str, profile_dir: Path) -
 
 def run_browser_app(runtime: DesktopRuntime):
     url = f"{runtime.base_url}/?desktop=1&v={APP_VERSION}"
+    profile_dir = app_profile_root()
     last_error: Exception | None = None
-    cleanup_browser_profiles()
+    for label, browser in browser_candidates():
+        try:
+            process = launch_browser_app(browser, label, url, profile_dir)
+            process.wait()
+            return
+        except Exception as exc:
+            last_error = exc
+
     try:
-        for label, browser in browser_candidates():
-            profile_dir = browser_profile_root() / f"{label.lower()}_{runtime.port}"
-            try:
-                process = launch_browser_app(browser, label, url, profile_dir)
-                process.wait()
-                return
-            except Exception as exc:
-                last_error = exc
-            finally:
-                shutil.rmtree(profile_dir, ignore_errors=True)
+        import webbrowser
+        webbrowser.open(url)
+        while True:
+            time.sleep(1.0)
+    except Exception as exc:
         message = (
-            "Nao encontrei Google Chrome nem Microsoft Edge para abrir em modo app.\n\n"
-            "Instale o Chrome ou Edge e abra novamente o Glide Studio."
+            "Nao foi possivel abrir a janela do Glide Studio.\n\n"
+            "Instale o Google Chrome ou Microsoft Edge no computador para usar o aplicativo."
         )
         if last_error:
-            message += f"\n\nDetalhe tecnico: {last_error}"
+            message += f"\n\nDetalhes: {last_error}"
         show_error("Glide Studio", message)
-    finally:
-        cleanup_browser_profiles()
 
 
-class PageCrashRecovery:
-    """Decide quando recarregar a página após o WebView2 matar o processo da UI.
-
-    Com o Windows sem memória o renderer é encerrado e fica o ecrã "This page is
-    having a problem"; o backend (e o render) continua vivo, basta recarregar.
-    Limita as tentativas para não entrar em ciclo se a memória continuar esgotada.
-    """
-
-    # COREWEBVIEW2_PROCESS_FAILED_KIND: 1 = renderer terminou, 2 = renderer sem resposta
-    RECOVERABLE_KINDS = {1, 2}
-
-    def __init__(self, max_reloads: int = 8, window_seconds: float = 600.0):
-        self.max_reloads = max_reloads
-        self.window_seconds = window_seconds
-        self.reloads: list[float] = []
-
-    def next_delay(self, kind: int, now: float | None = None) -> float | None:
-        """Segundos até recarregar, ou None quando não se deve recarregar."""
-        if kind not in self.RECOVERABLE_KINDS:
-            return None
-        now = time.monotonic() if now is None else now
-        self.reloads = [t for t in self.reloads if now - t < self.window_seconds]
-        if len(self.reloads) >= self.max_reloads:
-            return None
-        self.reloads.append(now)
-        # Recuo progressivo: dá tempo ao Windows para libertar memória antes de recarregar
-        return min(30.0, 2.0 * (2 ** (len(self.reloads) - 1)))
-
-
-class UiFreezeWatchdog:
-    """Deteta a UI congelada (JS bloqueado ou página sem pintar) pelo batimento da página."""
-
-    def __init__(self, stale_after: float = 25.0, grace: float = 45.0):
-        self.stale_after = stale_after
-        self.grace = grace
-        self.last_action = time.monotonic()
-
-    def is_frozen(self, now: float, last_beat: float, page_visible: bool, minimized: bool, foreground: bool) -> bool:
-        if minimized or not (page_visible or foreground):
-            return False  # minimizada/tapada: o Chromium pára de pintar de propósito
-        if now - self.last_action < self.grace:
-            return False  # a página ainda está a (re)carregar
-        return now - max(last_beat, self.last_action) > self.stale_after
-
-    def mark_action(self, now: float | None = None) -> None:
-        self.last_action = time.monotonic() if now is None else now
-
-
-def _window_flags(hwnd: int) -> tuple[bool, bool]:
-    """(minimizada, em primeiro plano) via Win32; (False, False) se indisponível."""
-    try:
-        import ctypes
-        user32 = ctypes.windll.user32
-        return bool(user32.IsIconic(hwnd)), user32.GetForegroundWindow() == hwnd
-    except Exception:
-        return False, False
-
-
-ABOVE_NORMAL_PRIORITY_CLASS = 0x00008000
-
-
-def _child_process_ids(parent_pid: int) -> list[int]:
-    """Filhos diretos de um processo (Toolhelp32, sem lançar PowerShell)."""
-    import ctypes
-    from ctypes import wintypes
-
-    class PROCESSENTRY32W(ctypes.Structure):
-        _fields_ = [
-            ("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
-            ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD), ("cntThreads", wintypes.DWORD),
-            ("th32ParentProcessID", wintypes.DWORD), ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD),
-            ("szExeFile", ctypes.c_wchar * 260),
-        ]
-
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
-    snapshot = kernel32.CreateToolhelp32Snapshot(0x00000002, 0)
-    if not snapshot or snapshot == wintypes.HANDLE(-1).value:
-        return []
-    children: list[int] = []
-    try:
-        entry = PROCESSENTRY32W()
-        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
-        ok = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-        while ok:
-            if entry.th32ParentProcessID == parent_pid and entry.szExeFile.lower() == "msedgewebview2.exe":
-                children.append(int(entry.th32ProcessID))
-            ok = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-    finally:
-        kernel32.CloseHandle(snapshot)
-    return children
-
-
-def _boost_webview_priority(browser_pid: int) -> int:
-    """Interface acima do normal: com o PC carregado (render, outros apps), o Windows serve
-    primeiro o ecrã do Glide. Os processos de render ficam como estão, por isso não abranda o render."""
-    if os.name != "nt" or not browser_pid:
-        return 0
-    import ctypes
-
-    kernel32 = ctypes.windll.kernel32
-    boosted = 0
-    for pid in [browser_pid, *_child_process_ids(browser_pid)]:
-        handle = kernel32.OpenProcess(0x0200 | 0x1000, False, int(pid))  # SET_INFORMATION | QUERY_LIMITED
-        if not handle:
-            continue
-        try:
-            if kernel32.GetPriorityClass(handle) != ABOVE_NORMAL_PRIORITY_CLASS:
-                if kernel32.SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS):
-                    boosted += 1
-        finally:
-            kernel32.CloseHandle(handle)
-    return boosted
-
-
-def _kill_webview_renderers(browser_pid: int) -> int:
-    """Termina só os renderers filhos do WebView2 do Glide (dispara ProcessFailed -> recarregar)."""
-    if not browser_pid:
-        return 0
-    script = (
-        f"Get-CimInstance Win32_Process -Filter \"ParentProcessId={int(browser_pid)} AND Name='msedgewebview2.exe'\" | "
-        "Where-Object { $_.CommandLine -like '*--type=renderer*' } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force; $_.ProcessId }"
-    )
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=20, **hidden_subprocess_kwargs(),
-        ).stdout
-        return len([line for line in out.split() if line.strip().isdigit()])
-    except Exception:
-        return 0
-
-
-def attach_page_crash_recovery(window: Any, url: str) -> None:
-    """Liga o evento ProcessFailed do WebView2 e o watchdog de congelamento a um recarregamento automático."""
-    policy = PageCrashRecovery()
-    watchdog = UiFreezeWatchdog()
-    attached = {"done": False, "hwnd": 0, "browser_pid": 0}
-
-    def reload_page():
-        """Navega de novo no thread da UI (o renderer é recriado se tiver morrido)."""
-        core = attached.get("core")
-        try:
-            from System import Func, Type
-            if core is None:
-                window.load_url(url)
-                return
-            window.native.Invoke(Func[Type](lambda: core.Navigate(url) or None))
-        except Exception as exc:
-            print(f"[desktop] falha ao recarregar a UI: {exc}", file=sys.stderr)
-
-    def watch_loop():
-        try:
-            import app as backend
-        except Exception:
-            return
-        last_boost = 0.0
-        while True:
-            time.sleep(5.0)
-            if not attached["hwnd"]:
-                continue
-            if time.monotonic() - last_boost > 30.0:
-                # Renova a cada 30 s: um recarregamento cria um renderer novo.
-                last_boost = time.monotonic()
-                try:
-                    _boost_webview_priority(attached["browser_pid"])
-                except Exception:
-                    pass
-            beat = backend.UI_HEARTBEAT
-            minimized, foreground = _window_flags(attached["hwnd"])
-            now = time.monotonic()
-            if not watchdog.is_frozen(now, float(beat.get("at") or 0.0), bool(beat.get("visible")), minimized, foreground):
-                continue
-            watchdog.mark_action(now)
-            if policy.next_delay(2, now=now) is None:
-                continue  # demasiadas recuperações seguidas: não entrar em ciclo
-            # Um renderer preso não obedece a Navigate/Reload. Terminá-lo faz o WebView2
-            # disparar ProcessFailed, que recarrega a página num processo novo.
-            killed = _kill_webview_renderers(attached["browser_pid"])
-            print(f"[desktop] UI congelada ha {now - float(beat.get('at') or 0.0):.0f}s; renderers terminados={killed}", file=sys.stderr)
-            if not killed:
-                reload_page()
-
-    def on_process_failed(_sender, args):
-        try:
-            kind = int(args.ProcessFailedKind)
-        except Exception:
-            kind = -1
-        delay = policy.next_delay(kind)
-        print(f"[desktop] WebView2 ProcessFailed kind={kind}; recarregar em {delay}s", file=sys.stderr)
-        if delay is None:
-            return
-        watchdog.mark_action()
-        if kind == 2:
-            # Sem resposta: recarregar não chega ao renderer preso; terminá-lo gera kind=1.
-            threading.Thread(target=_kill_webview_renderers, args=(attached["browser_pid"],), daemon=True).start()
-            return
-        threading.Timer(delay, reload_page).start()
-
-    def attach():
-        browser = getattr(getattr(window, "native", None), "browser", None)
-        core = getattr(getattr(browser, "webview", None), "CoreWebView2", None)
-        if core is None or attached["done"]:
-            return
-        core.ProcessFailed += on_process_failed
-        attached["core"] = core
-        attached["hwnd"] = int(window.native.Handle.ToInt64())
-        try:
-            attached["browser_pid"] = int(core.BrowserProcessId)
-        except Exception:
-            pass
-        attached["done"] = True
-        threading.Thread(target=watch_loop, name="glide-ui-watchdog", daemon=True).start()
-
-    def on_loaded():
-        if attached["done"]:
-            return
-        try:
-            from System import Func, Type
-            window.native.Invoke(Func[Type](lambda: attach() or None))
-        except Exception as exc:
-            print(f"[desktop] recuperação da página indisponível: {exc}", file=sys.stderr)
-
-    window.events.loaded += on_loaded
-
-
-def run_native_app(runtime: DesktopRuntime):
-    import webview
-
-    _apply_low_memory_webview_flags()
-    set_windows_app_id()
-    url = f"{runtime.base_url}/?desktop=1&v={APP_VERSION}"
-    window = webview.create_window(
-        WINDOW_TITLE,
-        url,
-        width=1500,
-        height=950,
-        min_size=(1080, 680),
-        background_color="#080b0a",
-        confirm_close=False,
-        text_select=True,
-        zoomable=False,
-    )
-    if window is None:
-        raise RuntimeError("Nao foi possivel criar a janela nativa do Glide Studio.")
-
-    def on_closing():
-        if confirm_close_if_rendering(runtime):
-            return True
-        return False
-
-    def on_before_show():
-        set_native_window_icon(window)
-
-    window.events.closing += on_closing
-    window.events.before_show += on_before_show
-    if os.name == "nt":
-        attach_page_crash_recovery(window, url)
-    webview.start(
-        private_mode=False,
-        storage_path=str(data_root() / "webview_profile"),
-        icon=str(app_icon_path()),
-    )
+run_native_app = run_browser_app
 
 
 def smoke_test(runtime: DesktopRuntime):
@@ -911,7 +623,7 @@ def smoke_test(runtime: DesktopRuntime):
 
 
 def main():
-    _cleanup_webview_caches_on_boot()
+    _cleanup_legacy_webview()
     runtime: DesktopRuntime | None = None
     smoke = smoke_requested()
     write_smoke_trace("main:start")
@@ -929,15 +641,9 @@ def main():
             smoke_test(runtime)
             write_smoke_trace("smoke:complete")
             runtime.stop_and_wait()
-            write_smoke_trace("runtime:stopped")
+            write_smoke_trace("smoke:stopped")
             return
-        try:
-            if "--browser" in sys.argv or os.environ.get("GLIDE_BROWSER_MODE") == "1":
-                run_browser_app(runtime)
-            else:
-                run_native_app(runtime)
-        except Exception:
-            run_browser_app(runtime)
+        run_browser_app(runtime)
     except Exception as exc:
         if runtime:
             runtime.stop_and_wait()
