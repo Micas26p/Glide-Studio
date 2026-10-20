@@ -941,6 +941,19 @@ async function rehydrateProjectMedia(project){
     project.rememberedMediaMissing = Array.isArray(payload.missing) ? payload.missing : [];
     renderProjectQueue();
     if(project.id === state.activeProjectId){
+      state.videos = [...(project.files?.videos || [])];
+      state.audios = [...(project.files?.audios || [])];
+      state.backgroundTracks = [...(project.files?.backgroundTracks || [])];
+      state.subtitles = [...(project.files?.subtitles || [])];
+      state.captions = [...(project.files?.captions || [])];
+      state.scriptGuides = [...(project.files?.scriptGuides || [])];
+      state.registry = new Map();
+      [...state.videos, ...state.audios, ...state.backgroundTracks, ...state.subtitles, ...state.captions, ...state.scriptGuides].forEach(file => state.registry.set(fileKey(file), file));
+      state.durations = new Map(project.maps?.durations || []);
+      state.durationSources = new Map(project.maps?.durationSources || []);
+      state.audioHealth = new Map(project.maps?.audioHealth || []);
+      state.thumbs = new Map(project.maps?.thumbs || []);
+      state.mediaStatus = new Map(project.maps?.mediaStatus || []);
       renderLists({updatePreview: false});
       updateStats();
     }
@@ -1144,13 +1157,23 @@ function captureActiveProject(){
   // Se o "ativo" mudou sem recarregar o formulário, gravar aqui copiava o nome e as mídias
   // de outro canal por cima deste — era assim que canais apareciam renomeados.
   if(state.formProjectId !== project.id) return project;
+  // Salvaguarda: nunca sobrescrever mídias persistidas por arrays vazios caso o estado da tela ainda não esteja populado
+  const hasPersistedVideos = (project.files?.videos || []).some(f => f._persisted);
+  const hasPersistedAudios = (project.files?.audios || []).some(f => f._persisted);
+  const hasPersistedTexts = (project.files?.subtitles || []).some(f => f._persisted);
+  const videos = (!state.videos.length && hasPersistedVideos) ? [...(project.files?.videos || [])] : [...state.videos];
+  const audios = (!state.audios.length && hasPersistedAudios) ? [...(project.files?.audios || [])] : [...state.audios];
+  const backgroundTracks = (!state.backgroundTracks.length && (project.files?.backgroundTracks || []).some(f => f._persisted)) ? [...(project.files?.backgroundTracks || [])] : [...state.backgroundTracks];
+  const subtitles = (!state.subtitles.length && hasPersistedTexts) ? [...(project.files?.subtitles || [])] : [...state.subtitles];
+  const captions = [...state.captions];
+  const scriptGuides = [...state.scriptGuides];
   project.files = {
-    videos: [...state.videos],
-    audios: [...state.audios],
-    backgroundTracks: [...state.backgroundTracks],
-    subtitles: [...state.subtitles],
-    captions: [...state.captions],
-    scriptGuides: [...state.scriptGuides],
+    videos,
+    audios,
+    backgroundTracks,
+    subtitles,
+    captions,
+    scriptGuides,
   };
   project.maps = {
     durations: new Map(state.durations),
@@ -2125,7 +2148,7 @@ async function loadStoredQueueProjects(){
       ? savedActive
       : state.projects[0]?.id || null;
     renderProjectQueue();
-    Promise.all(state.projects.map(project => rehydrateProjectMedia(project))).catch(() => {});
+    await Promise.all(state.projects.map(project => rehydrateProjectMedia(project))).catch(() => {});
     return true;
   }catch(e){
     return false;
@@ -7600,6 +7623,7 @@ async function applyAutomatorDistribution(options = {}){
       };
     });
     progress(2, 'Validando projetos e associações...', true);
+    await Promise.all(rowsToApply.map(row => syncProjectSnapshot(row.project, {immediate: true})));
     const createResponse = await fetchWithTimeout('/api/queue/automator/sessions', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
@@ -7816,8 +7840,9 @@ async function applyAutomatorDistribution(options = {}){
       }
     }
     await loadStoredQueueProjects();
-    if(previousActive && state.projects.some(project => project.id === previousActive)) state.activeProjectId = previousActive;
-    loadProject(state.activeProjectId || state.projects[0]?.id, {capture: false, force: true});
+    const targetProjectId = rowsToApply[0]?.project?.id || state.projects[0]?.id;
+    if(targetProjectId) state.activeProjectId = targetProjectId;
+    loadProject(state.activeProjectId, {capture: false, force: true});
     renderProjectQueue();
     updateStats();
     progress(100, `${rowsToApply.length} projeto(s) distribuído(s) e verificado(s).`, true);
@@ -7848,7 +7873,7 @@ finally{
     state.automatorApplying = false;
     state.automatorAbortController = null;
     if(automatorConfirmBtn){
-      automatorConfirmBtn.textContent = 'Confirmar & Renderizar';
+      automatorConfirmBtn.textContent = 'Confirmar';
       automatorConfirmBtn.disabled = Boolean(automatorPlan().warnings.length);
     }
     if(automatorConfirmHealthyBtn){
@@ -9833,12 +9858,8 @@ if(automatorConfirmBtn) automatorConfirmBtn.addEventListener('click', async () =
   try{
     const appliedIds = await applyAutomatorDistribution();
     if(!appliedIds) return;
-    showToast('AUTO Aplicado', `${appliedIds.length} projeto(s) prontos. A iniciar renderização...`, 'success');
-    renderQueue({projectIds: appliedIds, fromAutomator: true}).catch(err => {
-      const msg = err.message || err;
-      if(dockSummary) dockSummary.textContent = `Erro ao iniciar render: ${msg}`;
-      showToast('Erro ao iniciar render', msg, 'error');
-    });
+    showToast('AUTO Distribuído', `${appliedIds.length} projeto(s) configurados na fila com sucesso. Revise e inicie o render quando desejar.`, 'success');
+    if(dockSummary) dockSummary.textContent = `AUTO aplicado: ${appliedIds.length} projeto(s) prontos na fila.`;
   }catch(error){
     const msg = error.message || error;
     if(dockSummary) dockSummary.textContent = `AUTO falhou: ${msg}`;

@@ -17766,6 +17766,18 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         raise HTTPException(status_code=400, detail="Projetos AUTO inválidos ou repetidos.")
     with QUEUE_LOCK:
         projects = {str(item.get("id")): item for item in QUEUE_PROJECTS}
+        created_any = False
+        for row in rows:
+            pid = str(row.get("projectId") or "").strip()
+            pname = str(row.get("projectName") or f"Projeto {len(QUEUE_PROJECTS) + 1}").strip()
+            if pid and pid not in projects:
+                new_proj = _default_queue_project(pname)
+                new_proj["id"] = safe_folder_component(pid, uuid.uuid4().hex[:10])[:40]
+                QUEUE_PROJECTS.append(new_proj)
+                projects[pid] = new_proj
+                created_any = True
+        if created_any:
+            _save_queue_projects(QUEUE_PROJECTS)
         missing = [project_id for project_id in project_ids if project_id not in projects]
         occupied = [
             projects[project_id].get("name") or project_id
@@ -19355,14 +19367,29 @@ def queue_snapshot_project(project_id: str, payload: dict[str, Any] | None = Bod
                 project[key] = data[key]
         if isinstance(data.get("media"), dict):
             media = data["media"]
-            project["media"] = {
-                "videos": list(media.get("videos") or []),
-                "audios": list(media.get("audios") or []),
-                "background_music": list(media.get("background_music") or []),
-                "texts": list(media.get("texts") or media.get("subtitles") or []),
-                "captions": list(media.get("captions") or []),
-                "script_guides": list(media.get("script_guides") or []),
-            }
+            incoming_videos = list(media.get("videos") or [])
+            incoming_audios = list(media.get("audios") or [])
+            incoming_texts = list(media.get("texts") or media.get("subtitles") or [])
+            incoming_bg = list(media.get("background_music") or [])
+            incoming_captions = list(media.get("captions") or [])
+            incoming_guides = list(media.get("script_guides") or [])
+            existing_media = project.get("media") if isinstance(project.get("media"), dict) else {}
+            has_existing = bool(
+                existing_media.get("videos")
+                or existing_media.get("audios")
+                or existing_media.get("texts")
+                or _load_project_media_index(project_id)
+            )
+            has_incoming = bool(incoming_videos or incoming_audios or incoming_texts)
+            if has_incoming or not has_existing or data.get("allowEmptyMedia"):
+                project["media"] = {
+                    "videos": incoming_videos,
+                    "audios": incoming_audios,
+                    "background_music": incoming_bg,
+                    "texts": incoming_texts,
+                    "captions": incoming_captions,
+                    "script_guides": incoming_guides,
+                }
         if isinstance(data.get("options"), dict):
             project["options"] = data["options"]
         if isinstance(project.get("referenceStyleVideo"), dict):
