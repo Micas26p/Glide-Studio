@@ -538,18 +538,14 @@ def launch_browser_app(browser: Path, label: str, url: str, profile_dir: Path) -
         "--disable-component-extensions-with-background-pages",
         "--disable-features=Translate,OptimizationHints,MediaRouter",
         "--disable-sync",
+        "--disable-save-password-bubble",
         "--app-id=GlideStudio",
         "--window-size=1440,900",
     ]
-    options = hidden_subprocess_kwargs()
     return subprocess.Popen(
         args,
         cwd=str(app_dir()),
         close_fds=True,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        **options,
     )
 
 
