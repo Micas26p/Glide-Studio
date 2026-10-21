@@ -12,6 +12,7 @@ scratch/
 
 # Large binary files & temporary database / caches
 *.exe
+*.zip
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

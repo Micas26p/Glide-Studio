@@ -1,0 +1,19 @@
+===============================================================================
+                       GLIDE STUDIO - INSTALADOR OFICIAL
+===============================================================================
+
+Este pacote contem a versao oficial do Glide Studio 100% pronta para uso local.
+Nao e necessario instalar Python, nem bibliotecas, nem configurar variaveis de ambiente.
+
+COMO INSTALAR NESTE COMPUTADOR:
+1. Extraia todo o conteudo deste arquivo ZIP para uma pasta no seu computador.
+2. De um clique duplo no arquivo:
+      INSTALAR_GLIDE_STUDIO.bat
+3. O instalador ira configurar automaticamente o Glide Studio no seu Windows e
+   colocar o icone oficial na sua Area de Trabalho e no Menu Iniciar.
+4. Abra o Glide Studio pelo atalho da Area de Trabalho e aproveite!
+
+REQUISITOS RECOMENDADOS:
+- Windows 10 ou Windows 11 (64 bits)
+- 8 GB ou mais de memoria RAM
+- Placa de video NVIDIA (RTX / GTX) recomendada para codificacao ultra-rapida por hardware
