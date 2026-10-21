@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 ROOT = Path(SPECPATH)
 
@@ -9,6 +10,26 @@ datas = [
     (str(ROOT / "assets"), "assets"),
     (str(ROOT / "model_packs"), "model_packs"),
 ]
+
+# Incluir todos os ficheiros de suporte e DLLs nativas do pywebview
+datas += collect_data_files("webview")
+binaries = collect_dynamic_libs("webview")
+
+# Adicionar DLLs críticas do WebView2 e WebBrowserInterop diretamente na raiz (.) do executável
+# para que o runtime do pywebview as localize instantaneamente via sys._MEIPASS
+try:
+    import webview
+    lib_dir = Path(webview.__file__).parent / "lib"
+    if lib_dir.exists():
+        for dll in lib_dir.glob("*.dll"):
+            binaries.append((str(dll), "."))
+            datas.append((str(dll), "."))
+        x64_loader = lib_dir / "runtimes" / "win-x64" / "native" / "WebView2Loader.dll"
+        if x64_loader.exists():
+            binaries.append((str(x64_loader), "."))
+            datas.append((str(x64_loader), "."))
+except Exception:
+    pass
 
 hiddenimports = [
     "uvicorn.lifespan.on",
@@ -31,7 +52,7 @@ hiddenimports = [
 a = Analysis(
     ["desktop_app.py"],
     pathex=[str(ROOT)],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],

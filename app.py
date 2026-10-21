@@ -6343,26 +6343,25 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
 
     # Orçamento dinâmico de alta performance com auto-calibração térmica de hardware
+    gpu_ram_gb = max([float(g.get("adapter_ram_gb") or 0.0) for g in hw.get("gpus", [])] or [0.0])
+    is_vram_constrained = is_laptop or (gpu_ram_gb > 0 and gpu_ram_gb <= 6.0)
+
     if priority == "max":
-        if is_laptop:
-            if hardware_active and logical_cpus >= 12:
-                workers = 4
-                cpu_thread_budget = max(4, min(12, int(logical_cpus * 0.70)))
-            elif hardware_active and logical_cpus >= 8:
-                workers = 3
+        if is_vram_constrained:
+            # Em GPUs móveis (RTX 3050 Laptop 4GB), limitar a 2 workers NVENC elimina
+            # estouro de VRAM e o fatal bugcheck 0x10E no driver DirectX/NVIDIA
+            if hardware_active and logical_cpus >= 8:
+                workers = 2
                 cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.65)))
             else:
                 workers = 2
                 cpu_thread_budget = max(4, min(8, int(logical_cpus * 0.55)))
-        elif hardware_active and logical_cpus >= 16 and ram_gb >= 16:
-            workers = 4
+        elif hardware_active and logical_cpus >= 16 and ram_gb >= 32:
+            workers = 3
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.75)))
-        elif hardware_active and logical_cpus >= 12 and ram_gb >= 12:
-            workers = 3
+        elif hardware_active and logical_cpus >= 12 and ram_gb >= 16:
+            workers = 2
             cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.70)))
-        elif hardware_active and logical_cpus >= 8:
-            workers = 3
-            cpu_thread_budget = max(4, min(logical_cpus - 1, int(logical_cpus * 0.65)))
         else:
             workers = 2
             cpu_thread_budget = max(3, min(logical_cpus - 1, int(logical_cpus * 0.60)))
@@ -6807,8 +6806,11 @@ def _compute_hardware_profile() -> dict[str, Any]:
         return None
 
     usable_cpu_threads = max(1, int(cpu_count * (0.70 if perf == "high" else 0.60 if perf == "medium" else 0.50)))
-    balanced_segment_workers = 2 if (has_any_hw and cpu_count >= 8 and ram_gb >= 10) else 1
-    turbo_segment_workers = 3 if (has_nvenc and cpu_count >= 12 and ram_gb >= 16) else 2 if (has_any_hw and cpu_count >= 8) else 1
+    is_lap = any(any(k in str(g.get("name", "")).lower() for k in ("laptop", "mobile", "max-q")) for g in gpus) or any(k in str(preferred_gpu).lower() for k in ("laptop", "mobile", "max-q"))
+    gpu_ram = max([float(g.get("adapter_ram_gb") or 0.0) for g in gpus] or [0.0])
+    is_vram_limit = is_lap or (gpu_ram > 0 and gpu_ram <= 6.0)
+    balanced_segment_workers = 2 if (has_any_hw and cpu_count >= 8 and ram_gb >= 10 and not is_vram_limit) else 1
+    turbo_segment_workers = 2 if (has_nvenc and cpu_count >= 8 and ram_gb >= 12) else 1
     turbo_cpu_threads = max(2, min(cpu_count, int(cpu_count * 0.88)))
     balanced_filter_threads = max(1, min(4, usable_cpu_threads // max(1, balanced_segment_workers)))
     turbo_filter_threads = max(2, min(8, turbo_cpu_threads // max(1, turbo_segment_workers)))
@@ -6926,14 +6928,20 @@ def gpu_free_vram_mb() -> float | None:
 
 
 class _NvencGate:
-    """Limita sessões NVENC simultâneas à memória livre da GPU.
+    """Limita sessões NVENC simultâneas de forma segura e determinística.
 
-    Cada sessão (descodificação + filtros + NVENC) chega a 400-670 MiB nesta placa de 4 GB.
-    Com outra app a ocupar a GPU (ex.: 2,1 GB do Auralis) e 3 blocos em paralelo, a memória
-    esgotava e o driver caía (BSOD 0x116 VIDEO_TDR_FAILURE, "recursos insuficientes").
-    Uma sessão corre sempre; as seguintes só com folga real."""
+    Na NVIDIA RTX 3050 Laptop (4 GB VRAM) ou placas mobile/consumidor, o chip NVENC é físico
+    e único. Abrir mais de 2 sessões em paralelo ou tentar alocar superfícies DirectX quando
+    a VRAM está sob pressão causa falha fatal no gerenciador de memória de vídeo do Windows
+    (BugCheck 0x10E VIDMM_FATAL_ERROR).
+    Esta porta garante:
+      1. Nunca exceder MAX_ACTIVE_SESSIONS (2 concorrentes no máximo em GPUs móveis/4GB).
+      2. Exigir pelo menos 1200 MiB livres antes de permitir uma 2ª sessão concorrente.
+      3. Se a telemetria da GPU não responder, serializar para segurança máxima.
+    """
 
-    MIN_FREE_FOR_EXTRA_MB = 450.0
+    MIN_FREE_FOR_EXTRA_MB = 1200.0
+    MAX_ACTIVE_SESSIONS = 2
 
     def __init__(self) -> None:
         self._cond = threading.Condition()
@@ -6949,13 +6957,17 @@ class _NvencGate:
             while True:
                 if self._active == 0:
                     break
+                if self._active >= self.MAX_ACTIVE_SESSIONS:
+                    self._cond.wait(timeout=0.5)
+                    continue
                 free = gpu_free_vram_mb()
-                if free is None or free >= self.MIN_FREE_FOR_EXTRA_MB:
+                if free is not None and free >= self.MIN_FREE_FOR_EXTRA_MB:
                     break
                 if job is not None and job.cancel_requested:
                     raise RenderCancelled("Render cancelado pelo usuario.")
                 if not waited and job is not None:
-                    _append_log(job, f"GPU com pouca memória livre ({int(free)} MiB): a aguardar antes de abrir outra sessão NVENC.")
+                    free_str = f"{int(free)} MiB" if free is not None else "aguardando liberação"
+                    _append_log(job, f"GPU com memória sob reserva ({free_str}): aguardando liberação antes de codificar próximo clipe NVENC.")
                 waited = True
                 self._cond.wait(timeout=0.5)
             self._active += 1
@@ -15793,7 +15805,12 @@ def compose_visual_chunks_parallel(
         for g in hw.get("gpus", [])
     ) or any(k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q"))
     hardware_active = bool(best_hardware_encoder("h264"))
-    max_workers = min(4, len(chunks)) if (hardware_active and logical_cpus >= 12) else (min(3, len(chunks)) if is_laptop else min(4, len(chunks)))
+    gpu_ram_gb = max([float(g.get("adapter_ram_gb") or 0.0) for g in hw.get("gpus", [])] or [0.0])
+    is_vram_constrained = is_laptop or (gpu_ram_gb > 0 and gpu_ram_gb <= 6.0)
+    if hardware_active:
+        max_workers = min(2, len(chunks)) if is_vram_constrained else min(3, len(chunks))
+    else:
+        max_workers = min(3, len(chunks)) if (logical_cpus >= 12 and not is_laptop) else min(2, len(chunks))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
 
     comp_base = 65.0

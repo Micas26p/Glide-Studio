@@ -278,6 +278,13 @@ def hidden_subprocess_kwargs() -> dict[str, Any]:
 
 
 def app_icon_path() -> Path:
+    if hasattr(sys, "_MEIPASS"):
+        bundled = Path(sys._MEIPASS) / "assets" / "glide_studio.ico"
+        if bundled.exists():
+            return bundled
+    local = app_dir() / "assets" / "glide_studio.ico"
+    if local.exists():
+        return local
     return app_dir() / "assets" / "glide_studio.ico"
 
 
@@ -588,7 +595,7 @@ def run_browser_app(runtime: DesktopRuntime):
 
 def _apply_low_memory_webview_flags() -> None:
     flags = " ".join([
-        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication",
+        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication,CalculateNativeWinOcclusion",
         "--disable-background-networking",
         "--disable-client-side-phishing-detection",
         "--disable-default-apps",
@@ -599,7 +606,13 @@ def _apply_low_memory_webview_flags() -> None:
         "--disable-sync",
         "--disable-save-password-bubble",
         "--disable-prompt-on-repost",
+        "--disable-gpu",
+        "--disable-gpu-compositing",
+        "--disable-d3d11",
         "--disable-gpu-rasterization",
+        "--disable-software-rasterizer",
+        "--use-angle=swiftshader",
+        "--in-process-gpu",
         "--js-flags=--max-old-space-size=512",
         "--renderer-process-limit=1",
         "--disable-image-animation-resync",
@@ -712,8 +725,15 @@ def main():
         try:
             run_native_app(runtime)
         except Exception as exc:
-            print(f"[desktop] Falha ao iniciar janela nativa ({exc}), tentando modo browser...", file=sys.stderr)
-            run_browser_app(runtime)
+            import traceback
+            err_msg = traceback.format_exc()
+            try:
+                (data_root() / "desktop_error.log").write_text(err_msg, encoding="utf-8")
+            except Exception:
+                pass
+            print(f"[desktop] Falha ao iniciar janela nativa: {exc}", file=sys.stderr)
+            show_error("Glide Studio - Erro", f"Falha ao iniciar a janela nativa do Glide Studio:\n\n{exc}\n\nConsulte o arquivo desktop_error.log para detalhes.")
+            raise
     except Exception as exc:
         if runtime:
             runtime.stop_and_wait()

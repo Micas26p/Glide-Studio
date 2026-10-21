@@ -135,12 +135,12 @@ def perform_installation(
     update(5, "Criando diretório de instalação...")
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Localizar o executável compilado
-    exe_source = source_dir / "dist" / "Glide Studio.exe"
-    if not exe_source.exists():
-        exe_source = source_dir / "Glide Studio.exe"
-    if not exe_source.exists():
-        raise FileNotFoundError(f"Não foi possível encontrar Glide Studio.exe em {source_dir / 'dist'} nem em {source_dir}")
+    # 1. Localizar o executável compilado mais recente
+    candidates = [source_dir / "Glide Studio.exe", source_dir / "dist" / "Glide Studio.exe"]
+    existing_candidates = [cand for cand in candidates if cand.exists()]
+    if not existing_candidates:
+        raise FileNotFoundError(f"Não foi possível encontrar Glide Studio.exe em {source_dir} nem em {source_dir / 'dist'}")
+    exe_source = max(existing_candidates, key=lambda cand: cand.stat().st_mtime)
 
     update(15, "Instalando aplicativo principal (Glide Studio.exe)...")
     shutil.copy2(exe_source, dest_dir / "Glide Studio.exe")
