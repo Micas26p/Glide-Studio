@@ -29,7 +29,7 @@ def get_source_dir() -> Path:
 def create_windows_shortcut(target_path: Path, shortcut_path: Path, icon_path: Path | None = None, args: str = "", work_dir: Path | None = None, description: str = "") -> bool:
     shortcut_path.parent.mkdir(parents=True, exist_ok=True)
     work_dir_str = str(work_dir or target_path.parent)
-    icon_str = f"$s.IconLocation = '{icon_path}, 0';" if icon_path and icon_path.exists() else ""
+    icon_str = f"$s.IconLocation = '{icon_path},0';" if icon_path and icon_path.exists() else f"$s.IconLocation = '{target_path},0';"
     args_str = f"$s.Arguments = '{args}';" if args else ""
     desc_str = f"$s.Description = '{description}';" if description else ""
 
@@ -244,6 +244,19 @@ def perform_installation(
             description="Glide Studio - Editor e Renderizador de Vídeo Local",
             work_dir=dest_dir,
         )
+
+    try:
+        ps_notify = '''
+        $code = @"
+        [System.Runtime.InteropServices.DllImport("shell32.dll")]
+        public static extern void SHChangeNotify(int wEventId, int uFlags, IntPtr dwItem1, IntPtr dwItem2);
+"@
+        $type = Add-Type -MemberDefinition $code -Name ShellNotify -Namespace Win32 -PassThru -ErrorAction SilentlyContinue
+        if ($type) { $type::SHChangeNotify(0x08000000, 0, [IntPtr]::Zero, [IntPtr]::Zero) }
+        '''
+        subprocess.run(["powershell", "-NoProfile", "-Command", ps_notify], capture_output=True, text=True)
+    except Exception:
+        pass
 
     update(100, "Instalação concluída com sucesso!")
     return True

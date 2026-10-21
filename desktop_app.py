@@ -299,8 +299,18 @@ def set_native_window_icon(window: Any):
     if not icon.exists():
         return
     try:
-        import ctypes
+        import clr
+        clr.AddReference('System.Drawing')
+        from System.Drawing import Icon
+        native = getattr(window, "native", None)
+        if native is not None:
+            native.Icon = Icon(str(icon))
+            return
+    except Exception:
+        pass
 
+    try:
+        import ctypes
         native = getattr(window, "native", None)
         handle = getattr(native, "Handle", None)
         if handle is None:
@@ -576,7 +586,67 @@ def run_browser_app(runtime: DesktopRuntime):
         show_error("Glide Studio", message)
 
 
-run_native_app = run_browser_app
+def _apply_low_memory_webview_flags() -> None:
+    flags = " ".join([
+        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication",
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-default-apps",
+        "--no-pings",
+        "--disable-breakpad",
+        "--disable-component-update",
+        "--disable-domain-reliability",
+        "--disable-sync",
+        "--disable-save-password-bubble",
+        "--disable-prompt-on-repost",
+        "--disable-gpu-rasterization",
+        "--js-flags=--max-old-space-size=512",
+        "--renderer-process-limit=1",
+        "--disable-image-animation-resync",
+    ])
+    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    if existing:
+        flags = existing + " " + flags
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = flags
+
+
+def run_native_app(runtime: DesktopRuntime):
+    import webview
+
+    set_windows_app_id()
+    _apply_low_memory_webview_flags()
+
+    url = f"{runtime.base_url}/?desktop=1&v={APP_VERSION}"
+    window = webview.create_window(
+        WINDOW_TITLE,
+        url,
+        width=1500,
+        height=950,
+        min_size=(1080, 680),
+        background_color="#080b0a",
+        confirm_close=False,
+        text_select=True,
+        zoomable=False,
+    )
+    if window is None:
+        raise RuntimeError("Nao foi possivel criar a janela nativa do Glide Studio.")
+
+    def on_before_show():
+        set_native_window_icon(window)
+
+    def on_closing():
+        if confirm_close_if_rendering(runtime):
+            return True
+        return False
+
+    window.events.before_show += on_before_show
+    window.events.closing += on_closing
+
+    webview.start(
+        private_mode=False,
+        storage_path=str(data_root() / "app_profile"),
+        icon=str(app_icon_path()),
+    )
 
 
 def smoke_test(runtime: DesktopRuntime):
@@ -639,7 +709,11 @@ def main():
             runtime.stop_and_wait()
             write_smoke_trace("smoke:stopped")
             return
-        run_browser_app(runtime)
+        try:
+            run_native_app(runtime)
+        except Exception as exc:
+            print(f"[desktop] Falha ao iniciar janela nativa ({exc}), tentando modo browser...", file=sys.stderr)
+            run_browser_app(runtime)
     except Exception as exc:
         if runtime:
             runtime.stop_and_wait()
