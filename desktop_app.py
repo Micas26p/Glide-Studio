@@ -606,16 +606,9 @@ def _apply_low_memory_webview_flags() -> None:
         "--disable-sync",
         "--disable-save-password-bubble",
         "--disable-prompt-on-repost",
-        "--disable-gpu",
-        "--disable-gpu-compositing",
-        "--disable-d3d11",
-        "--disable-gpu-rasterization",
-        "--disable-software-rasterizer",
-        "--use-angle=swiftshader",
-        "--in-process-gpu",
-        "--js-flags=--max-old-space-size=512",
-        "--renderer-process-limit=1",
-        "--disable-image-animation-resync",
+        "--enable-gpu-rasterization",
+        "--enable-zero-copy",
+        "--ignore-gpu-blocklist",
     ])
     existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
     if existing:
