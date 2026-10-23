@@ -13199,7 +13199,7 @@ def make_background_music(
             "-vn", "-t", f"{target:.4f}",
             "-af", af,
             "-ac", "2", "-ar", "48000",
-            str(out),
+            str(Path(out).resolve()),
         ]
         try:
             run_cmd(job, cmd, cwd=work, quiet_success=True)
@@ -15066,7 +15066,7 @@ def prepare_cta_asset(job: Job, key: str) -> dict[str, Any]:
             "-i", str(source),
             "-vf", vf,
             "-an", "-c:v", "qtrle", "-pix_fmt", "argb",
-            str(out),
+            str(Path(out).resolve()),
         ]
         run_cmd(job, cmd, cwd=None, quiet_success=True)
     duration = safe_probe_duration(out) or safe_probe_duration(source) or cta_default_duration(key)
@@ -20909,7 +20909,7 @@ def render_image_segment_subpixel(
         "-an", "-r", "30",
         *encoder_args,
         "-pix_fmt", "yuv420p",
-        str(out),
+        str(Path(out).resolve()),
     ]
     if job.cancel_requested:
         raise RenderCancelled("Render cancelado pelo usuario.")
@@ -22517,7 +22517,7 @@ def make_segments_smart(
                 *(["-frames:v", str(plan.frame_count)] if plan.frame_count > 0 else []),
                 *encoder_args,
                 "-pix_fmt", "yuv420p",
-                str(out),
+                str(Path(out).resolve()),
             ]
         else:
             src_w, src_h = probe_media_dimensions(plan.source)
@@ -22578,7 +22578,7 @@ def make_segments_smart(
                 "-an", "-r", "30", *frame_args,
                 *encoder_args,
                 "-pix_fmt", "yuv420p",
-                str(out),
+                str(Path(out).resolve()),
             ]
         try:
             if cmd:
