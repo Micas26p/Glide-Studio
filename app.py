@@ -6940,7 +6940,7 @@ class _NvencGate:
       3. Se a telemetria da GPU não responder, serializar para segurança máxima.
     """
 
-    MIN_FREE_FOR_EXTRA_MB = 1200.0
+    MIN_FREE_FOR_EXTRA_MB = 750.0
     MAX_ACTIVE_SESSIONS = 2
 
     def __init__(self) -> None:
@@ -20907,6 +20907,8 @@ def render_image_segment_subpixel(
     out_y = frame[:w * h].reshape(h, w)
     out_u = frame[w * h:w * h * 5 // 4].reshape(h // 2, w // 2)
     out_v = frame[w * h * 5 // 4:].reshape(h // 2, w // 2)
+    m_luma = np.zeros((2, 3), dtype=np.float64)
+    m_chroma = np.zeros((2, 3), dtype=np.float64)
     luma_flags = cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP
     chroma_flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
 
@@ -20927,6 +20929,7 @@ def render_image_segment_subpixel(
         proc = _popen_hidden(
             cmd, cwd=cwd, priority=render_priority(job),
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_handle,
+            bufsize=4 * 1024 * 1024,
         )
         _register_process(job, proc)
         try:
@@ -20939,8 +20942,16 @@ def render_image_segment_subpixel(
                 x, y = (bw - win_w) * fx, (bh - win_h) * fy
                 sx, sy = win_w / w, win_h / h
                 # Mapeamento centro-de-pixel: destino (u,v) -> origem (x + sx*(u+.5) - .5, ...)
-                m_luma = np.array([[sx, 0.0, x + 0.5 * sx - 0.5], [0.0, sy, y + 0.5 * sy - 0.5]])
-                m_chroma = np.array([[sx, 0.0, x / 2.0 + 0.5 * sx - 0.5], [0.0, sy, y / 2.0 + 0.5 * sy - 0.5]])
+                m_luma[0, 0] = sx
+                m_luma[0, 2] = x + 0.5 * sx - 0.5
+                m_luma[1, 1] = sy
+                m_luma[1, 2] = y + 0.5 * sy - 0.5
+
+                m_chroma[0, 0] = sx
+                m_chroma[0, 2] = x * 0.5 + 0.5 * sx - 0.5
+                m_chroma[1, 1] = sy
+                m_chroma[1, 2] = y * 0.5 + 0.5 * sy - 0.5
+
                 cv2.warpAffine(plane_y, m_luma, (w, h), dst=out_y, flags=luma_flags, borderMode=cv2.BORDER_REPLICATE)
                 cv2.warpAffine(plane_u, m_chroma, (w // 2, h // 2), dst=out_u, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
                 cv2.warpAffine(plane_v, m_chroma, (w // 2, h // 2), dst=out_v, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
