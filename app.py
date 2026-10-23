@@ -15798,7 +15798,7 @@ def compose_visual_chunks_parallel(
     gpu_ram_gb = max([float(g.get("adapter_ram_gb") or 0.0) for g in hw.get("gpus", [])] or [0.0])
     is_vram_constrained = is_laptop or (gpu_ram_gb > 0 and gpu_ram_gb <= 6.0)
     if hardware_active:
-        max_workers = min(2, len(chunks)) if is_vram_constrained else min(3, len(chunks))
+        max_workers = 1 if is_vram_constrained else min(3, len(chunks))
     else:
         max_workers = min(3, len(chunks)) if (logical_cpus >= 12 and not is_laptop) else min(2, len(chunks))
     _append_log(job, f"Timeline dividida em {len(chunks)} chunks (~150s cada); {max_workers} processos de renderizacao simultaneos.")
