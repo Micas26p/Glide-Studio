@@ -15901,6 +15901,7 @@ def compose_visual_chunks_parallel(
     target_duration: float,
     target_chunk_seconds: float = 150.0,
     audio_file: "Path | Future | None" = None,
+    plans: list[SegmentPlan] | None = None,
 ) -> Path:
     label = "Composição Render Studio em Chunks"
     set_stage(job, "cta", label, "Renderizando blocos visuais em paralelo com fusao instantanea")
@@ -15918,6 +15919,14 @@ def compose_visual_chunks_parallel(
         total_duration=target_duration,
         target_chunk_seconds=target_chunk_seconds,
     )
+
+    effective_plans = plans or getattr(job, "accepted_plans", None)
+    if effective_plans and len(effective_plans) == len(segments):
+        plan_cursor = 0
+        for ch in chunks:
+            ch_count = len(ch.get("segments", []))
+            ch["plans"] = effective_plans[plan_cursor : plan_cursor + ch_count]
+            plan_cursor += ch_count
 
     if len(chunks) <= 1:
         _append_log(job, "Timeline concisa: mantendo passagem unificada direta.")
@@ -16011,6 +16020,28 @@ def compose_visual_chunks_parallel(
         ]
 
         out_name = f"chunk_visual_{idx}.mp4"
+
+        # FASE 3: Single-Pass Direct Chunk Stream (quando os planos estão disponíveis)
+        if "plans" in chunk_info and chunk_info["plans"]:
+            try:
+                res_chunk = render_single_chunk_fused(
+                    job=job,
+                    chunk_info=chunk_info,
+                    subtitle_ass=c_ass,
+                    cta=cta if c_times else None,
+                    times=c_times,
+                    work=work,
+                    target_duration=c_dur,
+                    out_name=out_name,
+                    progress_callback=lambda fraction: update_chunk_progress(idx, fraction),
+                )
+                update_chunk_progress(idx, 1.0)
+                return res_chunk
+            except RenderCancelled:
+                raise
+            except Exception as exc:
+                _append_log(job, f"Aviso no chunk single-pass {idx} ({human_render_error(exc)}); revertendo bloco para composição clássica...")
+
         try:
             res_chunk = compose_final_visuals(
                 job=job,
@@ -21151,6 +21182,273 @@ def render_image_segment_subpixel(
     return True
 
 
+def stream_plan_frames_to_pipe(
+    job: Job,
+    plan: SegmentPlan,
+    w: int,
+    h: int,
+    stdin_pipe: Any,
+    work: Path,
+) -> int:
+    """Escreve os frames YUV 4:2:0 de um SegmentPlan diretamente no stdin do FFmpeg do chunk.
+
+    Para imagens: aplica Ken Burns com interpolação sub-pixel afim em memória (OpenCV).
+    Para vídeos: descodifica os frames do clipe com corte e redimensionamento direto.
+    Devolve a contagem de frames efetivamente enviados.
+    """
+    frames_written = 0
+    target_frames = max(2, int(plan.frame_count) if plan.frame_count > 0 else int(round(max(0.1, plan.target_duration) * 30)))
+    frame_size = w * h * 3 // 2
+
+    if plan.media_kind == "image" or is_image_path(plan.source):
+        try:
+            import cv2
+            import numpy as np
+            img_source = ensure_compatible_image_source(plan.source, work)
+            img = _load_image_bgr(img_source)
+            if img is not None:
+                style_profile = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
+                spec = image_motion_spec(
+                    w,
+                    h,
+                    plan.target_duration,
+                    plan.image_motion or image_motion_for(img_source, plan.source_index),
+                    img_source,
+                    style_profile,
+                    is_outro=plan.is_outro,
+                    focal_point=getattr(plan, "focal_point", None),
+                    safe_framing=getattr(plan, "safe_framing", None),
+                    hflip=getattr(plan, "hflip", False),
+                    clean_roi=getattr(plan, "clean_roi", None),
+                )
+                bw = (int(np.ceil(w * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
+                bh = (int(np.ceil(h * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
+                base = _build_image_motion_base(spec, img, bw, bh)
+                del img
+                i420 = cv2.cvtColor(base, cv2.COLOR_BGR2YUV_I420)
+                del base
+                plane_y = i420[:bh]
+                plane_u = i420[bh:bh + bh // 4].reshape(bh // 2, bw // 2)
+                plane_v = i420[bh + bh // 4:].reshape(bh // 2, bw // 2)
+
+                frame = np.empty(frame_size, dtype=np.uint8)
+                out_y = frame[:w * h].reshape(h, w)
+                out_u = frame[w * h:w * h * 5 // 4].reshape(h // 2, w // 2)
+                out_v = frame[w * h * 5 // 4:].reshape(h // 2, w // 2)
+                m_luma = np.zeros((2, 3), dtype=np.float64)
+                m_chroma = np.zeros((2, 3), dtype=np.float64)
+                luma_flags = cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP
+                chroma_flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
+
+                total_f = int(spec.get("frames") or target_frames)
+                for frame_no in range(total_f):
+                    if job.cancel_requested:
+                        raise RenderCancelled("Render cancelado pelo usuario.")
+                    zoom, fx, fy = image_motion_state(spec, frame_no)
+                    win_w, win_h = bw / zoom, bh / zoom
+                    x, y = (bw - win_w) * fx, (bh - win_h) * fy
+                    sx, sy = win_w / w, win_h / h
+
+                    m_luma[0, 0] = sx
+                    m_luma[0, 2] = x + 0.5 * sx - 0.5
+                    m_luma[1, 1] = sy
+                    m_luma[1, 2] = y + 0.5 * sy - 0.5
+
+                    m_chroma[0, 0] = sx
+                    m_chroma[0, 2] = x * 0.5 + 0.5 * sx - 0.5
+                    m_chroma[1, 1] = sy
+                    m_chroma[1, 2] = y * 0.5 + 0.5 * sy - 0.5
+
+                    cv2.warpAffine(plane_y, m_luma, (w, h), dst=out_y, flags=luma_flags, borderMode=cv2.BORDER_REPLICATE)
+                    cv2.warpAffine(plane_u, m_chroma, (w // 2, h // 2), dst=out_u, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
+                    cv2.warpAffine(plane_v, m_chroma, (w // 2, h // 2), dst=out_v, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
+                    stdin_pipe.write(frame.data)
+                    frames_written += 1
+                return frames_written
+        except RenderCancelled:
+            raise
+        except Exception as exc:
+            _append_log(job, f"Aviso no subpixel streaming de {plan.source.name} ({exc}); gerando frames neutros.")
+
+    if plan.media_kind == "video" and Path(str(plan.source)).exists():
+        try:
+            decode_cmd = [
+                FFMPEG, "-hide_banner", "-loglevel", "error",
+                *(["-ss", f"{plan.source_offset:.3f}"] if plan.source_offset > 0.0 else []),
+                "-i", str(plan.source),
+                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=30",
+                "-f", "rawvideo", "-pix_fmt", "yuv420p",
+                *(["-frames:v", str(target_frames)] if target_frames > 0 else []),
+                "-",
+            ]
+            clip_proc = _popen_hidden(decode_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            while frames_written < target_frames:
+                if job.cancel_requested:
+                    _terminate_process(clip_proc)
+                    raise RenderCancelled("Render cancelado pelo usuario.")
+                raw_chunk = clip_proc.stdout.read(frame_size)
+                if len(raw_chunk) == frame_size:
+                    stdin_pipe.write(raw_chunk)
+                    frames_written += 1
+                else:
+                    break
+            clip_proc.stdout.close()
+            clip_proc.wait()
+        except RenderCancelled:
+            raise
+        except Exception as exc:
+            _append_log(job, f"Aviso ao decodificar clipe {plan.source.name} ({exc}).")
+
+    if frames_written < target_frames:
+        import numpy as np
+        missing = target_frames - frames_written
+        blank = np.zeros(frame_size, dtype=np.uint8)
+        blank[:w * h] = 40
+        blank[w * h:] = 128
+        blank_data = blank.data
+        for _ in range(missing):
+            stdin_pipe.write(blank_data)
+            frames_written += 1
+
+    return frames_written
+
+
+def render_single_chunk_fused(
+    job: Job,
+    chunk_info: dict[str, Any],
+    subtitle_ass: Path | None,
+    cta: dict[str, Any] | None,
+    times: list[float],
+    work: Path,
+    target_duration: float,
+    out_name: str,
+    progress_callback: Any = None,
+) -> Path:
+    """Renderiza um bloco (~150s) completo em passagem única direta:
+    Imagens Ken Burns / Clipes de Vídeo -> Filtros / CTA -> Legendas ASS -> NVENC.
+    Zero arquivos temporários intermediários de vídeo no disco.
+    """
+    idx = chunk_info["index"]
+    c_plans: list[SegmentPlan] = chunk_info.get("plans", [])
+    out = work / out_name
+    w, h = render_size(job.options.get("mode", "standard"), job.options.get("ratio", "16:9"))
+    target_w = cta_scale_width(job, w)
+    preset, x_expr, y_expr = cta_position_expr(job)
+
+    logical_cpus = max(2, int(os.cpu_count() or 4))
+    comp_threads = max(4, min(16, int(logical_cpus * 0.85)))
+    comp_filter_threads = max(4, min(12, int(logical_cpus * 0.70)))
+
+    cta_inputs: list[str] = []
+    has_cta = bool(cta and isinstance(cta, dict) and cta.get("video") and times)
+    is_still = Path(str(cta["video"])).suffix.lower() in {".png", ".webp", ".jpg", ".jpeg"} if has_cta else False
+    if has_cta:
+        for _ in times:
+            if is_still:
+                cta_inputs += ["-loop", "1", "-i", str(cta["video"])]
+            else:
+                cta_inputs += ["-i", str(cta["video"])]
+
+    chains: list[str] = [
+        f"[0:v]settb=AVTB,setpts=PTS-STARTPTS,trim=duration={target_duration:.4f},setpts=PTS-STARTPTS[vbase]"
+    ]
+    current = "[vbase]"
+    if has_cta:
+        for c_idx, start in enumerate(times):
+            input_idx = c_idx + 1
+            cta_duration = max(0.5, float(cta.get("duration") or cta_default_duration(str(cta.get("key") or "pt"))))
+            end = min(target_duration, start + cta_duration)
+            if is_still:
+                chains.append(
+                    f"[{input_idx}:v]settb=AVTB,format=rgba,scale={target_w}:-2,"
+                    f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{c_idx}]"
+                )
+            else:
+                chains.append(
+                    f"[{input_idx}:v]fps=30,settb=AVTB,format=rgba,scale={target_w}:-2,"
+                    f"trim=duration={cta_duration:.4f},setpts=PTS-STARTPTS+{start:.4f}/TB[cta{c_idx}]"
+                )
+            out_label = f"[vcta{c_idx}]"
+            chains.append(
+                f"{current}[cta{c_idx}]overlay=x='{x_expr}':y='{y_expr}':"
+                f"enable='between(t,{start:.4f},{end:.4f})':"
+                f"eof_action=pass:repeatlast=0:shortest=0{out_label}"
+            )
+            current = out_label
+
+    if subtitle_ass and subtitle_ass.exists():
+        subtitle_label = "[vfinal]"
+        ass_clean = subtitle_ass.name.replace("\\", "/").replace(":", "\\:")
+        chains.append(f"{current}ass='{ass_clean}'{subtitle_label}")
+        current = subtitle_label
+
+    filter_complex_str = ";".join(chains)
+
+    encoder_args = choose_video_args(
+        job.options.get("mode", "standard"),
+        job.options.get("codec", "hevc"),
+        bool(job.options.get("gpu", False)),
+        job,
+    )
+
+    cmd = [
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+        "-threads", str(comp_threads),
+        "-filter_threads", str(comp_filter_threads),
+        "-filter_complex_threads", str(comp_filter_threads),
+        "-fflags", "+genpts",
+        "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}", "-r", "30", "-i", "-",
+        *cta_inputs,
+        "-filter_complex", filter_complex_str,
+        "-map", current,
+        "-an",
+        *encoder_args,
+        "-t", f"{target_duration:.4f}",
+        "-fps_mode", "cfr",
+        "-avoid_negative_ts", "make_zero",
+        "-pix_fmt", "yuv420p",
+        str(out.resolve()),
+    ]
+
+    err_log = work / f"{out.stem}.singlepass.log"
+    total_plans = len(c_plans)
+    with nvenc_slot(job, cmd), err_log.open("wb") as err_handle:
+        proc = _popen_hidden(
+            cmd, cwd=work, priority=render_priority(job),
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=err_handle,
+            bufsize=8 * 1024 * 1024,
+        )
+        _register_process(job, proc)
+        try:
+            for p_idx, plan in enumerate(c_plans):
+                if job.cancel_requested:
+                    _terminate_process(proc)
+                    raise RenderCancelled("Render cancelado pelo usuario.")
+                stream_plan_frames_to_pipe(job, plan, w, h, proc.stdin, work)
+                if progress_callback:
+                    progress_callback((p_idx + 1) / max(1, total_plans))
+            proc.stdin.close()
+            code = proc.wait()
+        except (BrokenPipeError, OSError) as exc:
+            _terminate_process(proc)
+            if job.cancel_requested:
+                raise RenderCancelled("Render cancelado pelo usuario.")
+            detail = err_log.read_text(encoding="utf-8", errors="ignore")[-400:] if err_log.exists() else ""
+            raise RuntimeError(f"FFmpeg Single-Pass falhou no chunk {idx} ({exc}): {detail}") from exc
+        finally:
+            _unregister_process(job, proc)
+
+    if code != 0 or not out.exists() or out.stat().st_size <= 0:
+        detail = err_log.read_text(encoding="utf-8", errors="ignore")[-400:] if err_log.exists() else ""
+        raise RuntimeError(f"FFmpeg Single-Pass falhou no chunk {idx} (código {code}): {detail}")
+
+    try:
+        err_log.unlink(missing_ok=True)
+    except Exception:
+        pass
+    return out
+
+
 def is_safe_for_hflip(source_path: Path | str, media_kind: str = "video") -> bool:
     """
     Check if media is safe to horizontally flip without inverting readable text,
@@ -22822,7 +23120,27 @@ def make_segments_smart(
         return out, actual
 
     performance_start(job, "segments")
-    if worker_count > 1 and len(plans) > 1:
+    can_use_single_pass = (
+        bool(job.options.get("singlePass", True))
+        and has_visual_composition
+        and audio_total >= 90.0
+        and len(plans) >= 6
+    )
+    if can_use_single_pass:
+        _append_log(
+            job,
+            f"Single-Pass Chunk Pipeline ativo: compondo {len(plans)} tomadas, efeitos e legendas "
+            f"diretamente em blocos de hardware sem arquivos intermediários.",
+        )
+        accepted_plans = list(plans)
+        job.accepted_plans = accepted_plans
+        job.is_fused_single_pass = True
+        segments = [work / f"fused_plan_{i:04d}.virtual" for i in range(len(accepted_plans))]
+        rendered_duration = audio_total
+        job.rendered_timeline_duration = audio_total
+        job.total_timeline_duration = audio_total
+        job.percent = 15.0
+    elif worker_count > 1 and len(plans) > 1:
         _append_log(
             job,
             f"{performance_budget.get('mode_label')}: {worker_count} clipes processados em paralelo "
@@ -22857,7 +23175,7 @@ def make_segments_smart(
                 rendered_duration += actual
 
     target_floor = audio_total + 1.2
-    if rendered_duration < target_floor:
+    if not can_use_single_pass and rendered_duration < target_floor:
         missing = target_floor - rendered_duration
         _append_log(job, f"Timeline curta apos render real: faltam {missing:.2f}s. Usando clipes extras/reuso automatico.")
         source_infos = [(idx, src, dur) for idx, (src, dur) in enumerate(zip(video_files, video_durs), start=1)]
@@ -23029,16 +23347,20 @@ def concat_segments_and_mux(
     concat_list = work / "concat_segments.txt"
     # segment paths are relative to work in this file to keep Windows commands short
     valid_segments = []
-    for seg in segments:
-        if seg.exists() and seg.stat().st_size > 0:
-            valid_segments.append(seg)
-        else:
-            _append_log(job, f"Aviso de montagem: segmento {seg.name} inválido ou vazio, ignorado na concatenação.")
-    lines = []
-    for s in valid_segments:
-        rel = s.relative_to(work).as_posix().replace("'", "'\\''")
-        lines.append(f"file '{rel}'")
-    concat_list.write_text("\n".join(lines), encoding="utf-8")
+    is_fused_single_pass = bool(getattr(job, "is_fused_single_pass", False)) and bool(getattr(job, "accepted_plans", None))
+    if is_fused_single_pass:
+        valid_segments = [Path(p.source) for p in job.accepted_plans]
+    else:
+        for seg in segments:
+            if seg.exists() and seg.stat().st_size > 0:
+                valid_segments.append(seg)
+            else:
+                _append_log(job, f"Aviso de montagem: segmento {seg.name} inválido ou vazio, ignorado na concatenação.")
+        lines = []
+        for s in valid_segments:
+            rel = s.relative_to(work).as_posix().replace("'", "'\\''")
+            lines.append(f"file '{rel}'")
+        concat_list.write_text("\n".join(lines), encoding="utf-8")
 
     video_concat = work / "video_concat.mp4"
     assembly_key = ""
@@ -23332,6 +23654,7 @@ def concat_segments_and_mux(
                     work=work,
                     target_duration=audio_total,
                     audio_file=audio_future if audio_future is not None else audio_file,
+                    plans=getattr(job, "accepted_plans", None),
                 )
                 chunk_success = True
             except RenderCancelled:
