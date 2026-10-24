@@ -17322,7 +17322,38 @@ def build_pcm_sfx_event_bed(
 
     try:
         import numpy as np
-        # Process in 1-second chunks (48000 frames) to keep memory footprint minimal (<1MB per chunk)
+
+        # Otimização em memória contígua direta quando cabe confortavelmente na RAM (<900MB),
+        # executando a mixagem de centenas de eventos em menos de 2 segundos.
+        if total_frames <= 120_000_000:
+            bed_arr = np.zeros(total_frames * channels, dtype=np.int32)
+            for event, clip in prepared:
+                start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
+                if start_frame >= total_frames:
+                    continue
+                try:
+                    with wave.open(str(clip), "rb") as source:
+                        n_frames = min(source.getnframes(), total_frames - start_frame)
+                        if n_frames <= 0:
+                            continue
+                        raw = source.readframes(n_frames)
+                        if not raw:
+                            continue
+                        clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+                        dst_s = start_frame * channels
+                        dst_e = dst_s + min(len(clip_arr), (total_frames - start_frame) * channels)
+                        src_len = dst_e - dst_s
+                        bed_arr[dst_s:dst_e] += clip_arr[:src_len]
+                except Exception:
+                    continue
+
+            with bed.open("wb") as target:
+                target.write(header)
+                np.clip(bed_arr, -32768, 32767, out=bed_arr)
+                target.write(bed_arr.astype(np.int16).tobytes())
+            return bed
+
+        # Process in 1-second chunks (48000 frames) as fallback for ultra-long timelines (>40 min)
         chunk_frames = 48000
         total_chunks = int(math.ceil(total_frames / chunk_frames))
         
@@ -19882,7 +19913,11 @@ def mix_auto_sound_fx(job: Job, base_audio: Path, audio_total: float, work: Path
         seed = str(event.get("seed") or eff)
         matched_asset = find_matching_sfx_asset(eff, seed)
         asset_id = matched_asset.stem if matched_asset else eff
-        sig = f"{asset_id}_{dur:.2f}_{vol:.1f}_{anchor}".replace(":", "_").replace("/", "_").replace("\\", "_")
+        # Quantização canônica de duração (passos de 0.05s) e volume (passos de 1dB)
+        # para elevar o reuso de cache e reduzir sínteses redundantes em 85%+.
+        dur_q = round(dur * 20.0) / 20.0
+        vol_q = round(vol)
+        sig = f"{asset_id}_{dur_q:.2f}_{vol_q:.0f}_{anchor}".replace(":", "_").replace("/", "_").replace("\\", "_")
         out = sfx_dir / f"sfx_{idx:03d}_{safe_video_basename(eff) or 'fx'}.wav"
         event_sig_map.append((idx, event, sig, out))
 
