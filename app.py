@@ -6931,6 +6931,140 @@ def gpu_free_vram_mb() -> float | None:
     return None if free < 0 else free
 
 
+class HardwareThermalGovernor:
+    """Governador Térmico Ativo e Pacer Dinâmico de Hardware para Glide Studio.
+
+    Monitora continuamente a temperatura da GPU/CPU durante o render.
+    Quando o hardware atinge níveis térmicos elevados (>83°C em laptops), insere pausas adaptativas
+    de alívio térmico (thermal breathers) entre despachos de chunks e blocos de clipes,
+    evitando saturação térmica, cortes de energia pelo circuito da placa-mãe e reinícios abruptos.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._last_gpu_temp: float = 0.0
+        self._last_gpu_util: float = 0.0
+        self._last_query_time: float = 0.0
+        self._cached_interval: float = 3.5
+        self._total_breath_time: float = 0.0
+        self._interventions_count: int = 0
+        self._peak_gpu_temp: float = 0.0
+        self._readings: list[float] = []
+
+    def reset(self) -> None:
+        with self._lock:
+            self._total_breath_time = 0.0
+            self._interventions_count = 0
+            self._peak_gpu_temp = 0.0
+            self._readings.clear()
+
+    def query_gpu_telemetry(self) -> tuple[float, float]:
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._last_query_time) < self._cached_interval and self._last_gpu_temp > 0.0:
+                return self._last_gpu_temp, self._last_gpu_util
+        try:
+            res = _run_hidden(
+                ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                parts = [p.strip() for p in res.stdout.strip().splitlines()[0].split(",")]
+                temp = float(parts[0])
+                util = float(parts[1]) if len(parts) > 1 else 0.0
+                with self._lock:
+                    self._last_gpu_temp = temp
+                    self._last_gpu_util = util
+                    self._last_query_time = now
+                    if temp > self._peak_gpu_temp:
+                        self._peak_gpu_temp = temp
+                    self._readings.append(temp)
+                    if len(self._readings) > 300:
+                        self._readings = self._readings[-150:]
+                return temp, util
+        except Exception:
+            pass
+        with self._lock:
+            return self._last_gpu_temp, self._last_gpu_util
+
+    def pace_before_nvenc(self, job: Job | None = None) -> float:
+        """Pacing térmico dinâmico invocado antes de cada codificação NVENC."""
+        temp, _ = self.query_gpu_telemetry()
+        if temp <= 0.0:
+            return 0.0
+
+        pause_sec = 0.0
+        if temp >= 88.0:
+            pause_sec = 2.0
+            if job is not None:
+                _append_log(
+                    job,
+                    f"Governador Térmico: GPU a {temp:.1f}°C (Zona Crítica). Pausa protetora de {pause_sec:.1f}s para arrefecimento passivo.",
+                )
+        elif temp >= 84.0:
+            pause_sec = 0.6
+            if job is not None and getattr(job, "_completed_segments_count", 0) % 15 == 0:
+                _append_log(
+                    job,
+                    f"Governador Térmico: GPU a {temp:.1f}°C. Pacing preventivo de {pause_sec:.1f}s para dissipação contínua de calor.",
+                )
+        elif temp >= 80.0:
+            pause_sec = 0.15
+
+        if pause_sec > 0.0:
+            with self._lock:
+                self._interventions_count += 1
+                self._total_breath_time += pause_sec
+            time.sleep(pause_sec)
+        return pause_sec
+
+    def pace_before_chunk(self, job: Job | None, chunk_idx: int, total_chunks: int) -> float:
+        """Pacing entre blocos maiores de composição visual (~150s cada)."""
+        temp, _ = self.query_gpu_telemetry()
+        if temp <= 0.0:
+            return 0.0
+
+        pause_sec = 0.0
+        if temp >= 87.0:
+            pause_sec = 2.5
+            if job is not None:
+                _append_log(
+                    job,
+                    f"Governador Térmico: GPU a {temp:.1f}°C antes do bloco {chunk_idx + 1}/{total_chunks}. Intervalo de arrefecimento de {pause_sec:.1f}s.",
+                )
+        elif temp >= 82.0:
+            pause_sec = 0.8
+            if job is not None:
+                _append_log(
+                    job,
+                    f"Governador Térmico: GPU a {temp:.1f}°C. Pacing preventivo de {pause_sec:.1f}s antes do bloco {chunk_idx + 1}/{total_chunks}.",
+                )
+        elif temp >= 78.0:
+            pause_sec = 0.25
+
+        if pause_sec > 0.0:
+            with self._lock:
+                self._interventions_count += 1
+                self._total_breath_time += pause_sec
+            time.sleep(pause_sec)
+        return pause_sec
+
+    def get_summary(self) -> dict[str, Any]:
+        with self._lock:
+            avg_temp = round(sum(self._readings) / max(1, len(self._readings)), 1) if self._readings else 0.0
+            return {
+                "peak_gpu_temp": round(self._peak_gpu_temp, 1),
+                "avg_gpu_temp": avg_temp,
+                "thermal_interventions": self._interventions_count,
+                "total_cooldown_seconds": round(self._total_breath_time, 2),
+            }
+
+
+THERMAL_GOVERNOR = HardwareThermalGovernor()
+
+
 class _NvencGate:
     """Limita sessões NVENC simultâneas de forma segura e determinística.
 
@@ -6942,6 +7076,7 @@ class _NvencGate:
       1. Nunca exceder MAX_ACTIVE_SESSIONS (2 concorrentes no máximo em GPUs móveis/4GB).
       2. Exigir pelo menos 1200 MiB livres antes de permitir uma 2ª sessão concorrente.
       3. Se a telemetria da GPU não responder, serializar para segurança máxima.
+      4. Integrar com o Governador Térmico Ativo para evitar saturação por calor contínuo.
     """
 
     MIN_FREE_FOR_EXTRA_MB = 1200.0
@@ -6975,6 +7110,7 @@ class _NvencGate:
                 waited = True
                 self._cond.wait(timeout=0.5)
             self._active += 1
+        THERMAL_GOVERNOR.pace_before_nvenc(job)
 
     def release(self) -> None:
         with self._cond:
@@ -15838,6 +15974,7 @@ def compose_visual_chunks_parallel(
         idx = chunk_info["index"]
         c_segs = chunk_info["segments"]
         c_start = chunk_info["start_time"]
+        THERMAL_GOVERNOR.pace_before_chunk(job, idx, len(chunks))
         c_dur = chunk_info["duration"]
         if idx == len(chunks) - 1 and target_duration > c_start + 0.5:
             # O planeador deixa ~2 s de margem; o último bloco termina com a narração
@@ -25333,6 +25470,7 @@ def render_worker(job_id: str):
             raise RenderCancelled("Render cancelado pelo usuario.")
 
         job.status = "running"
+        THERMAL_GOVERNOR.reset()
         set_system_keep_awake(True, "render")
         if not job.started_at:
             job.started_at = time.time()
@@ -25420,6 +25558,9 @@ def render_worker(job_id: str):
             f"{hw.get('acceleration') or 'CPU'} | GPU={hw.get('preferred_gpu') or 'nao identificada'} | "
             f"CPU={hw.get('cpu_count')} threads | RAM={hw.get('ram_gb')} GB | classe={hw.get('performance_class')}.",
         )
+        init_gpu_temp, _ = THERMAL_GOVERNOR.query_gpu_telemetry()
+        if init_gpu_temp > 0.0:
+            _append_log(job, f"Governador Térmico Ativo: monitoramento contínuo habilitado (temperatura inicial GPU={init_gpu_temp:.1f}°C).")
         if priority == "max":
             _append_log(job, (
                 "Render Studio aplicado: corte de cenas longas, efeitos de imagem, filtro anti-poluição, "
@@ -26074,6 +26215,15 @@ def render_worker(job_id: str):
         except Exception as exc:
             _append_log(job, f"Antirrepeticao: historico visual nao foi atualizado ({exc}).")
         record_render_performance(job, final_duration)
+        thermal_stat = THERMAL_GOVERNOR.get_summary()
+        if thermal_stat.get("peak_gpu_temp", 0) > 0:
+            _append_log(
+                job,
+                f"Governador Térmico Ativo: Pico GPU={thermal_stat['peak_gpu_temp']}°C | "
+                f"Média={thermal_stat['avg_gpu_temp']}°C | "
+                f"Intervenções preventivas={thermal_stat['thermal_interventions']} | "
+                f"Tempo de arrefecimento passivo={thermal_stat['total_cooldown_seconds']}s.",
+            )
         _append_log(job, f"FINAL: {out_file}")
         try:
             if job.export_dir:
