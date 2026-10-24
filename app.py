@@ -6022,9 +6022,9 @@ def _windows_priority_flag(priority: str | None = None) -> int:
     value = str(priority or "balanced").strip().lower()
     if value in {"light", "leve", "idle"}:
         return getattr(subprocess, "IDLE_PRIORITY_CLASS", 0x00000040)
-    # BELOW_NORMAL_PRIORITY_CLASS: permite 100% de uso de CPU/GPU em processos ociosos,
-    # garantindo que o loop de eventos e janelas do WebView2/Edge nunca congelem.
-    return getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0x00004000)
+    # NORMAL_PRIORITY_CLASS: impede que outros programas em segundo plano (ex: downloads,
+    # navegadores, scripts) roubem tempo de CPU do FFmpeg, mantendo o FPS alto sem travar o PC.
+    return getattr(subprocess, "NORMAL_PRIORITY_CLASS", 0x00000020)
 
 
 def _normalized_render_priority(value: Any) -> str:
@@ -6284,9 +6284,9 @@ def command_for_render_priority(cmd: list[str], priority: str | None = None) -> 
                 pass
 
     if is_laptop:
-        cap_threads = max(3, min(6, logical_cpus // 3))     # 5 no i7-12650H (16 lógicos)
-        cap_filter = max(2, min(4, int(logical_cpus * 0.25))) # 4
-        cap_complex = max(2, min(3, int(logical_cpus * 0.20)))# 3
+        cap_threads = max(4, min(10, int(logical_cpus * 0.55)))      # Permite até 8-9 threads no i7 com 1 único worker NVENC
+        cap_filter = max(3, min(8, int(logical_cpus * 0.40)))        # Mais poder para desenho de filtros/escalonamento
+        cap_complex = max(3, min(6, int(logical_cpus * 0.35)))       # Desenho de legendas ASS e overlays a 100+ FPS
     else:
         cap_threads = max(4, min(10, logical_cpus // 2))
         cap_filter = max(3, min(6, int(logical_cpus * 0.38)))
@@ -6352,9 +6352,9 @@ def render_performance_budget(job: Job, gpu: bool = False, segment_count: int = 
         # concorrência de canais DMA, eliminando aquecimento extremo, BugCheck 0x7E no nvlddmkm.sys
         # e BugCheck 0x10E no subsistema DirectX do Windows.
         workers = 1
-        cpu_thread_budget = max(4, min(8, int(logical_cpus * 0.50)))
-        filter_threads = max(2, min(4, cpu_thread_budget))
-        complex_threads = max(2, min(4, cpu_thread_budget))
+        cpu_thread_budget = max(4, min(10, int(logical_cpus * 0.60)))
+        filter_threads = max(3, min(6, cpu_thread_budget))
+        complex_threads = max(3, min(6, cpu_thread_budget))
     elif priority == "max":
         if hardware_active and logical_cpus >= 16 and ram_gb >= 32:
             workers = 3
