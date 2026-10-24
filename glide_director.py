@@ -327,6 +327,187 @@ def build_energy_map(cues: Iterable[Any], total_duration: float) -> dict[str, An
     return {"version": DIRECTOR_VERSION, "average": round(average, 3), "points": points}
 
 
+class SpeechVelocityPacer:
+    """
+    Inovação 4: Motor de Ritmo Visual Dinâmico Adaptativo por Densidade de Fala (WPM).
+    Mapeia a velocidade e urgência da locução ao longo do tempo e orienta
+    a duração dos cortes e a agressividade dos movimentos de câmera.
+    """
+    def __init__(
+        self,
+        cues: Iterable[Any] | None = None,
+        srt_path: Path | str | None = None,
+        narrative_blocks: list[dict[str, Any]] | None = None,
+        voice_emphasis_events: list[dict[str, Any]] | None = None,
+        total_duration: float = 0.0,
+    ):
+        raw_cues = list(cues or [])
+        if not raw_cues and srt_path:
+            raw_cues = self._parse_srt(Path(str(srt_path)))
+        self.narrative_blocks = list(narrative_blocks or [])
+        self.voice_emphasis_events = list(voice_emphasis_events or [])
+        self.total_duration = float(total_duration or 0.0)
+        self._parsed_cues = []
+        for idx, cue in enumerate(raw_cues):
+            cd = _cue_dict(cue, idx)
+            clean = re.sub(r"<[^>]+>", "", cd["text"]).strip()
+            cd["clean_text"] = clean
+            cd["wpm"] = round(cd["words_per_second"] * 60.0, 1)
+            self._parsed_cues.append(cd)
+
+        self._emphasis_times = [
+            float(p.get("time", 0.0))
+            for p in self.voice_emphasis_events
+            if isinstance(p, dict) and "time" in p
+        ]
+        self._emphasis_times.sort()
+
+        self.stats = {
+            "rapid_cuts": 0,
+            "energetic_cuts": 0,
+            "balanced_cuts": 0,
+            "solemn_cuts": 0,
+            "pause_cuts": 0,
+            "wpms_sampled": [],
+        }
+
+    def _parse_srt(self, path: Path) -> list[dict[str, Any]]:
+        if not path.exists():
+            return []
+        try:
+            content = path.read_text(encoding="utf-8-sig", errors="replace")
+        except Exception:
+            try:
+                content = path.read_text(encoding="latin-1", errors="replace")
+            except Exception:
+                return []
+        blocks = re.findall(
+            r"(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*\n([\s\S]*?)(?=\n\n|\Z)",
+            content,
+        )
+        def parse_ts(ts: str) -> float:
+            ts = ts.replace(",", ".")
+            p = ts.split(":")
+            if len(p) == 3:
+                return float(p[0]) * 3600 + float(p[1]) * 60 + float(p[2])
+            return 0.0
+
+        cues = []
+        for s_str, e_str, text in blocks:
+            s = parse_ts(s_str)
+            e = parse_ts(e_str)
+            clean = re.sub(r"<[^>]+>", "", text).strip()
+            if e > s and clean:
+                cues.append({"start": s, "end": e, "text": clean})
+        return cues
+
+    def get_velocity_at(self, current_time: float, window_sec: float = 3.5) -> tuple[float, str, bool]:
+        has_emphasis = any(abs(current_time - ep) <= 0.45 for ep in self._emphasis_times)
+        if not self._parsed_cues:
+            return 140.0, "balanced", has_emphasis
+
+        w_start = max(0.0, current_time - 1.0)
+        w_end = current_time + window_sec
+        overlapping_words = 0.0
+        active_speech_dur = 0.0
+
+        for c in self._parsed_cues:
+            if c["end"] < w_start:
+                continue
+            if c["start"] > w_end:
+                break
+            overlap = min(c["end"], w_end) - max(c["start"], w_start)
+            if overlap > 0:
+                fraction = overlap / c["duration"]
+                overlapping_words += c["words"] * fraction
+                active_speech_dur += overlap
+
+        if active_speech_dur < 0.35:
+            return 0.0, "pause", has_emphasis
+
+        wpm = (overlapping_words / active_speech_dur) * 60.0
+        if wpm >= 170.0:
+            tempo = "rapid"
+        elif wpm >= 145.0:
+            tempo = "energetic"
+        elif wpm >= 120.0:
+            tempo = "balanced"
+        elif wpm >= 60.0:
+            tempo = "solemn"
+        else:
+            tempo = "pause"
+
+        return round(wpm, 1), tempo, has_emphasis
+
+    def calculate_adaptive_duration(
+        self,
+        current_time: float,
+        base_target: float,
+        min_allowed: float = 2.0,
+        max_allowed: float = 7.2,
+        zone: str = "body",
+        media_kind: str = "image",
+    ) -> tuple[float, float, str, str]:
+        wpm, tempo, has_emphasis = self.get_velocity_at(current_time)
+        self.stats["wpms_sampled"].append(wpm)
+
+        if tempo == "rapid":
+            factor = 0.52
+            self.stats["rapid_cuts"] += 1
+        elif tempo == "energetic":
+            factor = 0.76
+            self.stats["energetic_cuts"] += 1
+        elif tempo == "balanced":
+            factor = 1.00
+            self.stats["balanced_cuts"] += 1
+        elif tempo == "solemn":
+            factor = 1.30
+            self.stats["solemn_cuts"] += 1
+        else:  # pause
+            factor = 1.15
+            self.stats["pause_cuts"] += 1
+
+        block_role = ""
+        for b in self.narrative_blocks:
+            if float(b.get("start", 0.0)) <= current_time <= float(b.get("end", 0.0)):
+                block_role = str(b.get("role", ""))
+                break
+
+        if block_role in {"conflict", "reveal"}:
+            factor *= 0.88
+        elif block_role == "cta":
+            factor = max(factor, 0.95)
+        elif block_role == "introduction":
+            factor = min(factor, 0.90)
+
+        if zone in {"hook", "short_hook"}:
+            factor = min(factor, 0.82)
+        elif zone == "climax":
+            factor = min(factor, 0.78)
+
+        if has_emphasis and media_kind == "image":
+            factor = min(factor, 0.65)
+
+        adaptive_dur = round(max(min_allowed, min(max_allowed, base_target * factor)), 3)
+        return adaptive_dur, wpm, tempo, block_role
+
+    def summary(self) -> dict[str, Any]:
+        wpms = [w for w in self.stats["wpms_sampled"] if w > 0]
+        avg_wpm = round(sum(wpms) / max(1, len(wpms)), 1) if wpms else 0.0
+        return {
+            "enabled": bool(self._parsed_cues or self.voice_emphasis_events),
+            "average_wpm": avg_wpm,
+            "max_wpm": max(wpms) if wpms else 0.0,
+            "min_wpm": min(wpms) if wpms else 0.0,
+            "rapid_cuts": self.stats["rapid_cuts"],
+            "energetic_cuts": self.stats["energetic_cuts"],
+            "balanced_cuts": self.stats["balanced_cuts"],
+            "solemn_cuts": self.stats["solemn_cuts"],
+            "pause_cuts": self.stats["pause_cuts"],
+            "total_shots": sum(self.stats[k] for k in ["rapid_cuts", "energetic_cuts", "balanced_cuts", "solemn_cuts", "pause_cuts"]),
+        }
+
+
 TIER_RANKS = {"A": 0, "B": 1, "C": 2, "D": 3, "REJECT": 99}
 
 

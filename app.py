@@ -64,6 +64,7 @@ from glide_director import (
     SEMANTIC_CONCEPT_CLUSTERS,
     extract_narrative_semantic_vector,
     compute_semantic_cosine_similarity,
+    SpeechVelocityPacer,
 )
 from glide_intelligence_db import IntelligenceDB, stable_hash
 from glide_music_history import avoid_recent_music, channel_music_scores, load_music_history, record_music_usage
@@ -1057,10 +1058,12 @@ def choose_smart_image_motion(
     prev_motions: list[str] | None = None,
     cwd: Path | None = None,
     narrative_intent: str = "",
+    tempo: str = "balanced",
 ) -> tuple[str, tuple[float, float], dict[str, Any]]:
     """
     Diretor de Movimento Inteligente: Escolhe o arquétipo ideal baseado no conteúdo da imagem,
-    posição do assunto, proteção de cabeças/rostos, saliência e variação editorial não repetitiva.
+    posição do assunto, proteção de cabeças/rostos, saliência, variação editorial não repetitiva
+    e ritmo dinâmico de fala (tempo WPM).
     """
     meta = probe_image_smart_metadata(path, cwd=cwd)
     prev = [str(m).lower() for m in (prev_motions or []) if m]
@@ -1073,8 +1076,19 @@ def choose_smart_image_motion(
     is_tall = meta["is_tall"]
     is_wide = meta["is_wide"]
 
+    if tempo == "rapid" or target_duration <= 2.8:
+        # Cortes dinâmicos rápidos: zooms rápidos e enquadramentos focados
+        candidates = ["slow_zoom_in", "scale_drift_stable", "diagonal_drift_up_right", "slow_zoom_out"]
+    elif tempo in {"solemn", "pause"} or target_duration >= 5.5:
+        # Planos lentos contemplativos: pans majestosos e movimentos amplos
+        if is_wide:
+            candidates = ["subtle_pan_right", "subtle_pan_left", "slow_zoom_in", "slow_zoom_out"]
+        elif is_tall:
+            candidates = ["tall_document_crawl", "slow_zoom_in", "slow_zoom_out"]
+        else:
+            candidates = ["subtle_pan_right", "subtle_pan_left", "slow_zoom_in", "micro_pan_up"]
     # 1. Imagem alta / documento / vertical -> slow zoom in ou out elegante
-    if is_tall:
+    elif is_tall:
         candidates = ["slow_zoom_in", "slow_zoom_out"]
     # 2. Rosto dominante no topo do enquadramento -> proteger enquadramento com zoom ou pan suave
     elif has_face and fy <= 0.35:
@@ -1662,6 +1676,8 @@ class SegmentPlan:
     focal_point: tuple[float, float] | None = None
     safe_framing: dict[str, Any] | None = None
     frame_count: int = 0  # frames exatos na grelha da timeline (quantize_plans_to_frame_grid)
+    speech_wpm: float = 0.0
+    pacing_tempo: str = "balanced"
 
 
 @dataclass
@@ -21902,6 +21918,9 @@ def build_segment_plan(
     voice_emphasis_events: list[dict[str, Any]] | None = None,
     soft_rejected_media: list[tuple[Path, float]] | None = None,
     hard_rejected_media: list[tuple[Path, float]] | None = None,
+    subtitle_cues: list[SubtitleCue] | None = None,
+    narrative_blocks: list[dict[str, Any]] | None = None,
+    pacing_enabled: bool = True,
 ) -> tuple[list[SegmentPlan], dict[str, Any]]:
     if not video_files:
         raise RuntimeError("Nenhum arquivo de mídia encontrado para a montagem.")
@@ -22073,6 +22092,14 @@ def build_segment_plan(
     prosody_snap_zooms = 0
     used_emphasis_peaks: set[float] = set()
 
+    pacer = SpeechVelocityPacer(
+        cues=subtitle_cues,
+        srt_path=srt_path,
+        narrative_blocks=narrative_blocks,
+        voice_emphasis_events=voice_emphasis_events,
+        total_duration=audio_total,
+    )
+
     # -------------------------------------------------------------
     # MONTAGEM DA TIMELINE COM INVARIANTE INVIOLÁVEL: maxAssetUsage <= 2
     # -------------------------------------------------------------
@@ -22095,7 +22122,20 @@ def build_segment_plan(
                 plans[-1].target_duration = round(plans[-1].target_duration + remaining, 3)
                 remaining = 0.0
                 break
-            target = min(img_dur, remaining)
+
+            if pacing_enabled:
+                adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                    current_time=curr_pos,
+                    base_target=img_dur,
+                    min_allowed=min_dur,
+                    max_allowed=max_dur,
+                    zone=zone,
+                    media_kind="image",
+                )
+            else:
+                adaptive_target, wpm, tempo, block_role = img_dur, 140.0, "balanced", ""
+
+            target = min(adaptive_target, remaining)
             if speech_boundaries and remaining > target + 1.0:
                 snapped_target, was_snapped, snap_reason = magnetic_speech_snap(
                     current_time=curr_pos,
@@ -22120,6 +22160,7 @@ def build_segment_plan(
                     src,
                     target_duration=target,
                     prev_motions=recent_image_motions,
+                    tempo=tempo,
                 )
                 recent_image_motions.append(motion)
                 if len(recent_image_motions) > 6:
@@ -22140,13 +22181,31 @@ def build_segment_plan(
                     timeline_zone=zone,
                     focal_point=focal,
                     safe_framing=safe_framing,
+                    speech_wpm=wpm,
+                    pacing_tempo=tempo,
                 ))
                 asset_usage[fp] = 1
                 remaining = round(remaining - target, 3)
         else:
             offset = _source_offset_for(source_offsets, src)
             eff_dur = max(0.08, orig_dur - offset) * setpts_factor
-            target = round(min(eff_dur, remaining), 3)
+            if pacing_enabled:
+                adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                    current_time=curr_pos,
+                    base_target=min(eff_dur, 5.0),
+                    min_allowed=min_dur,
+                    max_allowed=max(max_dur, eff_dur),
+                    zone=zone,
+                    media_kind="video",
+                )
+                if tempo == "rapid" and eff_dur > 3.8:
+                    target = round(min(max(2.4, adaptive_target), remaining), 3)
+                else:
+                    target = round(min(eff_dur, remaining), 3)
+            else:
+                wpm, tempo = 140.0, "balanced"
+                target = round(min(eff_dur, remaining), 3)
+
             if target >= 0.08:
                 snap_punch = False
                 if emphasis_peaks:
@@ -22171,6 +22230,8 @@ def build_segment_plan(
                     hflip=False,
                     scale_boost=1.0,
                     timeline_zone=zone,
+                    speech_wpm=wpm,
+                    pacing_tempo=tempo,
                 ))
                 asset_usage[fp] = 1
                 remaining = round(remaining - target, 3)
@@ -22188,12 +22249,27 @@ def build_segment_plan(
                     continue  # STRICT CEILING: NUNCA >= 3
                 is_img = is_image_path(src)
                 if is_img:
-                    target = round(min(img_dur, remaining), 3)
+                    curr_pos = audio_total - remaining
+                    if pacing_enabled:
+                        adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                            current_time=curr_pos,
+                            base_target=img_dur,
+                            min_allowed=2.4,
+                            max_allowed=6.8,
+                            zone="body",
+                            media_kind="image",
+                        )
+                        target = round(min(adaptive_target, remaining), 3)
+                    else:
+                        wpm, tempo = 140.0, "balanced"
+                        target = round(min(img_dur, remaining), 3)
+
                     if target >= 0.08:
                         motion, focal, safe_framing = choose_smart_image_motion(
                             src,
                             target_duration=target,
                             prev_motions=recent_image_motions,
+                            tempo=tempo,
                         )
                         recent_image_motions.append(motion)
                         if len(recent_image_motions) > 6:
@@ -22215,6 +22291,8 @@ def build_segment_plan(
                             timeline_zone="body",
                             focal_point=focal,
                             safe_framing=safe_framing,
+                            speech_wpm=wpm,
+                            pacing_tempo=tempo,
                         ))
                         asset_usage[fp] = 2
                         remaining = round(remaining - target, 3)
@@ -22223,7 +22301,21 @@ def build_segment_plan(
                     eff_usable = max(1.2, orig_dur - offset)
                     stride_offset = round(offset + (eff_usable * 0.42), 3)
                     usable = max(1.0, orig_dur - stride_offset) * setpts_factor
-                    seg_dur = round(min(usable, remaining, 5.2), 3)
+                    curr_pos = audio_total - remaining
+                    if pacing_enabled:
+                        adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                            current_time=curr_pos,
+                            base_target=min(usable, 5.0),
+                            min_allowed=2.4,
+                            max_allowed=6.5,
+                            zone="body",
+                            media_kind="video",
+                        )
+                        seg_dur = round(min(usable, remaining, max(2.4, adaptive_target)), 3)
+                    else:
+                        wpm, tempo = 140.0, "balanced"
+                        seg_dur = round(min(usable, remaining, 5.2), 3)
+
                     if seg_dur >= 0.08:
                         apply_hflip = is_safe_for_hflip(src, "video")
                         plans.append(SegmentPlan(
@@ -22240,6 +22332,8 @@ def build_segment_plan(
                             hflip=apply_hflip,
                             scale_boost=1.12,
                             timeline_zone="body",
+                            speech_wpm=wpm,
+                            pacing_tempo=tempo,
                         ))
                         asset_usage[fp] = 2
                         remaining = round(remaining - seg_dur, 3)
@@ -22254,7 +22348,21 @@ def build_segment_plan(
             if asset_usage.get(fp, 0) >= 2 or fp in hard_reject_fps:
                 continue
             is_img = is_image_path(src)
-            seg_dur = round(min(img_dur if is_img else (orig_dur * setpts_factor), remaining), 3)
+            curr_pos = audio_total - remaining
+            if pacing_enabled:
+                adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                    current_time=curr_pos,
+                    base_target=img_dur if is_img else (orig_dur * setpts_factor),
+                    min_allowed=2.4,
+                    max_allowed=6.8,
+                    zone="body",
+                    media_kind="image" if is_img else "video",
+                )
+                seg_dur = round(min(adaptive_target, remaining), 3)
+            else:
+                wpm, tempo = 140.0, "balanced"
+                seg_dur = round(min(img_dur if is_img else (orig_dur * setpts_factor), remaining), 3)
+
             if seg_dur >= 0.08:
                 plans.append(SegmentPlan(
                     source=src,
@@ -22264,8 +22372,10 @@ def build_segment_plan(
                     source_index=len(plans) + 1,
                     cycle=0,
                     media_kind="image" if is_img else "video",
-                    image_motion=choose_smart_image_motion(src, target_duration=seg_dur)[0] if is_img else "",
+                    image_motion=choose_smart_image_motion(src, target_duration=seg_dur, tempo=tempo)[0] if is_img else "",
                     timeline_zone="body",
+                    speech_wpm=wpm,
+                    pacing_tempo=tempo,
                 ))
                 asset_usage[fp] = 1
                 remaining = round(remaining - seg_dur, 3)
@@ -22278,7 +22388,21 @@ def build_segment_plan(
                 if asset_usage.get(fp, 0) != 1 or fp in hard_reject_fps:
                     continue
                 is_img = is_image_path(src)
-                seg_dur = round(min(img_dur if is_img else (orig_dur * 0.5 * setpts_factor), remaining), 3)
+                curr_pos = audio_total - remaining
+                if pacing_enabled:
+                    adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                        current_time=curr_pos,
+                        base_target=img_dur if is_img else (orig_dur * 0.5 * setpts_factor),
+                        min_allowed=2.4,
+                        max_allowed=6.5,
+                        zone="body",
+                        media_kind="image" if is_img else "video",
+                    )
+                    seg_dur = round(min(adaptive_target, remaining), 3)
+                else:
+                    wpm, tempo = 140.0, "balanced"
+                    seg_dur = round(min(img_dur if is_img else (orig_dur * 0.5 * setpts_factor), remaining), 3)
+
                 if seg_dur >= 0.08:
                     plans.append(SegmentPlan(
                         source=src,
@@ -22288,10 +22412,12 @@ def build_segment_plan(
                         source_index=len(plans) + 1,
                         cycle=1,
                         media_kind="image" if is_img else "video",
-                        image_motion=choose_smart_image_motion(src, target_duration=seg_dur)[0] if is_img else "",
+                        image_motion=choose_smart_image_motion(src, target_duration=seg_dur, tempo=tempo)[0] if is_img else "",
                         hflip=is_safe_for_hflip(src, "image" if is_img else "video"),
                         punch_in=True,
                         timeline_zone="body",
+                        speech_wpm=wpm,
+                        pacing_tempo=tempo,
                     ))
                     asset_usage[fp] = 2
                     remaining = round(remaining - seg_dur, 3)
@@ -22334,13 +22460,27 @@ def build_segment_plan(
                     if remaining <= 0.08:
                         break
                     is_img = is_image_path(src)
+                    curr_pos = audio_total - remaining
                     if is_img:
-                        target = round(min(img_dur, remaining), 3)
+                        if pacing_enabled:
+                            adaptive_target, wpm, tempo, block_role = pacer.calculate_adaptive_duration(
+                                current_time=curr_pos,
+                                base_target=img_dur,
+                                min_allowed=2.4,
+                                max_allowed=6.8,
+                                zone="body",
+                                media_kind="image",
+                            )
+                            target = round(min(adaptive_target, remaining), 3)
+                        else:
+                            wpm, tempo = 140.0, "balanced"
+                            target = round(min(img_dur, remaining), 3)
                         if target >= 0.08:
                             motion, focal, safe_framing = choose_smart_image_motion(
                                 src,
                                 target_duration=target,
                                 prev_motions=recent_image_motions,
+                                tempo=tempo,
                             )
                             recent_image_motions.append(motion)
                             if len(recent_image_motions) > 6:
@@ -22361,6 +22501,8 @@ def build_segment_plan(
                                 timeline_zone="body",
                                 focal_point=focal,
                                 safe_framing=safe_framing,
+                                speech_wpm=wpm,
+                                pacing_tempo=tempo,
                             ))
                             asset_usage[fp] = asset_usage.get(fp, 0) + 1
                             remaining = round(remaining - target, 3)
@@ -22450,6 +22592,7 @@ def build_segment_plan(
         "total_shots": len(plans),
         "sliced_sub_shots": sum(1 for plan in plans if plan.media_kind == "video" and plan.sub_slice_index > 0),
         "punch_in_shots": sum(1 for plan in plans if plan.punch_in),
+        "speech_velocity_pacing": pacer.summary(),
         "prosody_emotional_sync": {
             "enabled": bool(voice_emphasis_events),
             "peaks_detected": len(voice_emphasis_events or []),
@@ -22811,6 +22954,9 @@ def make_segments_smart(
     if not srt_file and getattr(job, "srt_path", None) and Path(str(job.srt_path)).exists():
         srt_file = Path(str(job.srt_path))
     set_stage(job, "rendering", "Planejando linha do tempo", "Montando plano de tomadas, cortes e ritmo...", percent=14.7)
+    sub_cues = getattr(job, "subtitle_cues", None) or cues_for_matching
+    narrative_blocks = (getattr(job, "director_summary", None) or {}).get("blocks")
+    pacing_enabled = bool((job.options or {}).get("speechVelocityPacing", True))
     plans, summary = build_segment_plan(
         video_files,
         video_durs,
@@ -22824,6 +22970,9 @@ def make_segments_smart(
         # Mídia barrada pelo filtro nunca volta à timeline (nem pela "fase 5" do planeador).
         soft_rejected_media=None,
         hard_rejected_media=getattr(job, "hard_rejected_media", None),
+        subtitle_cues=sub_cues,
+        narrative_blocks=narrative_blocks,
+        pacing_enabled=pacing_enabled,
     )
     # Auditoria Matemática Pré-Render da Timeline
     audit_timeline_plan(
@@ -22917,6 +23066,13 @@ def make_segments_smart(
         _append_log(job, (
             f"Prosódia Emocional Inteligente: {prosody_sync.get('peaks_detected', 0)} picos dramáticos na voz | "
             f"{prosody_sync.get('snap_zooms_triggered', 0)} snap zooms / punch-ins sincronizados à interpretação vocal."
+        ))
+    pacing_stat = summary.get("speech_velocity_pacing") or {}
+    if pacing_stat.get("enabled"):
+        _append_log(job, (
+            f"Ritmo Visual Dinâmico (WPM Pacing): locução={pacing_stat.get('average_wpm', 0):.1f} WPM "
+            f"(máx={pacing_stat.get('max_wpm', 0):.1f}) | {pacing_stat.get('rapid_cuts', 0)} tomadas dinâmicas aceleradas (<3.0s) | "
+            f"{pacing_stat.get('solemn_cuts', 0)} planos solenes contemplativos (>5.5s)."
         ))
 
     tone = str(
