@@ -47,6 +47,13 @@ hiddenimports = [
     "PIL",
     "PIL.Image",
     "PIL.ImageOps",
+    "glide_core",
+    "glide_core.hardware",
+    "glide_core.hardware.thermal_governor",
+    "glide_core.subtitles",
+    "glide_core.subtitles.time_utils",
+    "glide_core.audio",
+    "glide_core.audio.sfx_mixer",
 ]
 
 a = Analysis(
