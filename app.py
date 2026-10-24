@@ -71,6 +71,20 @@ from glide_music_history import avoid_recent_music, channel_music_scores, load_m
 from glide_render_graph import RenderGraph
 from glide_render_plan import build_render_plan, write_render_plan
 from glide_sound_design import write_sound_design_map
+from glide_core import (
+    HardwareThermalGovernor,
+    HARDWARE_THERMAL_GOVERNOR,
+    THERMAL_GOVERNOR,
+    _NvencGate,
+    NVENC_GATE,
+    gpu_free_vram_mb,
+    srt_time_to_seconds,
+    seconds_to_ass_time,
+    ass_escape,
+    ass_color,
+    build_pcm_sfx_event_bed,
+    make_sfx_wav_header,
+)
 
 APP_VERSION = "1.40.0"
 RENDER_PIPELINE_VERSION = "render_graph_11_editorial_engine"
@@ -6924,217 +6938,8 @@ def _warm_hardware_profile_worker() -> None:
             _HARDWARE_PROFILE_WARMING = False
 
 
-_GPU_FREE_CACHE: dict[str, float] = {"at": 0.0, "free": -1.0}
-_GPU_FREE_LOCK = threading.Lock()
-
-
-def gpu_free_vram_mb() -> float | None:
-    """Memória livre da NVIDIA (MiB) via nvidia-smi, em cache 2 s; None se não houver NVIDIA."""
-    with _GPU_FREE_LOCK:
-        if time.monotonic() - _GPU_FREE_CACHE["at"] < 2.0:
-            value = _GPU_FREE_CACHE["free"]
-            return None if value < 0 else value
-    free = -1.0
-    try:
-        out = _run_hidden(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
-                          capture_output=True, text=True, timeout=5)
-        if out.returncode == 0 and out.stdout.strip():
-            free = float(out.stdout.strip().splitlines()[0])
-    except Exception:
-        free = -1.0
-    with _GPU_FREE_LOCK:
-        _GPU_FREE_CACHE.update(at=time.monotonic(), free=free)
-    return None if free < 0 else free
-
-
-class HardwareThermalGovernor:
-    """Governador Térmico Ativo e Pacer Dinâmico de Hardware para Glide Studio.
-
-    Monitora continuamente a temperatura da GPU/CPU durante o render.
-    Quando o hardware atinge níveis térmicos elevados (>83°C em laptops), insere pausas adaptativas
-    de alívio térmico (thermal breathers) entre despachos de chunks e blocos de clipes,
-    evitando saturação térmica, cortes de energia pelo circuito da placa-mãe e reinícios abruptos.
-    """
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._last_gpu_temp: float = 0.0
-        self._last_gpu_util: float = 0.0
-        self._last_query_time: float = 0.0
-        self._cached_interval: float = 3.5
-        self._total_breath_time: float = 0.0
-        self._interventions_count: int = 0
-        self._peak_gpu_temp: float = 0.0
-        self._readings: list[float] = []
-
-    def reset(self) -> None:
-        with self._lock:
-            self._total_breath_time = 0.0
-            self._interventions_count = 0
-            self._peak_gpu_temp = 0.0
-            self._readings.clear()
-
-    def query_gpu_telemetry(self) -> tuple[float, float]:
-        now = time.monotonic()
-        with self._lock:
-            if (now - self._last_query_time) < self._cached_interval and self._last_gpu_temp > 0.0:
-                return self._last_gpu_temp, self._last_gpu_util
-        try:
-            res = _run_hidden(
-                ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu", "--format=csv,noheader,nounits"],
-                capture_output=True,
-                text=True,
-                timeout=1.5,
-            )
-            if res.returncode == 0 and res.stdout.strip():
-                parts = [p.strip() for p in res.stdout.strip().splitlines()[0].split(",")]
-                temp = float(parts[0])
-                util = float(parts[1]) if len(parts) > 1 else 0.0
-                with self._lock:
-                    self._last_gpu_temp = temp
-                    self._last_gpu_util = util
-                    self._last_query_time = now
-                    if temp > self._peak_gpu_temp:
-                        self._peak_gpu_temp = temp
-                    self._readings.append(temp)
-                    if len(self._readings) > 300:
-                        self._readings = self._readings[-150:]
-                return temp, util
-        except Exception:
-            pass
-        with self._lock:
-            return self._last_gpu_temp, self._last_gpu_util
-
-    def pace_before_nvenc(self, job: Job | None = None) -> float:
-        """Pacing térmico dinâmico invocado antes de cada codificação NVENC."""
-        temp, _ = self.query_gpu_telemetry()
-        if temp <= 0.0:
-            return 0.0
-
-        pause_sec = 0.0
-        if temp >= 88.0:
-            pause_sec = 2.0
-            if job is not None:
-                _append_log(
-                    job,
-                    f"Governador Térmico: GPU a {temp:.1f}°C (Zona Crítica). Pausa protetora de {pause_sec:.1f}s para arrefecimento passivo.",
-                )
-        elif temp >= 84.0:
-            pause_sec = 0.6
-            if job is not None and getattr(job, "_completed_segments_count", 0) % 15 == 0:
-                _append_log(
-                    job,
-                    f"Governador Térmico: GPU a {temp:.1f}°C. Pacing preventivo de {pause_sec:.1f}s para dissipação contínua de calor.",
-                )
-        elif temp >= 80.0:
-            pause_sec = 0.15
-
-        if pause_sec > 0.0:
-            with self._lock:
-                self._interventions_count += 1
-                self._total_breath_time += pause_sec
-            time.sleep(pause_sec)
-        return pause_sec
-
-    def pace_before_chunk(self, job: Job | None, chunk_idx: int, total_chunks: int) -> float:
-        """Pacing entre blocos maiores de composição visual (~150s cada)."""
-        temp, _ = self.query_gpu_telemetry()
-        if temp <= 0.0:
-            return 0.0
-
-        pause_sec = 0.0
-        if temp >= 87.0:
-            pause_sec = 2.5
-            if job is not None:
-                _append_log(
-                    job,
-                    f"Governador Térmico: GPU a {temp:.1f}°C antes do bloco {chunk_idx + 1}/{total_chunks}. Intervalo de arrefecimento de {pause_sec:.1f}s.",
-                )
-        elif temp >= 82.0:
-            pause_sec = 0.8
-            if job is not None:
-                _append_log(
-                    job,
-                    f"Governador Térmico: GPU a {temp:.1f}°C. Pacing preventivo de {pause_sec:.1f}s antes do bloco {chunk_idx + 1}/{total_chunks}.",
-                )
-        elif temp >= 78.0:
-            pause_sec = 0.25
-
-        if pause_sec > 0.0:
-            with self._lock:
-                self._interventions_count += 1
-                self._total_breath_time += pause_sec
-            time.sleep(pause_sec)
-        return pause_sec
-
-    def get_summary(self) -> dict[str, Any]:
-        with self._lock:
-            avg_temp = round(sum(self._readings) / max(1, len(self._readings)), 1) if self._readings else 0.0
-            return {
-                "peak_gpu_temp": round(self._peak_gpu_temp, 1),
-                "avg_gpu_temp": avg_temp,
-                "thermal_interventions": self._interventions_count,
-                "total_cooldown_seconds": round(self._total_breath_time, 2),
-            }
-
-
-THERMAL_GOVERNOR = HardwareThermalGovernor()
-
-
-class _NvencGate:
-    """Limita sessões NVENC simultâneas de forma segura e determinística.
-
-    Na NVIDIA RTX 3050 Laptop (4 GB VRAM) ou placas mobile/consumidor, o chip NVENC é físico
-    e único. Abrir mais de 2 sessões em paralelo ou tentar alocar superfícies DirectX quando
-    a VRAM está sob pressão causa falha fatal no gerenciador de memória de vídeo do Windows
-    (BugCheck 0x10E VIDMM_FATAL_ERROR).
-    Esta porta garante:
-      1. Nunca exceder MAX_ACTIVE_SESSIONS (2 concorrentes no máximo em GPUs móveis/4GB).
-      2. Exigir pelo menos 1200 MiB livres antes de permitir uma 2ª sessão concorrente.
-      3. Se a telemetria da GPU não responder, serializar para segurança máxima.
-      4. Integrar com o Governador Térmico Ativo para evitar saturação por calor contínuo.
-    """
-
-    MIN_FREE_FOR_EXTRA_MB = 1200.0
-    MAX_ACTIVE_SESSIONS = 1
-
-    def __init__(self) -> None:
-        self._cond = threading.Condition()
-        self._active = 0
-
-    @property
-    def active(self) -> int:
-        return self._active
-
-    def acquire(self, job: Job | None = None) -> None:
-        waited = False
-        with self._cond:
-            while True:
-                if self._active == 0:
-                    break
-                if self._active >= self.MAX_ACTIVE_SESSIONS:
-                    self._cond.wait(timeout=0.5)
-                    continue
-                free = gpu_free_vram_mb()
-                if free is not None and free >= self.MIN_FREE_FOR_EXTRA_MB:
-                    break
-                if job is not None and job.cancel_requested:
-                    raise RenderCancelled("Render cancelado pelo usuario.")
-                if not waited and job is not None:
-                    free_str = f"{int(free)} MiB" if free is not None else "aguardando liberação"
-                    _append_log(job, f"GPU com memória sob reserva ({free_str}): aguardando liberação antes de codificar próximo clipe NVENC.")
-                waited = True
-                self._cond.wait(timeout=0.5)
-            self._active += 1
-        THERMAL_GOVERNOR.pace_before_nvenc(job)
-
-    def release(self) -> None:
-        with self._cond:
-            self._active = max(0, self._active - 1)
-            self._cond.notify_all()
-
-
-NVENC_GATE = _NvencGate()
+# Hardware, VRAM e Governador Térmico Ativo modularizados em glide_core.hardware
+# (gpu_free_vram_mb, HardwareThermalGovernor, THERMAL_GOVERNOR, _NvencGate, NVENC_GATE)
 
 
 def _uses_nvenc(cmd: list[str]) -> bool:
@@ -13565,42 +13370,8 @@ def render_size(mode: str, ratio: str) -> tuple[int, int]:
     return ((1280, 720) if mode == "fast" else (1920, 1080))
 
 
-def srt_time_to_seconds(value: str) -> float:
-    match = re.match(r"\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*", value)
-    if not match:
-        raise ValueError(f"Tempo SRT invalido: {value!r}")
-    hours, minutes, seconds, millis = match.groups()
-    return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(millis.ljust(3, "0")) / 1000
-
-
-def seconds_to_ass_time(value: float) -> str:
-    value = max(0.0, value)
-    centis = int(round(value * 100))
-    hours = centis // 360000
-    centis %= 360000
-    minutes = centis // 6000
-    centis %= 6000
-    seconds = centis // 100
-    centis %= 100
-    return f"{hours}:{minutes:02d}:{seconds:02d}.{centis:02d}"
-
-
-def ass_escape(text: str) -> str:
-    text = re.sub(r"<[^>]+>", "", text)
-    text = text.replace("{", "(").replace("}", ")")
-    # Quebras de linha reais (textos de destaque em 2 linhas) viram \N do ASS.
-    parts = [re.sub(r"\s+", " ", part).strip() for part in str(text).split("\n")]
-    return "\\N".join(part.replace("\\", "\\\\") for part in parts if part)
-
-
-def ass_color(value: str | None, default: str, alpha: str = "00") -> str:
-    raw = (value or default).strip()
-    if raw.startswith("#"):
-        raw = raw[1:]
-    if len(raw) != 6 or not re.fullmatch(r"[0-9a-fA-F]{6}", raw):
-        raw = default.lstrip("#")
-    rr, gg, bb = raw[0:2], raw[2:4], raw[4:6]
-    return f"&H{alpha}{bb}{gg}{rr}"
+# Utilitários de tempo e formatação ASS modularizados em glide_core.subtitles
+# (srt_time_to_seconds, seconds_to_ass_time, ass_escape, ass_color)
 
 
 def stable_index(seed: str, modulo: int) -> int:
@@ -17471,168 +17242,8 @@ def make_sfx_clip(event: dict[str, Any], out: Path, work: Path) -> tuple[Path, s
     return out, "procedural", proc_profile
 
 
-def build_pcm_sfx_event_bed(
-    prepared: list[tuple[dict[str, Any], Path]],
-    audio_total: float,
-    work: Path,
-) -> Path:
-    """Mix short PCM effects into one sample-accurate bed in memory for ultra-fast performance."""
-    sample_rate = 48000
-    channels = 2
-    sample_width = 2
-    frame_bytes = channels * sample_width
-    total_frames = max(1, int(math.ceil(max(0.1, audio_total) * sample_rate)))
-    data_size = total_frames * frame_bytes
-    if data_size >= 0xFFFFFFFF - 44:
-        raise RuntimeError("Faixa de efeitos excede o limite WAV PCM.")
-
-    bed = work / "glide_sfx_event_bed.wav"
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF",
-        36 + data_size,
-        b"WAVE",
-        b"fmt ",
-        16,
-        1,
-        channels,
-        sample_rate,
-        sample_rate * frame_bytes,
-        frame_bytes,
-        sample_width * 8,
-        b"data",
-        data_size,
-    )
-
-    try:
-        import numpy as np
-
-        # Otimização em memória contígua direta quando cabe confortavelmente na RAM (<900MB),
-        # executando a mixagem de centenas de eventos em menos de 2 segundos.
-        if total_frames <= 120_000_000:
-            bed_arr = np.zeros(total_frames * channels, dtype=np.int32)
-            for event, clip in prepared:
-                start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
-                if start_frame >= total_frames:
-                    continue
-                try:
-                    with wave.open(str(clip), "rb") as source:
-                        n_frames = min(source.getnframes(), total_frames - start_frame)
-                        if n_frames <= 0:
-                            continue
-                        raw = source.readframes(n_frames)
-                        if not raw:
-                            continue
-                        clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                        dst_s = start_frame * channels
-                        dst_e = dst_s + min(len(clip_arr), (total_frames - start_frame) * channels)
-                        src_len = dst_e - dst_s
-                        bed_arr[dst_s:dst_e] += clip_arr[:src_len]
-                except Exception:
-                    continue
-
-            with bed.open("wb") as target:
-                target.write(header)
-                np.clip(bed_arr, -32768, 32767, out=bed_arr)
-                target.write(bed_arr.astype(np.int16).tobytes())
-            return bed
-
-        # Process in 1-second chunks (48000 frames) as fallback for ultra-long timelines (>40 min)
-        chunk_frames = 48000
-        total_chunks = int(math.ceil(total_frames / chunk_frames))
-        
-        # Pre-load all SFX events with their raw PCM data
-        loaded_events = []
-        for event, clip in prepared:
-            start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
-            if start_frame >= total_frames:
-                continue
-            try:
-                with wave.open(str(clip), "rb") as source:
-                    n_frames = min(source.getnframes(), total_frames - start_frame)
-                    if n_frames <= 0:
-                        continue
-                    raw = source.readframes(n_frames)
-                    if not raw:
-                        continue
-                    clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                    loaded_events.append((start_frame, start_frame + n_frames, clip_arr))
-            except Exception:
-                continue
-
-        with bed.open("wb") as target:
-            target.write(header)
-            for c_idx in range(total_chunks):
-                c_start = c_idx * chunk_frames
-                c_end = min(total_frames, (c_idx + 1) * chunk_frames)
-                c_len = c_end - c_start
-                chunk_arr = np.zeros(c_len * channels, dtype=np.int32)
-
-                for ev_start, ev_end, clip_arr in loaded_events:
-                    # Check overlap with current chunk
-                    if ev_end <= c_start or ev_start >= c_end:
-                        continue
-                    # Overlapping window
-                    overlap_start = max(c_start, ev_start)
-                    overlap_end = min(c_end, ev_end)
-                    src_s = (overlap_start - ev_start) * channels
-                    src_e = (overlap_end - ev_start) * channels
-                    dst_s = (overlap_start - c_start) * channels
-                    dst_e = (overlap_end - c_start) * channels
-                    chunk_arr[dst_s:dst_e] += clip_arr[src_s:src_e]
-
-                np.clip(chunk_arr, -32768, 32767, out=chunk_arr)
-                target.write(chunk_arr.astype(np.int16).tobytes())
-        return bed
-    except Exception:
-        # Robust pure-Python chunked fallback with buffered I/O
-        chunk_frames = 16384
-        total_chunks = int(math.ceil(total_frames / chunk_frames))
-        loaded_events = []
-        for event, clip in prepared:
-            start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
-            if start_frame >= total_frames:
-                continue
-            try:
-                with wave.open(str(clip), "rb") as source:
-                    n_frames = min(source.getnframes(), total_frames - start_frame)
-                    if n_frames <= 0:
-                        continue
-                    raw = source.readframes(n_frames)
-                    if not raw:
-                        continue
-                    arr = array("h")
-                    arr.frombytes(raw)
-                    if sys.byteorder != "little":
-                        arr.byteswap()
-                    loaded_events.append((start_frame, start_frame + n_frames, arr))
-            except Exception:
-                continue
-
-        with bed.open("wb") as target:
-            target.write(header)
-            for c_idx in range(total_chunks):
-                c_start = c_idx * chunk_frames
-                c_end = min(total_frames, (c_idx + 1) * chunk_frames)
-                c_len = c_end - c_start
-                chunk_buf = [0] * (c_len * channels)
-
-                for ev_start, ev_end, arr in loaded_events:
-                    if ev_end <= c_start or ev_start >= c_end:
-                        continue
-                    overlap_start = max(c_start, ev_start)
-                    overlap_end = min(c_end, ev_end)
-                    src_s = (overlap_start - ev_start) * channels
-                    src_e = (overlap_end - ev_start) * channels
-                    dst_s = (overlap_start - c_start) * channels
-                    for k in range(src_e - src_s):
-                        chunk_buf[dst_s + k] += arr[src_s + k]
-
-                out_arr = array("h", (max(-32768, min(32767, val)) for val in chunk_buf))
-                if sys.byteorder != "little":
-                    out_arr.byteswap()
-                target.write(out_arr.tobytes())
-        return bed
+# Mixagem de SFX em memória modularizada em glide_core.audio.sfx_mixer
+# (build_pcm_sfx_event_bed, make_sfx_wav_header)
 
 
 SFX_PREVIEW_EFFECTS: dict[str, dict[str, Any]] = {
