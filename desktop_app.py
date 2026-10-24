@@ -595,7 +595,8 @@ def run_browser_app(runtime: DesktopRuntime):
 
 def _apply_low_memory_webview_flags() -> None:
     flags = " ".join([
-        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication,CalculateNativeWinOcclusion",
+        "--disable-features=BackForwardCache,TranslateUI,Translate,MediaRouter,AutofillServerCommunication",
+        "--enable-features=CalculateNativeWinOcclusion,IntensiveWakeUpThrottling",
         "--disable-background-networking",
         "--disable-client-side-phishing-detection",
         "--disable-default-apps",
