@@ -5274,6 +5274,9 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     codec = "h264" if str(options.get("codec") or "h264").lower() == "h264" else "hevc"
     gpu_requested = bool(options.get("gpu", True))
     hw = hardware_profile()
+    is_laptop = bool(hw.get("is_laptop", False)) or any(
+        k in str(hw.get("preferred_gpu", "")).lower() for k in ("laptop", "mobile", "max-q")
+    )
     hardware_encoder = (
         hw.get("recommended_h264_encoder" if codec == "h264" else "recommended_hevc_encoder")
         if (gpu_requested or priority in {"balanced", "max", "quality"})
@@ -5285,19 +5288,24 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
     cpu_count = max(1, int(hw.get("cpu_count") or os.cpu_count() or 1))
 
     # Previsão calibrada de todas as etapas do render.
-    # O tempo de preflight (diretor e filtro visual) escala com o número de mídias analisadas,
-    # enquanto a codificação dos segmentos e composição unificada segue a física real do encoder.
+    # Em GPU móvel de notebook (1 worker NVENC dedicado), a codificação de segmentos
+    # com filtros bicúbicos, pan/zoom e blur de fundo roda a ~28-35 FPS (~0.90x a 1.10x da timeline).
+    # A composição de blocos com legendas ASS consome ~0.35x a 0.45x da timeline.
     m_count = max(1, int(media_count or len(options.get("videos") or []) or len(options.get("videoOrder") or []) or options.get("media_count") or 1))
     nvidia_factor = 0.94 if gpu_effective and str(hw.get("acceleration") or "").startswith("NVIDIA") else 1.0
     encode_factor = perf_factor * nvidia_factor * (1.0 if gpu_effective else 1.72)
 
     has_visual_clean = bool(options.get("visualCleanFilter", True))
     dir_cost_max = min(20.0, 3.0 + duration * 0.004 + (m_count * 0.02) * perf_factor)
-    va_cost_max = min(35.0, 4.0 + duration * 0.006 + (m_count * 0.05) * perf_factor) if has_visual_clean else 2.0
+    va_cost_max = min(60.0, 6.0 + duration * 0.010 + (m_count * 0.08) * perf_factor) if has_visual_clean else 2.0
     dir_cost_qual = min(45.0, 5.0 + duration * 0.008 + (m_count * 0.04) * perf_factor)
-    va_cost_qual = min(70.0, 6.0 + duration * 0.010 + (m_count * 0.10) * perf_factor) if has_visual_clean else 3.0
+    va_cost_qual = min(80.0, 8.0 + duration * 0.012 + (m_count * 0.12) * perf_factor) if has_visual_clean else 3.0
     dir_cost_bal = min(30.0, 4.0 + duration * 0.006 + (m_count * 0.03) * perf_factor)
-    va_cost_bal = min(50.0, 5.0 + duration * 0.008 + (m_count * 0.08) * perf_factor) if has_visual_clean else 2.5
+    va_cost_bal = min(65.0, 6.0 + duration * 0.010 + (m_count * 0.10) * perf_factor) if has_visual_clean else 2.5
+
+    seg_rate_max = (1.05 if is_laptop else 0.52) * encode_factor
+    comp_rate_max = (0.42 if is_laptop else 0.22) * encode_factor
+    sfx_rate_max = (0.16 if is_laptop else 0.08) * perf_factor
 
     if priority == "max":
         stage_forecast: dict[str, float] = {
@@ -5305,26 +5313,29 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
             "direction": dir_cost_max,
             "subtitles_ass": 3.0 + duration * 0.004,
             "visual_analysis": va_cost_max,
-            "segments": 10.0 + duration * 0.36 * encode_factor,
+            "segments": 10.0 + duration * seg_rate_max,
             "concat": 3.0 + duration * 0.004,
-            "sound_fx": (4.0 + duration * 0.015 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 8.0 + duration * 0.18 * encode_factor,
+            "sound_fx": (4.0 + duration * sfx_rate_max) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 8.0 + duration * comp_rate_max,
             "mastering": (4.0 + duration * 0.03 * perf_factor) if bool(options.get("audioMastering", False)) else 0.0,
             "mux": 4.0 + duration * 0.008,
             "delivery": 2.0,
         }
         fixed_seconds = 6.0
     elif priority == "quality":
+        seg_rate_qual = (1.18 if is_laptop else 0.62) * encode_factor
+        comp_rate_qual = (0.48 if is_laptop else 0.28) * encode_factor
+        sfx_rate_qual = (0.18 if is_laptop else 0.09) * perf_factor
         director_active = bool(options.get("smartVisualDirector", True))
         stage_forecast = {
             "audio": 8.0 + duration * 0.025 * perf_factor,
             "direction": dir_cost_qual if director_active else 2.0,
             "subtitles_ass": 4.0 + duration * 0.006,
             "visual_analysis": va_cost_qual,
-            "segments": 14.0 + duration * 0.46 * encode_factor,
+            "segments": 14.0 + duration * seg_rate_qual,
             "concat": 4.0 + duration * 0.006,
-            "sound_fx": (6.0 + duration * 0.020 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 10.0 + duration * 0.24 * encode_factor,
+            "sound_fx": (6.0 + duration * sfx_rate_qual) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 10.0 + duration * comp_rate_qual,
             "mastering": (5.0 + duration * 0.04 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
             "mux": 4.0 + duration * 0.008,
             "delivery": 3.0,
@@ -5339,16 +5350,19 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
             stage_forecast["segments"] *= 1.06
         fixed_seconds = 10.0
     else:
+        seg_rate_bal = (1.10 if is_laptop else 0.58) * encode_factor
+        comp_rate_bal = (0.44 if is_laptop else 0.24) * encode_factor
+        sfx_rate_bal = (0.17 if is_laptop else 0.08) * perf_factor
         director_active = bool(options.get("smartVisualDirector", True))
         stage_forecast = {
             "audio": 8.0 + duration * 0.020 * perf_factor,
             "direction": dir_cost_bal if director_active else 1.0,
             "subtitles_ass": 3.0 + duration * 0.005,
             "visual_analysis": va_cost_bal,
-            "segments": 12.0 + duration * 0.40 * encode_factor,
+            "segments": 12.0 + duration * seg_rate_bal,
             "concat": 4.0 + duration * 0.005,
-            "sound_fx": (6.0 + duration * 0.018 * perf_factor) if bool(options.get("autoSoundFx", True)) else 0.0,
-            "composition": 8.0 + duration * 0.20 * encode_factor,
+            "sound_fx": (6.0 + duration * sfx_rate_bal) if bool(options.get("autoSoundFx", True)) else 0.0,
+            "composition": 8.0 + duration * comp_rate_bal,
             "mastering": (5.0 + duration * 0.04 * perf_factor) if bool(options.get("audioMastering", True)) else 0.0,
             "mux": 4.0 + duration * 0.007,
             "delivery": 3.0,
@@ -5379,7 +5393,7 @@ def render_time_estimate(duration_seconds: Any, options: dict[str, Any], priorit
         if str(item.get("codec") or codec).lower() != codec:
             continue
         value = item.get("realtime_factor")
-        max_rtf = 1.30 if gpu_effective else 2.00
+        max_rtf = 3.50 if gpu_effective else 4.50
         try:
             if 0.05 <= float(value) <= max_rtf:
                 matching.append(float(value))
@@ -23130,7 +23144,7 @@ def concat_segments_and_mux(
         else:
             visual_cached = None
     if not visual_cached:
-        set_stage(job, "cta", "CTA + Textos + Legendas", "Aplicando legendas cinemáticas, ênfases e CTA...", percent=max(job.percent, 72.0))
+        set_stage(job, "cta", "CTA + Textos + Legendas", "Aplicando legendas cinemáticas, ênfases e CTA...", percent=max(job.percent, 65.0))
         performance_start(job, "composition")
         has_visual_elements = bool((subtitle_ass and subtitle_ass.exists()) or (cta and cta.get("video") and cta_times))
         use_chunk_render = has_visual_elements and audio_total >= 90.0 and len(valid_segments) >= 6
@@ -26937,42 +26951,42 @@ def status(job_id: str):
         has_comp = bool(getattr(job, "has_visual_composition", False))
 
         # Calculate realistic post-processing remaining duration (audio, composition, mux)
-        comp_est = float(stage_forecast.get("composition") or (45.0 + total_sec * 0.08 if has_comp else 15.0))
+        comp_est = float(stage_forecast.get("composition") or (60.0 + total_sec * 0.40 if has_comp else 15.0))
         mux_est = float(stage_forecast.get("mux") or (6.0 + total_sec * 0.01)) + float(stage_forecast.get("delivery") or 2.0)
-        audio_est = float(stage_forecast.get("sound_fx") or 8.0) + float(stage_forecast.get("mastering") or 6.0)
+        audio_est = float(stage_forecast.get("sound_fx") or 25.0) + float(stage_forecast.get("mastering") or 15.0)
 
         if job.stage in ("delivery", "mux", "muxing"):
             est_post = sum(float(stage_forecast.get(k, 0)) for k in ("mux", "delivery")) if stage_forecast else 8.0
             mux_pct = max(0.0, min(1.0, (pct - 95.0) / 4.0)) if pct >= 95.0 else 0.0
             est_post_stage = max(2.0, est_post * (1.0 - mux_pct))
         elif job.stage in ("cta", "composition"):
-            chunk_comp_pct = max(0.0, min(1.0, (pct - 72.0) / 23.0)) if pct >= 72.0 else 0.0
-            est_post_stage = max(6.0, comp_est * (1.0 - chunk_comp_pct) + mux_est)
+            chunk_comp_pct = max(0.0, min(1.0, (pct - 65.0) / 30.0)) if pct >= 65.0 else 0.0
+            est_post_stage = max(4.0, comp_est * (1.0 - chunk_comp_pct) + mux_est)
         elif job.stage == "audio":
-            audio_pct = max(0.0, min(1.0, (pct - 64.0) / 8.0)) if pct >= 64.0 else 0.0
-            est_post_stage = max(12.0, audio_est * (1.0 - audio_pct) + (comp_est if has_comp else 0.0) + mux_est)
+            audio_pct = max(0.0, min(1.0, (pct - 61.0) / 4.0)) if pct >= 61.0 else 0.0
+            est_post_stage = max(10.0, audio_est * (1.0 - audio_pct) + (comp_est if has_comp else 0.0) + mux_est)
         else:
             if stage_forecast:
                 est_post_stage = sum(float(stage_forecast.get(k, 0)) for k in ("sound_fx", "mastering", "composition", "mux", "delivery"))
             else:
-                est_post_stage = (35.0 + total_sec * 0.08) if has_comp else 10.0
+                est_post_stage = (50.0 + total_sec * 0.45) if has_comp else 15.0
 
         est_post = est_post_stage
 
-        if rendered_sec <= 0.0 and pct < 15.0:
+        if rendered_sec <= 0.0:
             # Pre-encoding phase: audio mix, visual analysis, director indexing are running,
             # but the GPU encoder hasn't started yet. Use stage_forecast to show a realistic
             # preparation-aware estimate instead of an inflated crude fallback.
             base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
             if base_est <= 0.0:
-                base_est = max(60.0, total_sec * 0.85)
+                base_est = max(60.0, total_sec * (1.60 if has_comp else 1.15))
             if stage_forecast:
                 prep_stages = ("audio", "direction", "subtitles_ass", "visual_analysis")
                 est_prep_total = max(10.0, sum(float(stage_forecast.get(k, 0)) for k in prep_stages))
                 est_encode_and_post = max(25.0, base_est - est_prep_total)
             else:
-                est_prep_total = max(10.0, base_est * 0.15)
-                est_encode_and_post = max(25.0, base_est * 0.85)
+                est_prep_total = max(10.0, base_est * 0.12)
+                est_encode_and_post = max(25.0, base_est * 0.88)
 
             if elapsed < est_prep_total:
                 prep_remaining_sec = max(2.0, est_prep_total - elapsed)
@@ -27012,13 +27026,13 @@ def status(job_id: str):
         else:
             base_est = float((active_estimate or {}).get("seconds") or job.estimated_total_seconds or 0.0)
             if base_est <= 0.0:
-                base_est = max(60.0, total_sec * 0.85)
+                base_est = max(60.0, total_sec * (1.60 if has_comp else 1.15))
             if stage_forecast:
                 est_prep = max(10.0, sum(float(stage_forecast.get(k, 0)) for k in ("audio", "direction", "subtitles_ass", "visual_analysis")))
                 est_encode = max(25.0, base_est - est_prep)
             else:
-                est_prep = max(10.0, base_est * 0.15)
-                est_encode = max(25.0, base_est * 0.85)
+                est_prep = max(10.0, base_est * 0.12)
+                est_encode = max(25.0, base_est * 0.88)
             prep_remaining = max(3.0, est_prep - elapsed)
             raw_remaining = prep_remaining + est_encode
             eta_state = "calibrated"
@@ -27032,19 +27046,22 @@ def status(job_id: str):
         if last_eta is not None and (last_time is not None or last_elapsed is not None):
             dt_wall = max(0.0, now_ts - last_time) if last_time is not None else 0.0
             dt_elapsed = max(0.0, elapsed - last_elapsed) if last_elapsed is not None else 0.0
-            dt = max(dt_wall, dt_elapsed)
+            dt = min(15.0, max(dt_wall, dt_elapsed))
             if 0.0 < dt < 60.0:
                 expected_eta = max(1.0, last_eta - dt)
+                diff = raw_remaining - expected_eta
                 if last_eta <= 3.0 and raw_remaining > 10.0:
                     # Destravar estimativa travada em 1s ou transição para nova etapa pesada
                     smoothed = raw_remaining
-                elif abs(raw_remaining - expected_eta) > max(35.0, expected_eta * 0.45):
-                    # Mudança expressiva na taxa de render ou etapa: convergir rapidamente
-                    smoothed = 0.35 * expected_eta + 0.65 * raw_remaining
-                elif raw_remaining < expected_eta:
-                    smoothed = 0.60 * expected_eta + 0.40 * raw_remaining
+                elif abs(diff) > max(45.0, expected_eta * 0.35):
+                    # Mudança expressiva na taxa de render ou etapa: convergir com segurança
+                    smoothed = 0.25 * expected_eta + 0.75 * raw_remaining
+                elif diff > 0:
+                    # Velocidade observada mais lenta que a expectativa: convergir de forma equilibrada sem congelar
+                    smoothed = 0.50 * expected_eta + 0.50 * raw_remaining
                 else:
-                    smoothed = 0.70 * expected_eta + 0.30 * raw_remaining
+                    # Velocidade observada igual ou mais rápida: manter decaimento consistente com o relógio
+                    smoothed = 0.60 * expected_eta + 0.40 * raw_remaining
                 remaining = max(1.0, round(smoothed, 1))
             else:
                 remaining = max(1.0, round(raw_remaining, 1))
