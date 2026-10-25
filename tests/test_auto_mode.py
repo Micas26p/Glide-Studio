@@ -179,5 +179,59 @@ class AutoModeRegressions(unittest.TestCase):
             self.assertTrue(all(1.0 <= z <= app.IMAGE_MOTION_ZMAX for z in zooms))
 
 
+    def test_automator_session_rejects_occupied_without_overwrite(self):
+        pid = _new_project(self.client)
+        # Cria um arquivo de mídia real para o projeto
+        media_dir = app._project_media_dir(pid)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        real_file = media_dir / "vid1.mp4"
+        real_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        app._save_project_media_index(pid, {"vid1.mp4": {"file": "vid1.mp4", "kind": "video"}})
+        with app.QUEUE_LOCK:
+            proj = app._find_queue_project(pid)
+            if proj:
+                proj["media"] = {"videos": ["vid1.mp4"], "audios": [], "texts": []}
+        files = [
+            {"slot": "v1", "projectId": pid, "kind": "video", "lane": "folder", "rel": "f/01.mp4", "size": 10},
+            {"slot": "a0", "projectId": pid, "kind": "audio", "lane": "audio", "rel": "a.wav", "size": 10},
+            {"slot": "s0", "projectId": pid, "kind": "subtitle", "lane": "srt", "rel": "a.srt", "size": 10},
+        ]
+        resp = self.client.post("/api/queue/automator/sessions", json={"rows": [{"projectId": pid}], "files": files, "overwrite": False})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("Ocupados", resp.json().get("detail", ""))
+
+    def test_automator_session_accepts_occupied_with_overwrite(self):
+        pid = _new_project(self.client)
+        media_dir = app._project_media_dir(pid)
+        media_dir.mkdir(parents=True, exist_ok=True)
+        real_file = media_dir / "vid1.mp4"
+        real_file.write_bytes(b"\x00\x00\x00\x18ftypmp42")
+        app._save_project_media_index(pid, {"vid1.mp4": {"file": "vid1.mp4", "kind": "video"}})
+        with app.QUEUE_LOCK:
+            proj = app._find_queue_project(pid)
+            if proj:
+                proj["media"] = {"videos": ["vid1.mp4"], "audios": [], "texts": []}
+        files = [
+            {"slot": "v1", "projectId": pid, "kind": "video", "lane": "folder", "rel": "f/01.mp4", "size": 10},
+            {"slot": "a0", "projectId": pid, "kind": "audio", "lane": "audio", "rel": "a.wav", "size": 10},
+            {"slot": "s0", "projectId": pid, "kind": "subtitle", "lane": "srt", "rel": "a.srt", "size": 10},
+        ]
+        resp = self.client.post("/api/queue/automator/sessions", json={"rows": [{"projectId": pid}], "files": files, "overwrite": True})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.client.delete(f"/api/queue/automator/sessions/{resp.json()['sessionId']}")
+
+    def test_automator_project_is_empty_cleans_ghost_media(self):
+        pid = f"p_ghost_{time.time_ns()}"
+        ghost_project = {
+            "id": pid,
+            "name": "Ghost Project",
+            "status": "draft",
+            "media": {"videos": ["exports/ghost_folder/01.mp4"], "audios": ["ghost.mp3"], "texts": ["ghost.srt"]},
+        }
+        self.assertTrue(app._automator_project_is_empty(ghost_project))
+        self.assertEqual(ghost_project["media"]["videos"], [])
+        self.assertEqual(ghost_project["media"]["audios"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

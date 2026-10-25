@@ -2074,7 +2074,7 @@ function scheduleQueueResync(){
     }
   }, 400);
 }
-function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
+function syncProjectSnapshot(project, {immediate = false, beacon = false, allowEmptyMedia = false} = {}){
   if(!project?.id) return;
   const media = {
     videos: (project.files?.videos || []).map(rel),
@@ -2100,7 +2100,7 @@ function syncProjectSnapshot(project, {immediate = false, beacon = false} = {}){
     retryCount: Number(project.retryCount || 0),
     retryHistory: project.retryHistory || [],
     ...(project.lastRenderSummary === null ? {lastRenderSummary: null, directorState: null, renderGraphRun: null} : {}),
-    ...(project.isNew ? {create: true} : {}),
+    ...(project.isNew ? {create: true} : {}), ...(allowEmptyMedia ? {allowEmptyMedia: true} : {}),
   };
   const send = () => {
     projectSnapshotTimers.delete(project.id);
@@ -7503,7 +7503,7 @@ async function cancelAutomator(){
 }
 
 function automatorProjectIsEmpty(project){
-  return !(project?.files?.videos?.length || project?.files?.audios?.length || project?.files?.subtitles?.length);
+  if(!project) return false; const f = project.files || {}; if(f.videos?.length || f.audios?.length || f.subtitles?.length) return false; const m = project.rememberedMedia || project.media || {}; if(m.videos?.length || m.audios?.length || m.texts?.length || m.subtitles?.length) return false; return true;
 }
 
 function automatorPlan(){
@@ -7749,18 +7749,24 @@ async function applyAutomatorDistribution(options = {}){
       };
     });
     progress(2, 'Validando projetos e associações...', true);
-    await Promise.all(rowsToApply.map(row => syncProjectSnapshot(row.project, {immediate: true})));
+    await Promise.all(rowsToApply.map(row => syncProjectSnapshot(row.project, {immediate: true, allowEmptyMedia: true})));
     const createResponse = await fetchWithTimeout('/api/queue/automator/sessions', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         rows: sessionRows,
         files: fileSpecs.map(({file, ...spec}) => spec),
+        overwrite: true,
       }),
       cache: 'no-store',
       signal: state.automatorAbortController.signal,
     }, 30000);
-    if(!createResponse.ok) throw new Error(await createResponse.text());
+    if(!createResponse.ok){
+      const errT = await createResponse.text();
+      let errD = errT;
+      try { const p = JSON.parse(errT); if(p && typeof p.detail === 'string') errD = p.detail; else if(p && typeof p.message === 'string') errD = p.message; } catch(_){}
+      throw new Error(errD);
+    }
     const created = await createResponse.json();
     state.automatorSessionId = created.sessionId;
     const skippedSlots = new Set(Array.isArray(created.skippedSlots) ? created.skippedSlots : []);
@@ -7930,7 +7936,12 @@ async function applyAutomatorDistribution(options = {}){
         cache: 'no-store',
         signal: state.automatorAbortController.signal,
       }, 600000);
-      if(!commitResponse.ok) throw new Error(await commitResponse.text());
+      if(!commitResponse.ok){
+        const errT = await commitResponse.text();
+        let errD = errT;
+        try { const p = JSON.parse(errT); if(p && typeof p.detail === 'string') errD = p.detail; else if(p && typeof p.message === 'string') errD = p.message; } catch(_){}
+        throw new Error(errD);
+      }
       committed = await commitResponse.json();
     } catch(err){
       if(state.automatorAbortController?.signal?.aborted) throw err;
@@ -7990,7 +8001,7 @@ async function applyAutomatorDistribution(options = {}){
     if(dockSummary) dockSummary.textContent = `AUTO concluído: ${rowsToApply.length} projeto(s) receberam mídia com persistência verificada.`;
   }catch(error){
     const cancelled = error?.name === 'AbortError';
-    const message = cancelled ? 'Operação cancelada.' : (error.message || String(error));
+    let message = cancelled ? 'Operação cancelada.' : (error.message || String(error)); try { const p = JSON.parse(message); if(p && typeof p.detail === 'string') message = p.detail; else if(p && typeof p.message === 'string') message = p.message; } catch(_){}
     progress(Number(automatorProgressBar?.value || 0), `AUTO não alterou os projetos: ${message}`, true);
     if(dockSummary) dockSummary.textContent = `AUTO falhou sem alterar projetos: ${message}`;
     updateAutomatorPreview();

@@ -2400,6 +2400,49 @@ def _sync_queue_projects_from_media_indices() -> None:
 _sync_queue_projects_from_media_indices()
 
 
+def _clean_orphan_ghost_project_media() -> None:
+    changed = False
+    for project in QUEUE_PROJECTS:
+        st = str(project.get("status") or "")
+        if st not in ("draft", "error", "cancelled"):
+            continue
+        media = project.get("media")
+        if not isinstance(media, dict):
+            continue
+        if not any(media.get(k) for k in ("videos", "audios", "texts", "subtitles")):
+            continue
+        pid = str(project.get("id") or "")
+        if not pid:
+            continue
+        idx = _load_project_media_index(pid)
+        if idx:
+            mdir = _project_media_dir(pid)
+            if any((mdir / str(item.get("file") or "")).is_file() for item in idx.values() if item.get("file")):
+                continue
+        has_real = False
+        for k in ("videos", "audios", "texts", "subtitles"):
+            for raw_rel in (media.get(k) or []):
+                rel_str = str(raw_rel)
+                p = Path(rel_str)
+                if (p.is_absolute() and p.is_file()) or (DATA_ROOT / rel_str).is_file() or (APP_DIR / rel_str).is_file():
+                    has_real = True
+                    break
+            if has_real:
+                break
+        if not has_real and not idx:
+            media["videos"] = []
+            media["audios"] = []
+            media["texts"] = []
+            if "subtitles" in media:
+                media["subtitles"] = []
+            changed = True
+    if changed:
+        _save_queue_projects(QUEUE_PROJECTS)
+
+
+_clean_orphan_ghost_project_media()
+
+
 def _reference_style_dir(project_id: str) -> Path:
     return REFERENCE_STYLE_ROOT / safe_folder_component(project_id, "project")[:48]
 
@@ -17410,7 +17453,34 @@ def _cleanup_automator_sessions() -> None:
 
 def _automator_project_is_empty(project: dict[str, Any]) -> bool:
     media = project.get("media") if isinstance(project.get("media"), dict) else {}
-    return not any(media.get(key) for key in ("videos", "audios", "texts", "subtitles"))
+    if not any(media.get(key) for key in ("videos", "audios", "texts", "subtitles")):
+        return True
+    # Se o projeto lista arquivos mas nenhum deles existe em disco nem no índice de mídia,
+    # trata-se de referências fantasmas/órfãs (ex.: pastas de exportação antigas apagadas).
+    project_id = str(project.get("id") or "")
+    if project_id:
+        index = _load_project_media_index(project_id)
+        if index:
+            media_dir = _project_media_dir(project_id)
+            if any((media_dir / str(item.get("file") or "")).is_file() for item in index.values() if item.get("file")):
+                return False
+        has_any_real_file = False
+        for key in ("videos", "audios", "texts", "subtitles"):
+            for raw_rel in (media.get(key) or []):
+                rel_str = str(raw_rel)
+                p = Path(rel_str)
+                if (p.is_absolute() and p.is_file()) or (DATA_ROOT / rel_str).is_file() or (APP_DIR / rel_str).is_file():
+                    has_any_real_file = True
+                    break
+            if has_any_real_file:
+                break
+        if not has_any_real_file and not index:
+            project["media"] = {
+                "videos": [], "audios": [], "background_music": [],
+                "texts": [], "captions": [], "script_guides": []
+            }
+            return True
+    return False
 
 
 def _automator_kind_allowed(kind: str, suffix: str) -> bool:
@@ -17661,9 +17731,10 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
             for project_id in project_ids
             if project_id in projects and not _automator_project_is_empty(projects[project_id])
         ]
+    overwrite = bool(payload.get("overwrite", False))
     if missing:
         raise HTTPException(status_code=404, detail=f"Projetos não encontrados: {', '.join(missing)}")
-    if occupied:
+    if occupied and not overwrite:
         raise HTTPException(
             status_code=409,
             detail="O AUTO aceita apenas projetos vazios. Ocupados: " + ", ".join(str(item) for item in occupied),
@@ -17720,6 +17791,7 @@ def create_automator_session(payload: dict[str, Any] = Body(default={})):
         "uploads": {},
         "folder": folder,
         "result": None,
+        "overwrite": overwrite,
     }
     atomic_write_text(folder / "session.json", json.dumps({
         "id": session_id,
@@ -18012,8 +18084,15 @@ def commit_automator_session(session_id: str):
             for row in session.get("rows") or []:
                 project_id = str(row.get("projectId") or "")
                 project = project_map.get(project_id)
-                if not project or not _automator_project_is_empty(project):
-                    raise RuntimeError(f"Projeto ocupado ou indisponível durante o commit: {project_id}")
+                if not project:
+                    raise RuntimeError(f"Projeto indisponível durante o commit: {project_id}")
+                if not session.get("overwrite") and not _automator_project_is_empty(project):
+                    raise RuntimeError(f"Projeto ocupado durante o commit: {project_id}")
+                if session.get("overwrite") and not _automator_project_is_empty(project):
+                    try:
+                        _clear_queue_project_storage(project)
+                    except Exception:
+                        pass
                 project_results[project_id] = {
                     "projectId": project_id,
                     "name": project.get("name") or project_id,
