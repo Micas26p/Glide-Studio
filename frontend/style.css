@@ -1808,6 +1808,10 @@ body[data-theme-resolved="light"] .toggle input:checked{background:#10b981;borde
   transform:scale(.98);
   border:1.5px dashed #45a7ff!important;
   box-shadow:0 8px 24px rgba(0,0,0,.22)!important;
+  transition:none!important;
+}
+.automation-sort-item.dragging *{
+  pointer-events:none;
 }
 .automation-sort-item.drag-over-before{
   border-top:3px solid #23a05a!important;

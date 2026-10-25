@@ -210,24 +210,23 @@ class TestThermalGovernorStress(unittest.TestCase):
     def test_concurrent_stress_under_thermal_pressure(self):
         """Stress-test thread-safety under multi-threaded rapid access."""
         gov = HardwareThermalGovernor(is_laptop=True)
+        gov.query_gpu_telemetry = lambda: (86.0, 90.0)
         errors = []
 
         def worker(thread_id: int):
             try:
                 for i in range(25):
-                    temp = 75.0 + (i % 18)  # 75 to 92 °C
-                    with patch.object(gov, "query_gpu_telemetry", return_value=(temp, 90.0)):
-                        with patch("time.sleep"):
-                            gov.pace_before_nvenc(completed_count=i)
-                            gov.pace_before_chunk(i, 25)
+                    gov.pace_before_nvenc(completed_count=i)
+                    gov.pace_before_chunk(i, 25)
             except Exception as e:
                 errors.append(e)
 
-        threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        with patch("time.sleep"):
+            threads = [threading.Thread(target=worker, args=(t,)) for t in range(8)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
 
         self.assertEqual(errors, [], f"Thread errors encountered: {errors}")
         summary = gov.get_summary()

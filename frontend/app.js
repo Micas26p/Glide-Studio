@@ -6313,11 +6313,11 @@ function saveAutomatorSortPreferences(){
   }catch(_){}
 }
 
-function annotateAutomatorItems(items, batchStamp = Date.now()){
+function annotateAutomatorItems(items, batchStamp = Date.now(), startIndex = 0){
   items.forEach((item, index) => {
     if(item._autoImportedAt == null) item._autoImportedAt = batchStamp;
-    if(item._autoSelectionIndex == null) item._autoSelectionIndex = index;
-    if(item._autoUsageIndex == null) item._autoUsageIndex = index;
+    if(item._autoSelectionIndex == null) item._autoSelectionIndex = startIndex + index;
+    if(item._autoUsageIndex == null) item._autoUsageIndex = startIndex + index;
   });
   return items;
 }
@@ -6427,12 +6427,35 @@ function applySmartExplorerOrder(items){
       const av = automatorNaturalNumber(a);
       const bv = automatorNaturalNumber(b);
       if(Number.isFinite(av) && Number.isFinite(bv) && av !== bv) return av - bv;
-      return naturalCompare(a, b);
+      const na = String(a?.name || a?.sourceName || '');
+      const nb = String(b?.name || b?.sourceName || '');
+      return na.localeCompare(nb, undefined, {numeric: true, sensitivity: 'base'});
     });
   }else{
-    ordered.reverse();
+    ordered.sort((a, b) => {
+      const na = String(a?.name || a?.sourceName || '');
+      const nb = String(b?.name || b?.sourceName || '');
+      return na.localeCompare(nb, undefined, {numeric: true, sensitivity: 'base'});
+    });
   }
   return ordered;
+}
+
+function renderAutomatorItemsOnly(type, items){
+  const empty = type === 'folder' ? 'Nenhuma pasta selecionada' : 'Nenhum ficheiro selecionado';
+  if(!items.length) return `<p class="automation-sort-empty">${empty}</p>`;
+  return items.map((item, index) => `
+    <div class="automation-sort-item" draggable="true" data-automator-type="${type}" data-automator-index="${index}" title="Arraste para reposicionar ou use as setas">
+      <span class="automation-sort-grip" aria-hidden="true" title="Arraste para mover">⋮⋮</span>
+      <span class="automation-sort-number">${String(index + 1).padStart(2, '0')}</span>
+      <span class="automation-sort-name" title="${escapeHtml(automatorItemLabel(item, type))}">${escapeHtml(automatorItemLabel(item, type))}</span>
+      <div class="automation-item-actions">
+        <button type="button" class="automation-item-move-btn" data-automator-move="up" data-automator-type="${type}" data-automator-index="${index}" title="Mover para cima"${index === 0 ? ' disabled' : ''}>▲</button>
+        <button type="button" class="automation-item-move-btn" data-automator-move="down" data-automator-type="${type}" data-automator-index="${index}" title="Mover para baixo"${index === items.length - 1 ? ' disabled' : ''}>▼</button>
+        <button type="button" class="automation-item-remove" role="button" data-automator-remove-type="${type}" data-automator-remove-index="${index}" title="Remover este item">✕</button>
+      </div>
+    </div>
+  `).join('');
 }
 
 function sortAutomatorItems(type, criterion = null, direction = null){
@@ -6450,7 +6473,11 @@ function sortAutomatorItems(type, criterion = null, direction = null){
   if(next.criterion === 'smart'){
     ordered = applySmartExplorerOrder(ordered);
   }else if(next.criterion === 'name'){
-    ordered.sort(naturalCompare);
+    ordered.sort((a, b) => {
+      const na = String(a?.name || a?.sourceName || '');
+      const nb = String(b?.name || b?.sourceName || '');
+      return na.localeCompare(nb, undefined, {numeric: true, sensitivity: 'base'});
+    });
   }else if(next.criterion === 'type'){
     ordered.sort((a, b) => {
       const ae = String(a?.name || '').split('.').pop().toLowerCase();
@@ -6467,12 +6494,27 @@ function sortAutomatorItems(type, criterion = null, direction = null){
   }
   if(next.direction === 'desc') ordered.reverse();
   list.splice(0, list.length, ...ordered);
+  list.forEach((entry, idx) => { entry._autoUsageIndex = idx; });
   state.automator.sort[type] = next;
   saveAutomatorSortPreferences();
-  if(autoPairAutomatorLists() && dockSummary) dockSummary.textContent = 'AUTO: áudios e roteiros alinhados aos Textos (SRT) pelo nome do ficheiro.';
-  updateAutomatorPreview();
-}
+  if(type === 'srt' && autoPairAutomatorLists() && dockSummary){
+    dockSummary.textContent = 'AUTO: áudios e roteiros alinhados aos Textos (SRT) pelo nome do ficheiro.';
+  }
 
+  const itemsContainer = automatorPreview?.querySelector(`[data-automator-list="${type}"] .automation-sort-items`);
+  if(itemsContainer){
+    const prevScroll = itemsContainer.scrollTop;
+    itemsContainer.innerHTML = renderAutomatorItemsOnly(type, list);
+    itemsContainer.scrollTop = prevScroll;
+    const badge = automatorPreview?.querySelector(`[data-automator-list="${type}"] .automation-sort-badge`);
+    if(badge) badge.textContent = list.length;
+    const dirBtn = automatorPreview?.querySelector(`[data-automator-direction="${type}"]`);
+    if(dirBtn) dirBtn.textContent = next.direction === 'desc' ? '↓' : '↑';
+    refreshAutomatorPlanAfterReorder();
+  }else{
+    updateAutomatorPreview();
+  }
+}
 async function hydrateAutomatorDurations(type, items){
   if(!['audio', 'music', 'reference'].includes(type)) return;
   const pending = items.filter(item => !Number(item._autoDuration || 0));
@@ -6553,8 +6595,8 @@ function automatorFolderGroups(fileList){
       signature,
       files,
       _autoImportedAt: Date.now(),
-      _autoSelectionIndex: 0,
-      _autoUsageIndex: 0,
+      _autoSelectionIndex: null,
+      _autoUsageIndex: null,
     };
   }).filter(group => group.files.length);
 
@@ -6576,8 +6618,8 @@ function automatorFolderGroups(fileList){
       signature,
       files: looseFiles,
       _autoImportedAt: Date.now(),
-      _autoSelectionIndex: 0,
-      _autoUsageIndex: 0,
+      _autoSelectionIndex: null,
+      _autoUsageIndex: null,
     });
   }
 
@@ -6589,7 +6631,8 @@ function appendAutomatorFolders(fileList){
   if(!incoming.length) return 0;
   if(!state.automator.folders) state.automator.folders = [];
   let added = 0;
-  annotateAutomatorItems(incoming, Date.now()).forEach(folder => {
+  const currentLen = state.automator.folders.length;
+  annotateAutomatorItems(incoming, Date.now(), currentLen).forEach(folder => {
     // Check if a folder with the same name or sourceName already exists
     const existingFolder = state.automator.folders.find(f =>
       (f.name && folder.name && f.name.toLowerCase() === folder.name.toLowerCase()) ||
@@ -6695,7 +6738,7 @@ function appendAutomatorFiles(type, newFiles){
     }
   }
   if(!toAdd.length) return 0;
-  const annotated = annotateAutomatorItems(toAdd, Date.now());
+  const annotated = annotateAutomatorItems(toAdd, Date.now(), list.length);
   list.push(...annotated);
   if(type === 'audio'){
     hydrateAutomatorDurations('audio', toAdd);
@@ -6785,17 +6828,14 @@ function renderAutomatorList(type, title, items){
 
 function reorderAutomatorItems(type, fromIndex, toIndex, placeAfter = false){
   const list = automatorItems(type);
-  if(!list.length || fromIndex === toIndex || fromIndex < 0 || toIndex < 0 || fromIndex >= list.length || toIndex >= list.length) return false;
+  if(!list.length || fromIndex < 0 || toIndex < 0 || fromIndex >= list.length || toIndex >= list.length) return false;
+  if(fromIndex === toIndex) return false;
+  const targetItem = list[toIndex];
   const [item] = list.splice(fromIndex, 1);
-  let targetIndex = toIndex;
-  if(fromIndex < toIndex){
-    targetIndex = toIndex - 1;
-    if(placeAfter) targetIndex += 1;
-  }else{
-    if(placeAfter) targetIndex += 1;
-  }
-  targetIndex = Math.max(0, Math.min(targetIndex, list.length));
-  list.splice(targetIndex, 0, item);
+  const newTargetIndex = list.indexOf(targetItem);
+  if(newTargetIndex === -1) return false;
+  const insertAt = placeAfter ? newTargetIndex + 1 : newTargetIndex;
+  list.splice(insertAt, 0, item);
   list.forEach((entry, index) => { entry._autoUsageIndex = index; });
   state.automator.sort[type] = {criterion: 'usage', direction: 'asc'};
   saveAutomatorSortPreferences();
@@ -6805,13 +6845,66 @@ function reorderAutomatorItems(type, fromIndex, toIndex, placeAfter = false){
 function refreshAutomatorListOrder(type){
   const list = automatorPreview?.querySelector(`[data-automator-list="${type}"] .automation-sort-items`);
   if(!list) return;
-  list.querySelectorAll('.automation-sort-item').forEach((item, index) => {
+  const items = list.querySelectorAll('.automation-sort-item');
+  const count = items.length;
+  items.forEach((item, index) => {
     item.dataset.automatorIndex = String(index);
     const number = item.querySelector('.automation-sort-number');
     if(number) number.textContent = String(index + 1).padStart(2, '0');
+    const upBtn = item.querySelector('[data-automator-move="up"]');
+    if(upBtn){
+      upBtn.dataset.automatorIndex = String(index);
+      upBtn.disabled = index === 0;
+    }
+    const downBtn = item.querySelector('[data-automator-move="down"]');
+    if(downBtn){
+      downBtn.dataset.automatorIndex = String(index);
+      downBtn.disabled = index === count - 1;
+    }
+    const removeBtn = item.querySelector('.automation-item-remove');
+    if(removeBtn) removeBtn.dataset.automatorRemoveIndex = String(index);
   });
 }
 
+function applyInPlaceReorder(type, fromIndex, toIndex, placeAfter = false){
+  const listContainer = automatorPreview?.querySelector(`[data-automator-list="${type}"] .automation-sort-items`);
+  if(!listContainer) return;
+  const items = Array.from(listContainer.querySelectorAll('.automation-sort-item'));
+  const sourceEl = items[fromIndex];
+  const targetEl = items[toIndex];
+  if(!sourceEl || !targetEl || sourceEl === targetEl) return;
+
+  if(placeAfter){
+    targetEl.after(sourceEl);
+  }else{
+    targetEl.before(sourceEl);
+  }
+
+  refreshAutomatorListOrder(type);
+
+  const select = automatorPreview?.querySelector(`[data-automator-sort="${type}"]`);
+  if(select) select.value = 'usage';
+
+  refreshAutomatorPlanAfterReorder();
+}
+
+function getNearestSortItem(listEl, clientY){
+  if(!listEl) return null;
+  const items = Array.from(listEl.querySelectorAll('.automation-sort-item'));
+  if(!items.length) return null;
+  let closest = null;
+  let minDistance = Infinity;
+  for(const item of items){
+    const rect = item.getBoundingClientRect();
+    const midY = rect.top + rect.height / 2;
+    const distance = Math.abs(clientY - midY);
+    if(distance < minDistance){
+      minDistance = distance;
+      closest = item;
+    }
+  }
+  return closest;
+}
 function estimateAudioFileSeconds(file){
   if(!file || !file.size) return 0;
   const name = String(file.name || '').toLowerCase();
@@ -6823,10 +6916,22 @@ function estimateAudioFileSeconds(file){
   return file.size / 38000;
 }
 
+let tableHealthDebounceTimer = null;
+function scheduleTableHealthUpdate(){
+  if(tableHealthDebounceTimer) return;
+  tableHealthDebounceTimer = requestAnimationFrame(() => {
+    tableHealthDebounceTimer = null;
+    const tbody = automatorPreview?.querySelector('.automation-table tbody');
+    if(!tbody) return;
+    const plan = automatorPlan();
+    tbody.innerHTML = automatorTableRowsHtml(plan.rows);
+  });
+}
+
 function probeAutomatorRowDurations(row){
-  if(!row || row._probed) return;
-  row._probed = true;
-  if(row.srt && !row._audioDuration && typeof row.srt.slice === 'function'){
+  if(!row) return;
+  if(row.srt && !row.srt._audioDuration && typeof row.srt.slice === 'function'){
+    row.srt._audioDuration = -1;
     try{
       const slice = row.srt.slice(Math.max(0, row.srt.size - 8192));
       const reader = new FileReader();
@@ -6837,28 +6942,26 @@ function probeAutomatorRowDurations(row){
           const lastMatch = matches[matches.length - 1][1];
           const sec = parseSrtTime(lastMatch);
           if(sec && sec > 0){
+            row.srt._audioDuration = sec;
             row._audioDuration = sec;
-            const tbody = automatorPreview?.querySelector('.automation-table tbody');
-            const plan = automatorPlan();
-            if(tbody) tbody.innerHTML = automatorTableRowsHtml(plan.rows);
+            scheduleTableHealthUpdate();
           }
         }
       };
       reader.readAsText(slice);
-    }catch(_){ }
+    }catch(_){ row.srt._audioDuration = 0; }
   }
-  if(row.audio && !row._audioDuration && typeof durationOf === 'function'){
+  if(row.audio && !row.audio._audioDuration && typeof durationOf === 'function'){
+    row.audio._audioDuration = -1;
     durationOf(row.audio).then(info => {
       if(info?.seconds > 0){
+        row.audio._audioDuration = info.seconds;
         row._audioDuration = info.seconds;
-        const tbody = automatorPreview?.querySelector('.automation-table tbody');
-        const plan = automatorPlan();
-        if(tbody) tbody.innerHTML = automatorTableRowsHtml(plan.rows);
+        scheduleTableHealthUpdate();
       }
-    }).catch(() => {});
+    }).catch(() => { row.audio._audioDuration = 0; });
   }
 }
-
 function automatorRowHealth(row){
   const files = row.folder?.files || [];
   const vCount = files.filter(f => kindOfFile(f, 'video') === 'video').length;
@@ -7030,8 +7133,11 @@ function automatorAllFiles(){
   const a = state.automator || {};
   return [...(a.srts || []), ...(a.audios || []), ...(a.scripts || []), ...(a.folders || []).flatMap(folder => folder.files || [])].filter(Boolean);
 }
+function automatorModalIsOpen(){
+  return Boolean(automatorModal?.classList.contains('show'));
+}
 function automatorPoolBusy(){
-  return Boolean(state.renderActive || state.queueRendering || state.automatorApplying);
+  return Boolean(state.renderActive || state.queueRendering || state.automatorApplying || automatorModalIsOpen());
 }
 function scheduleAutomatorPoolSync(delay = 1500){
   if(automatorPoolBusy()) return;
@@ -7374,6 +7480,7 @@ function closeAutomator(){
   }
   automatorModal?.classList.remove('show');
   automatorModal?.setAttribute('aria-hidden', 'true');
+  scheduleAutomatorPoolSync(3000);
 }
 
 async function cancelAutomator(){
@@ -9562,21 +9669,30 @@ if(automatorPreview){
     }catch(_){}
   });
 
+  let currentDragOverTarget = null;
+  let currentDragOverPos = null;
+
   automatorPreview.addEventListener('dragover', event => {
     if(automatorInternalDrag){
-      const targetItem = event.target.closest('.automation-sort-item');
-      if(targetItem && targetItem.dataset.automatorType === automatorInternalDrag.type && targetItem !== automatorInternalDrag.element){
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      const listEl = event.target.closest(`[data-automator-list="${automatorInternalDrag.type}"]`);
+      if(!listEl) return;
+      const targetItem = event.target.closest('.automation-sort-item') || getNearestSortItem(listEl, event.clientY);
+      if(targetItem && targetItem !== automatorInternalDrag.element){
         const rect = targetItem.getBoundingClientRect();
         const placeAfter = event.clientY > rect.top + rect.height / 2;
-        automatorPreview.querySelectorAll('.drag-over-before, .drag-over-after').forEach(el => {
-          if(el !== targetItem) el.classList.remove('drag-over-before', 'drag-over-after');
-        });
-        targetItem.classList.toggle('drag-over-before', !placeAfter);
-        targetItem.classList.toggle('drag-over-after', placeAfter);
-        return;
+        if(currentDragOverTarget !== targetItem || currentDragOverPos !== placeAfter){
+          if(currentDragOverTarget && currentDragOverTarget !== targetItem){
+            currentDragOverTarget.classList.remove('drag-over-before', 'drag-over-after');
+          }
+          currentDragOverTarget = targetItem;
+          currentDragOverPos = placeAfter;
+          targetItem.classList.toggle('drag-over-before', !placeAfter);
+          targetItem.classList.toggle('drag-over-after', placeAfter);
+        }
       }
+      return;
     }
     // Handle external file dragover
     event.preventDefault();
@@ -9587,6 +9703,7 @@ if(automatorPreview){
   });
 
   automatorPreview.addEventListener('dragleave', event => {
+    if(automatorInternalDrag) return;
     const targetItem = event.target.closest('.automation-sort-item');
     if(targetItem && (!event.relatedTarget || !targetItem.contains(event.relatedTarget))){
       targetItem.classList.remove('drag-over-before', 'drag-over-after');
@@ -9598,6 +9715,11 @@ if(automatorPreview){
   });
 
   automatorPreview.addEventListener('dragend', () => {
+    if(currentDragOverTarget){
+      currentDragOverTarget.classList.remove('drag-over-before', 'drag-over-after');
+      currentDragOverTarget = null;
+      currentDragOverPos = null;
+    }
     automatorPreview.querySelectorAll('.dragging, .drag-over-before, .drag-over-after, .automation-drop-active').forEach(el => {
       el.classList.remove('dragging', 'drag-over-before', 'drag-over-after', 'automation-drop-active');
     });
@@ -9606,23 +9728,30 @@ if(automatorPreview){
 
   automatorPreview.addEventListener('drop', async event => {
     event.preventDefault();
+    if(currentDragOverTarget){
+      currentDragOverTarget.classList.remove('drag-over-before', 'drag-over-after');
+      currentDragOverTarget = null;
+      currentDragOverPos = null;
+    }
     automatorPreview.querySelectorAll('.dragging, .drag-over-before, .drag-over-after, .automation-drop-active').forEach(el => {
       el.classList.remove('dragging', 'drag-over-before', 'drag-over-after', 'automation-drop-active');
     });
 
     // 1. Check if this is an internal item reorder drop:
     if(automatorInternalDrag){
-      const targetItem = event.target.closest('.automation-sort-item');
-      if(targetItem && targetItem.dataset.automatorType === automatorInternalDrag.type){
+      const type = automatorInternalDrag.type;
+      const listEl = event.target.closest(`[data-automator-list="${type}"]`) || automatorPreview.querySelector(`[data-automator-list="${type}"]`);
+      const targetItem = event.target.closest('.automation-sort-item') || getNearestSortItem(listEl, event.clientY);
+      if(targetItem && targetItem.dataset.automatorType === type){
         event.stopPropagation();
         const rect = targetItem.getBoundingClientRect();
         const placeAfter = event.clientY > rect.top + rect.height / 2;
         const fromIndex = automatorInternalDrag.index;
         const toIndex = Number(targetItem.dataset.automatorIndex);
         if(fromIndex !== toIndex){
-          const changed = reorderAutomatorItems(automatorInternalDrag.type, fromIndex, toIndex, placeAfter);
+          const changed = reorderAutomatorItems(type, fromIndex, toIndex, placeAfter);
           if(changed){
-            updateAutomatorPreview();
+            applyInPlaceReorder(type, fromIndex, toIndex, placeAfter);
           }
         }
       }
@@ -9705,7 +9834,7 @@ if(automatorPreview){
         list.forEach((entry, idx) => { entry._autoUsageIndex = idx; });
         state.automator.sort[type] = {criterion: 'usage', direction: 'asc'};
         saveAutomatorSortPreferences();
-        updateAutomatorPreview();
+        applyInPlaceReorder(type, index, targetIndex, dir === 'down');
       }
       return;
     }
