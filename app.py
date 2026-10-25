@@ -2343,7 +2343,14 @@ def _find_queue_project(project_id: str) -> dict[str, Any] | None:
 
 
 def _project_media_dir(project_id: str) -> Path:
-    return PROJECT_MEDIA_ROOT / safe_folder_component(project_id, "project")[:48]
+    safe_name = safe_folder_component(project_id, "project")[:48]
+    candidate = PROJECT_MEDIA_ROOT / safe_name
+    if candidate.exists():
+        return candidate
+    local_app_candidate = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / "Programs" / "Glide Studio" / "project_media" / safe_name
+    if local_app_candidate.exists():
+        return local_app_candidate
+    return candidate
 
 
 def _project_media_index_path(project_id: str) -> Path:
@@ -3892,17 +3899,34 @@ def _queue_project_missing_requirements(project: dict[str, Any]) -> list[str]:
 
 def _project_media_paths_by_kind(project: dict[str, Any], kind: str, limit: int = 4) -> list[Path]:
     project_id = str(project.get("id") or "")
-    media = project.get("media") if isinstance(project.get("media"), dict) else {}
+    manifest = project.get("manifest") if isinstance(project.get("manifest"), dict) else {}
+    rels = manifest.get(kind) if isinstance(manifest.get(kind), list) else []
+    if not rels:
+        media = project.get("media") if isinstance(project.get("media"), dict) else {}
+        rels = media.get(kind) if isinstance(media.get(kind), list) else []
+        if not rels and kind == "subtitles":
+            rels = media.get("texts") if isinstance(media.get("texts"), list) else []
+        elif not rels and kind == "texts":
+            rels = media.get("subtitles") if isinstance(media.get("subtitles"), list) else []
     index = _load_project_media_index(project_id) if project_id else {}
-    rels = media.get(kind) or []
     paths: list[Path] = []
     for raw_rel in rels:
         rel_key = str(raw_rel).replace("\\", "/")
         record = index.get(rel_key) or {}
+        if not record:
+            base_name = Path(rel_key).name
+            for k, v in index.items():
+                if k == base_name or v.get("name") == base_name or k.endswith(f"/{base_name}"):
+                    record = v
+                    break
         stored_file = Path(str(record.get("file") or "")).name
         candidate = _project_media_dir(project_id) / stored_file if project_id and stored_file else None
         if candidate and candidate.exists() and candidate.is_file():
             paths.append(candidate)
+        else:
+            resolved = _resolve_persisted_manifest_item({"rel": rel_key, "name": rel_key, "persistedProjectId": project_id})
+            if resolved and resolved.exists() and resolved.is_file():
+                paths.append(resolved)
         if len(paths) >= limit:
             break
     return paths
