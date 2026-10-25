@@ -18,6 +18,11 @@ if os.name == "nt":
         ctypes.cdll.msvcrt._setmaxstdio(2048)
     except Exception:
         pass
+import logging
+import numpy as np
+
+logger = logging.getLogger("glide_studio")
+
 import struct
 import sys
 import threading
@@ -1637,6 +1642,7 @@ class Job:
     work: Path | None = None
     export_dir: Path | None = None
     thread_started: bool = False
+    is_laptop: bool = False
     encoder_logged: bool = False
     cancel_requested: bool = False
     cancelled_at: float | None = None
@@ -17208,7 +17214,7 @@ def make_sfx_clip(event: dict[str, Any], out: Path, work: Path) -> tuple[Path, s
             "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
             f"volume={normalization_db:.2f}dB,"
             "acompressor=threshold=0.18:ratio=1.55:attack=1:release=42:makeup=1,"
-            f"afade=t=out:st={fade_start:.3f}:d={fade_out:.3f},volume={db:.2f}dB,alimiter=limit=0.96"
+            f"afade=t=in:st=0:d=0.004,afade=t=out:st={fade_start:.3f}:d={fade_out:.3f},volume={db:.2f}dB,alimiter=limit=0.96"
         )
         cmd = [
             FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
@@ -17246,7 +17252,7 @@ def make_sfx_clip(event: dict[str, Any], out: Path, work: Path) -> tuple[Path, s
     source, chain = procedural_sfx_source(effect)
     af = (
         f"{chain},"
-        f"afade=t=out:st={fade_start:.3f}:d={fade_out:.3f},"
+        f"afade=t=in:st=0:d=0.004,afade=t=out:st={fade_start:.3f}:d={fade_out:.3f},"
         f"volume={db:.2f}dB,alimiter=limit=0.96"
     )
     cmd = [
@@ -22678,6 +22684,8 @@ def make_segments_smart(
     summary["frame_grid"] = quantize_plans_to_frame_grid(plans)
 
     performance_budget = render_performance_budget(job, gpu, len(plans))
+    job.is_laptop = bool(performance_budget.get("is_laptop", False))
+    THERMAL_GOVERNOR.is_laptop = bool(performance_budget.get("is_laptop", False))
     worker_count = int(performance_budget.get("segment_workers") or efficient_segment_worker_count(job, gpu))
     encoder_args = choose_segment_video_args(mode, gpu, job, worker_count=worker_count)
     summary["segment_workers"] = worker_count

@@ -52,43 +52,106 @@ def build_pcm_sfx_event_bed(
     try:
         import numpy as np
 
+        def _apply_ramp_envelope(arr: np.ndarray, channels: int = 2, max_fade_frames: int = 192) -> np.ndarray:
+            clip_frames = len(arr) // channels
+            fade_frames = min(max_fade_frames, clip_frames // 2)
+            if fade_frames > 0:
+                ramp = np.linspace(0.0, 1.0, fade_frames, endpoint=True, dtype=np.float32)
+                for ch in range(channels):
+                    arr[ch : fade_frames * channels : channels] = (
+                        arr[ch : fade_frames * channels : channels] * ramp
+                    ).astype(np.int32)
+                    arr[-fade_frames * channels + ch :: channels] = (
+                        arr[-fade_frames * channels + ch :: channels] * ramp[::-1]
+                    ).astype(np.int32)
+            return arr
+
         def _load_and_normalize_clip(clip_path: Path) -> np.ndarray | None:
             try:
-                with wave.open(str(clip_path), "rb") as source:
-                    channels_in = source.getnchannels()
-                    framerate = source.getframerate()
-                    sampwidth = source.getsampwidth()
-                    raw = source.readframes(source.getnframes())
-                    if not raw:
+                channels_in = 2
+                framerate = 48000
+                sampwidth = 2
+                raw = b""
+                is_ieee_float = False
+                try:
+                    with wave.open(str(clip_path), "rb") as source:
+                        channels_in = source.getnchannels()
+                        framerate = source.getframerate()
+                        sampwidth = source.getsampwidth()
+                        raw = source.readframes(source.getnframes())
+                except Exception:
+                    # Fallback RIFF header parser for IEEE float or extensible WAV files
+                    try:
+                        data = clip_path.read_bytes()
+                        if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WAVE":
+                            pos = 12
+                            fmt_tag = 1
+                            while pos + 8 <= len(data):
+                                chunk_id = data[pos : pos + 4]
+                                chunk_size = struct.unpack("<I", data[pos + 4 : pos + 8])[0]
+                                pos += 8
+                                chunk_data = data[pos : pos + chunk_size]
+                                pos += chunk_size + (chunk_size & 1)
+                                if chunk_id == b"fmt " and len(chunk_data) >= 16:
+                                    fmt_tag, channels_in, framerate, _, _, bits = struct.unpack("<HHIIHH", chunk_data[:16])
+                                    sampwidth = bits // 8
+                                    if fmt_tag == 0xFFFE and len(chunk_data) >= 26:
+                                        fmt_tag = struct.unpack("<H", chunk_data[24:26])[0]
+                                    if fmt_tag == 3:
+                                        is_ieee_float = True
+                                elif chunk_id == b"data":
+                                    raw = chunk_data
+                    except Exception:
                         return None
-                    if sampwidth == 2:
-                        clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                    elif sampwidth == 1:
-                        clip_arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.int32) - 128) * 256
+
+                if not raw:
+                    return None
+
+                if is_ieee_float:
+                    n_bytes = len(raw) - (len(raw) % 4)
+                    flt = np.frombuffer(raw[:n_bytes], dtype=np.float32)
+                    clip_arr = np.clip(np.nan_to_num(flt) * 32767.0, -32768, 32767).astype(np.int32)
+                elif sampwidth == 2:
+                    clip_arr = np.frombuffer(raw[:len(raw) - (len(raw) % 2)], dtype=np.int16).astype(np.int32)
+                elif sampwidth == 1:
+                    clip_arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.int32) - 128) * 256
+                elif sampwidth == 3:
+                    n_bytes = len(raw) - (len(raw) % 3)
+                    b = np.frombuffer(raw[:n_bytes], dtype=np.uint8)
+                    padded = np.zeros((len(b) // 3, 4), dtype=np.uint8)
+                    padded[:, 1:] = b.reshape(-1, 3)
+                    clip_arr = (padded.view(dtype=np.int32).flatten() / 65536.0).astype(np.int32)
+                elif sampwidth == 4:
+                    n_bytes = len(raw) - (len(raw) % 4)
+                    flt = np.frombuffer(raw[:n_bytes], dtype=np.float32)
+                    if np.isfinite(flt).all() and len(flt) > 0 and np.max(np.abs(flt)) <= 2.0:
+                        clip_arr = np.clip(flt * 32767.0, -32768, 32767).astype(np.int32)
                     else:
-                        return None
+                        clip_arr = (np.frombuffer(raw[:n_bytes], dtype=np.int32) / 65536.0).astype(np.int32)
+                else:
+                    return None
 
-                    if channels_in == 1:
-                        clip_arr = np.repeat(clip_arr, 2)
-                    elif channels_in > 2:
-                        # Se multicanal (>2), extrair os dois primeiros canais
-                        frames_cnt = len(clip_arr) // channels_in
-                        clip_arr = clip_arr.reshape(frames_cnt, channels_in)[:, :2].flatten()
+                if channels_in == 1:
+                    clip_arr = np.repeat(clip_arr, 2)
+                elif channels_in > 2:
+                    # Se multicanal (>2), extrair os dois primeiros canais
+                    frames_cnt = len(clip_arr) // channels_in
+                    clip_arr = clip_arr.reshape(frames_cnt, channels_in)[:, :2].flatten()
 
-                    if framerate != sample_rate and len(clip_arr) > 0:
-                        actual_frames = len(clip_arr) // channels
-                        target_frames_clip = int(round(actual_frames * sample_rate / framerate))
-                        if target_frames_clip > 0:
-                            old_x = np.linspace(0, actual_frames, actual_frames, endpoint=False)
-                            new_x = np.linspace(0, actual_frames, target_frames_clip, endpoint=False)
-                            left = np.interp(new_x, old_x, clip_arr[0::2])
-                            right = np.interp(new_x, old_x, clip_arr[1::2])
-                            resampled = np.empty(target_frames_clip * 2, dtype=np.int32)
-                            resampled[0::2] = left.astype(np.int32)
-                            resampled[1::2] = right.astype(np.int32)
-                            clip_arr = resampled
+                if framerate != sample_rate and len(clip_arr) > 0:
+                    actual_frames = len(clip_arr) // channels
+                    target_frames_clip = int(round(actual_frames * sample_rate / framerate))
+                    if target_frames_clip > 0:
+                        old_x = np.linspace(0, actual_frames, actual_frames, endpoint=False)
+                        new_x = np.linspace(0, actual_frames, target_frames_clip, endpoint=False)
+                        left = np.interp(new_x, old_x, clip_arr[0::2])
+                        right = np.interp(new_x, old_x, clip_arr[1::2])
+                        resampled = np.empty(target_frames_clip * 2, dtype=np.int32)
+                        resampled[0::2] = left.astype(np.int32)
+                        resampled[1::2] = right.astype(np.int32)
+                        clip_arr = resampled
 
-                    return clip_arr
+                return clip_arr
             except Exception:
                 return None
 
@@ -102,9 +165,19 @@ def build_pcm_sfx_event_bed(
                 clip_arr = _load_and_normalize_clip(clip)
                 if clip_arr is None or len(clip_arr) == 0:
                     continue
+                _apply_ramp_envelope(clip_arr, channels=channels, max_fade_frames=192)
                 dst_s = start_frame * channels
                 dst_e = dst_s + min(len(clip_arr), (total_frames - start_frame) * channels)
                 src_len = dst_e - dst_s
+                if src_len < len(clip_arr):
+                    trunc_frames = src_len // channels
+                    tail_fade = min(192, trunc_frames // 2)
+                    if tail_fade > 0:
+                        tail_ramp = np.linspace(1.0, 0.0, tail_fade, endpoint=True, dtype=np.float32)
+                        for ch in range(channels):
+                            clip_arr[src_len - tail_fade * channels + ch : src_len : channels] = (
+                                clip_arr[src_len - tail_fade * channels + ch : src_len : channels] * tail_ramp
+                            ).astype(np.int32)
                 bed_arr[dst_s:dst_e] += clip_arr[:src_len]
 
             with bed.open("wb") as target:
@@ -125,6 +198,7 @@ def build_pcm_sfx_event_bed(
             clip_arr = _load_and_normalize_clip(clip)
             if clip_arr is None or len(clip_arr) == 0:
                 continue
+            _apply_ramp_envelope(clip_arr, channels=channels, max_fade_frames=192)
             frames_in_clip = len(clip_arr) // channels
             loaded_events.append((start_frame, start_frame + frames_in_clip, clip_arr))
 

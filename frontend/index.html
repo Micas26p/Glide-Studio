@@ -409,7 +409,6 @@
                   <option value="smart_auto" selected>Automático (protege textos e CTA)</option>
                   <option value="smart_crop">Full-Bleed 9:16 (pode cortar textos e CTA)</option>
                   <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
-                  <option value="smart_auto">Automático Adaptativo</option>
                 </select>
                 <small class="field-hint">Full-Bleed preenche a tela inteira acompanhando o centro de interesse.</small>
               </label>
@@ -544,11 +543,10 @@
           <label class="toggle" title="Se a mídia for menor que a narração, estende as fotos e vídeos ao limite seguro e encurta o áudio com fade suave em vez de travar o render. Desmarcado por padrão para preservar 100% da narração."><input id="allowAudioTrimToggle" type="checkbox" /> <span>Sacrificar áudio se faltar mídia</span></label>
           <label class="toggle" title="Detecta pausas mortas (>1.0s) na narração e compacta suavemente para um respiro natural (~350ms), acelerando o render e aumentando a retenção."><input id="trimSilenceToggle" type="checkbox" checked /> <span>Otimizar silêncios da voz</span></label>
           <label class="toggle" title="Gera automaticamente uma versão vertical 1080x1920 (9:16) para TikTok/Shorts/Reels junto com o master horizontal."><input id="dualExportShortsToggle" type="checkbox" /> <span>Dual Export (Shorts 9:16)</span></label>
-          <select id="dualExportModeSelect" class="advanced-only select-inline" title="Modo de enquadramento vertical para Shorts/TikTok 9:16" style="margin: 0 4px; padding: 4px 8px; border-radius: 6px; font-size: 11px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14); color: inherit;">
+          <select id="dualExportModeSelect" class="advanced-only select-inline" title="Modo de enquadramento vertical para Shorts/TikTok 9:16">
             <option value="smart_auto" selected>Automático (protege textos e CTA)</option>
-                  <option value="smart_crop">Full-Bleed 9:16 (pode cortar textos e CTA)</option>
+            <option value="smart_crop">Full-Bleed 9:16 (pode cortar textos e CTA)</option>
             <option value="smart_blur">Pillowbox Blur (Preserva 100% da Tela 16:9)</option>
-            <option value="smart_auto">Automático Adaptativo</option>
           </select>
           <label class="toggle" title="Permite exportar vídeos com menos de 15 segundos ou prosseguir com quantidade mínima de mídia (útil para testes rápidos de poucos segundos). Se desmarcado, impede renders acidentais de micro-vídeos."><input id="forceShortRenderToggle" type="checkbox" /> <span>Forçar render curto (&lt;15s)</span></label>
         </div>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
+import sys
 import threading
 import time
 from typing import Any, Callable
@@ -82,8 +83,9 @@ class HardwareThermalGovernor:
     evitando saturação térmica, cortes de energia pelo circuito da placa-mãe e reinícios abruptos.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, is_laptop: bool | None = None) -> None:
         self._lock = threading.Lock()
+        self._is_laptop = is_laptop
         self._last_gpu_temp: float = 0.0
         self._last_gpu_util: float = 0.0
         self._last_query_time: float = 0.0
@@ -92,6 +94,36 @@ class HardwareThermalGovernor:
         self._interventions_count: int = 0
         self._peak_gpu_temp: float = 0.0
         self._readings: list[float] = []
+
+    @property
+    def is_laptop(self) -> bool:
+        if self._is_laptop is not None:
+            return self._is_laptop
+        try:
+            if sys.platform == "win32":
+                import ctypes
+
+                class SYSTEM_POWER_STATUS(ctypes.Structure):
+                    _fields_ = [
+                        ("ACLineStatus", ctypes.c_byte),
+                        ("BatteryFlag", ctypes.c_byte),
+                        ("BatteryLifePercent", ctypes.c_byte),
+                        ("SystemStatusFlag", ctypes.c_byte),
+                        ("BatteryLifeTime", ctypes.c_ulong),
+                        ("BatteryFullLifeTime", ctypes.c_ulong),
+                    ]
+
+                status = SYSTEM_POWER_STATUS()
+                if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+                    if status.BatteryFlag not in (128, -128, 255, -1):
+                        return True
+        except Exception:
+            pass
+        return False
+
+    @is_laptop.setter
+    def is_laptop(self, val: bool | None) -> None:
+        self._is_laptop = bool(val) if val is not None else None
 
     def reset(self) -> None:
         with self._lock:
@@ -131,15 +163,39 @@ class HardwareThermalGovernor:
         with self._lock:
             return self._last_gpu_temp, self._last_gpu_util
 
-    def pace_before_nvenc(self, target: Any = None, completed_count: int = 0, log_callback: Any = None) -> float:
+    def pace_before_nvenc(
+        self,
+        target: Any = None,
+        completed_count: int = 0,
+        log_callback: Any = None,
+        is_laptop: bool | None = None,
+    ) -> float:
         """Pacing térmico dinâmico invocado antes de cada codificação NVENC."""
-        temp, _ = self.query_gpu_telemetry()
-        if temp <= 0.0:
-            return 0.0
-
         dest = log_callback or target
         if dest is not None and completed_count == 0:
             completed_count = getattr(dest, "_completed_segments_count", 0)
+
+        laptop_active = self.is_laptop if is_laptop is None else bool(is_laptop)
+        if not laptop_active and dest is not None:
+            laptop_active = bool(
+                getattr(dest, "is_laptop", False)
+                or getattr(getattr(dest, "budget", None), "get", lambda *_: False)("is_laptop", False)
+            )
+
+        temp, _ = self.query_gpu_telemetry()
+        if temp <= 0.0:
+            if laptop_active:
+                pause_sec = 0.25
+                _log_target(
+                    dest,
+                    f"Governador Térmico: Dispositivo móvel/laptop sem telemetria GPU. Pacing preventivo seguro de {pause_sec:.2f}s.",
+                )
+                with self._lock:
+                    self._interventions_count += 1
+                    self._total_breath_time += pause_sec
+                time.sleep(pause_sec)
+                return pause_sec
+            return 0.0
 
         pause_sec = 0.0
         if temp >= 88.0:
@@ -193,8 +249,27 @@ class HardwareThermalGovernor:
             total_chunks = kwargs.get("total_chunks", 1)
             dest = kwargs.get("log_callback") or kwargs.get("job")
 
+        is_laptop = kwargs.get("is_laptop")
+        laptop_active = self.is_laptop if is_laptop is None else bool(is_laptop)
+        if not laptop_active and dest is not None:
+            laptop_active = bool(
+                getattr(dest, "is_laptop", False)
+                or getattr(getattr(dest, "budget", None), "get", lambda *_: False)("is_laptop", False)
+            )
+
         temp, _ = self.query_gpu_telemetry()
         if temp <= 0.0:
+            if laptop_active:
+                pause_sec = 0.25
+                _log_target(
+                    dest,
+                    f"Governador Térmico: Dispositivo móvel/laptop sem telemetria GPU antes do bloco {chunk_idx + 1}/{total_chunks}. Intervalo preventivo seguro de {pause_sec:.2f}s.",
+                )
+                with self._lock:
+                    self._interventions_count += 1
+                    self._total_breath_time += pause_sec
+                time.sleep(pause_sec)
+                return pause_sec
             return 0.0
 
         pause_sec = 0.0
