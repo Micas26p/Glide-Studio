@@ -71,6 +71,48 @@ def data_root() -> Path:
     return DATA_ROOT or default_data_root()
 
 
+class PageCrashRecovery:
+    """Decide quando recarregar a interface após encerramento do processo da UI."""
+
+    RECOVERABLE_KINDS = {1, 2}
+
+    def __init__(self, max_reloads: int = 5, window_seconds: float = 600.0):
+        self.max_reloads = max_reloads
+        self.window_seconds = window_seconds
+        self.reloads: list[float] = []
+
+    def next_delay(self, kind: int, now: float | None = None) -> float | None:
+        if kind not in self.RECOVERABLE_KINDS:
+            return None
+        now = time.monotonic() if now is None else now
+        self.reloads = [t for t in self.reloads if now - t < self.window_seconds]
+        if len(self.reloads) >= self.max_reloads:
+            return None
+        self.reloads.append(now)
+        return min(30.0, 2.0 * (2 ** (len(self.reloads) - 1)))
+
+
+class UiFreezeWatchdog:
+    """Monitora batimentos cardíacos da interface para detectar e recuperar travamentos de UI."""
+
+    def __init__(self, stale_after: float = 25.0, grace: float = 45.0):
+        self.stale_after = stale_after
+        self.grace = grace
+        self.last_action: float = 0.0
+
+    def mark_action(self, now: float | None = None) -> None:
+        self.last_action = time.monotonic() if now is None else now
+
+    def is_frozen(self, now: float, last_heartbeat: float, visible: bool, minimized: bool, foreground: bool) -> bool:
+        if now - self.last_action < self.grace:
+            return False
+        if minimized:
+            return False
+        if not foreground and not visible:
+            return False
+        return (now - last_heartbeat) > self.stale_after
+
+
 def load_backend():
     global APP_VERSION, BACKEND_APP, DATA_ROOT
     if BACKEND_APP is None:

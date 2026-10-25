@@ -426,7 +426,7 @@ class Regressions(unittest.TestCase):
         with patch.object(app, "hardware_profile", return_value={"gpus": [{"name": "RTX 3050 Laptop GPU"}], "preferred_gpu": "RTX 3050 Laptop GPU"}):
             budget = app.render_performance_budget(job, gpu=True, segment_count=50)
             self.assertTrue(budget["is_laptop"])
-            self.assertEqual(budget["segment_workers"], 2)
+            self.assertEqual(budget["segment_workers"], 1)
 
     def test_single_pass_mastering_summary(self):
         """Verifica se o sumário do mastering single-pass broadcast é gerado corretamente."""

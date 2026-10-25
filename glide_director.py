@@ -448,6 +448,9 @@ class SpeechVelocityPacer:
         zone: str = "body",
         media_kind: str = "image",
     ) -> tuple[float, float, str, str]:
+        if not self._parsed_cues and not self.voice_emphasis_events and not self.narrative_blocks:
+            return round(base_target, 3), 140.0, "balanced", ""
+
         wpm, tempo, has_emphasis = self.get_velocity_at(current_time)
         self.stats["wpms_sampled"].append(wpm)
 

@@ -52,29 +52,60 @@ def build_pcm_sfx_event_bed(
     try:
         import numpy as np
 
-        # Otimização em memória contígua direta quando cabe confortavelmente na RAM (<900MB),
-        # executando a mixagem de centenas de eventos em menos de 2 segundos.
-        if total_frames <= 120_000_000:
+        def _load_and_normalize_clip(clip_path: Path) -> np.ndarray | None:
+            try:
+                with wave.open(str(clip_path), "rb") as source:
+                    channels_in = source.getnchannels()
+                    framerate = source.getframerate()
+                    sampwidth = source.getsampwidth()
+                    raw = source.readframes(source.getnframes())
+                    if not raw:
+                        return None
+                    if sampwidth == 2:
+                        clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
+                    elif sampwidth == 1:
+                        clip_arr = (np.frombuffer(raw, dtype=np.uint8).astype(np.int32) - 128) * 256
+                    else:
+                        return None
+
+                    if channels_in == 1:
+                        clip_arr = np.repeat(clip_arr, 2)
+                    elif channels_in > 2:
+                        # Se multicanal (>2), extrair os dois primeiros canais
+                        frames_cnt = len(clip_arr) // channels_in
+                        clip_arr = clip_arr.reshape(frames_cnt, channels_in)[:, :2].flatten()
+
+                    if framerate != sample_rate and len(clip_arr) > 0:
+                        actual_frames = len(clip_arr) // channels
+                        target_frames_clip = int(round(actual_frames * sample_rate / framerate))
+                        if target_frames_clip > 0:
+                            old_x = np.linspace(0, actual_frames, actual_frames, endpoint=False)
+                            new_x = np.linspace(0, actual_frames, target_frames_clip, endpoint=False)
+                            left = np.interp(new_x, old_x, clip_arr[0::2])
+                            right = np.interp(new_x, old_x, clip_arr[1::2])
+                            resampled = np.empty(target_frames_clip * 2, dtype=np.int32)
+                            resampled[0::2] = left.astype(np.int32)
+                            resampled[1::2] = right.astype(np.int32)
+                            clip_arr = resampled
+
+                    return clip_arr
+            except Exception:
+                return None
+
+        # Otimização em memória contígua direta quando cabe confortavelmente na RAM (<300MB)
+        if total_frames <= 35_000_000:
             bed_arr = np.zeros(total_frames * channels, dtype=np.int32)
             for event, clip in prepared:
                 start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
                 if start_frame >= total_frames:
                     continue
-                try:
-                    with wave.open(str(clip), "rb") as source:
-                        n_frames = min(source.getnframes(), total_frames - start_frame)
-                        if n_frames <= 0:
-                            continue
-                        raw = source.readframes(n_frames)
-                        if not raw:
-                            continue
-                        clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                        dst_s = start_frame * channels
-                        dst_e = dst_s + min(len(clip_arr), (total_frames - start_frame) * channels)
-                        src_len = dst_e - dst_s
-                        bed_arr[dst_s:dst_e] += clip_arr[:src_len]
-                except Exception:
+                clip_arr = _load_and_normalize_clip(clip)
+                if clip_arr is None or len(clip_arr) == 0:
                     continue
+                dst_s = start_frame * channels
+                dst_e = dst_s + min(len(clip_arr), (total_frames - start_frame) * channels)
+                src_len = dst_e - dst_s
+                bed_arr[dst_s:dst_e] += clip_arr[:src_len]
 
             with bed.open("wb") as target:
                 target.write(header)
@@ -82,7 +113,7 @@ def build_pcm_sfx_event_bed(
                 target.write(bed_arr.astype(np.int16).tobytes())
             return bed
 
-        # Process in 1-second chunks (48000 frames) as fallback for ultra-long timelines (>40 min)
+        # Process in chunks (48000 frames) as fallback for ultra-long timelines (>40 min)
         chunk_frames = 48000
         total_chunks = int(math.ceil(total_frames / chunk_frames))
 
@@ -91,18 +122,11 @@ def build_pcm_sfx_event_bed(
             start_frame = max(0, int(round(float(event.get("time") or 0.0) * sample_rate)))
             if start_frame >= total_frames:
                 continue
-            try:
-                with wave.open(str(clip), "rb") as source:
-                    n_frames = min(source.getnframes(), total_frames - start_frame)
-                    if n_frames <= 0:
-                        continue
-                    raw = source.readframes(n_frames)
-                    if not raw:
-                        continue
-                    clip_arr = np.frombuffer(raw, dtype=np.int16).astype(np.int32)
-                    loaded_events.append((start_frame, start_frame + n_frames, clip_arr))
-            except Exception:
+            clip_arr = _load_and_normalize_clip(clip)
+            if clip_arr is None or len(clip_arr) == 0:
                 continue
+            frames_in_clip = len(clip_arr) // channels
+            loaded_events.append((start_frame, start_frame + frames_in_clip, clip_arr))
 
         with bed.open("wb") as target:
             target.write(header)
@@ -127,7 +151,7 @@ def build_pcm_sfx_event_bed(
 
         return bed
     except Exception:
-        # Fallback robusto em Python puro caso NumPy falhe
+        # Fallback robusto em Python puro
         chunk_frames = 16384
         total_chunks = int(math.ceil(total_frames / chunk_frames))
         loaded_events_pure = []
@@ -137,6 +161,7 @@ def build_pcm_sfx_event_bed(
                 continue
             try:
                 with wave.open(str(clip), "rb") as source:
+                    channels_in = source.getnchannels()
                     n_frames = min(source.getnframes(), total_frames - start_frame)
                     if n_frames <= 0:
                         continue
@@ -147,7 +172,13 @@ def build_pcm_sfx_event_bed(
                     arr.frombytes(raw)
                     if sys.byteorder != "little":
                         arr.byteswap()
-                    loaded_events_pure.append((start_frame, start_frame + n_frames, arr))
+                    if channels_in == 1:
+                        stereo_arr = array.array("h")
+                        for s in arr:
+                            stereo_arr.append(s)
+                            stereo_arr.append(s)
+                        arr = stereo_arr
+                    loaded_events_pure.append((start_frame, start_frame + (len(arr) // 2), arr))
             except Exception:
                 continue
 

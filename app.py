@@ -15717,13 +15717,31 @@ def compose_visual_chunks_parallel(
 
     if len(chunks) <= 1:
         _append_log(job, "Timeline concisa: mantendo passagem unificada direta.")
+        if chunks and "plans" in chunks[0] and chunks[0]["plans"]:
+            try:
+                c_ass = subtitle_ass if (subtitle_ass and subtitle_ass.exists()) else None
+                return render_single_chunk_fused(
+                    job=job,
+                    chunk_info=chunks[0],
+                    subtitle_ass=c_ass,
+                    cta=cta,
+                    times=cta_times,
+                    work=work,
+                    target_duration=target_duration,
+                    out_name="video_final.mp4",
+                )
+            except RenderCancelled:
+                raise
+            except Exception as e:
+                _append_log(job, f"Aviso na passagem direta ({human_render_error(e)}); acionando concatenação clássica.")
+
         video_concat = work / "video_concat.mp4"
         if not video_concat.exists():
             concat_txt = work / "concat_segments_single.txt"
             lines = []
             for s in segments:
-                rel = s.relative_to(work).as_posix().replace("'", "'\\''")
-                lines.append(f"file '{rel}'")
+                safe_p = s.resolve().as_posix().replace("'", "'\\''")
+                lines.append(f"file '{safe_p}'")
             concat_txt.write_text("\n".join(lines), encoding="utf-8")
             cmd_c = [
                 FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
@@ -15778,23 +15796,6 @@ def compose_visual_chunks_parallel(
             c_dur = min(c_dur, target_duration - c_start)
         c_base = comp_base + idx * step_span
 
-        chunk_raw = work / f"chunk_raw_{idx}.mp4"
-        chunk_concat_txt = work / f"chunk_concat_{idx}.txt"
-
-        lines = []
-        for s in c_segs:
-            rel = s.relative_to(work).as_posix().replace("'", "'\\''")
-            lines.append(f"file '{rel}'")
-        chunk_concat_txt.write_text("\n".join(lines), encoding="utf-8")
-
-        cmd_raw = [
-            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
-            "-fflags", "+genpts",
-            "-f", "concat", "-safe", "0", "-i", chunk_concat_txt.name,
-            "-c", "copy", "-avoid_negative_ts", "make_zero", str(chunk_raw.name),
-        ]
-        run_cmd(job, cmd_raw, cwd=work, quiet_success=True)
-
         c_ass: Path | None = None
         if subtitle_ass and subtitle_ass.exists():
             c_ass = work / f"chunk_sub_{idx}.ass"
@@ -15808,7 +15809,7 @@ def compose_visual_chunks_parallel(
 
         out_name = f"chunk_visual_{idx}.mp4"
 
-        # FASE 3: Single-Pass Direct Chunk Stream (quando os planos estão disponíveis)
+        # FASE 3: Single-Pass Direct Chunk Stream (Prioridade Máxima — Precedência Imediata)
         if "plans" in chunk_info and chunk_info["plans"]:
             try:
                 res_chunk = render_single_chunk_fused(
@@ -15828,6 +15829,24 @@ def compose_visual_chunks_parallel(
                 raise
             except Exception as exc:
                 _append_log(job, f"Aviso no chunk single-pass {idx} ({human_render_error(exc)}); revertendo bloco para composição clássica...")
+
+        # Fallback legado: concatena os segmentos do bloco antes da aplicação de overlays
+        chunk_raw = work / f"chunk_raw_{idx}.mp4"
+        chunk_concat_txt = work / f"chunk_concat_{idx}.txt"
+
+        lines = []
+        for s in c_segs:
+            safe_p = s.resolve().as_posix().replace("'", "'\\''")
+            lines.append(f"file '{safe_p}'")
+        chunk_concat_txt.write_text("\n".join(lines), encoding="utf-8")
+
+        cmd_raw = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-filter_threads", "1",
+            "-fflags", "+genpts",
+            "-f", "concat", "-safe", "0", "-i", chunk_concat_txt.name,
+            "-c", "copy", "-avoid_negative_ts", "make_zero", str(chunk_raw.name),
+        ]
+        run_cmd(job, cmd_raw, cwd=work, quiet_success=True)
 
         try:
             res_chunk = compose_final_visuals(
@@ -20899,11 +20918,26 @@ def stream_plan_frames_to_pipe(
 
     if plan.media_kind == "video" and Path(str(plan.source)).exists():
         try:
+            src_w, src_h = probe_media_dimensions(plan.source)
+            delogo_boxes = get_media_delogo_boxes(plan.source)
+            vf_chain = build_video_filter(
+                w=w,
+                h=h,
+                setpts_factor=1.0,
+                target_duration=plan.duration,
+                zoom=getattr(plan, "zoom_direction", "in") or "in",
+                idx=plan.index,
+                source_w=src_w,
+                source_h=src_h,
+                delogo_boxes=delogo_boxes,
+            )
+            if not vf_chain:
+                vf_chain = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=30"
             decode_cmd = [
                 FFMPEG, "-hide_banner", "-loglevel", "error",
                 *(["-ss", f"{plan.source_offset:.3f}"] if plan.source_offset > 0.0 else []),
                 "-i", str(plan.source),
-                "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=30",
+                "-vf", vf_chain,
                 "-f", "rawvideo", "-pix_fmt", "yuv420p",
                 *(["-frames:v", str(target_frames)] if target_frames > 0 else []),
                 "-",
@@ -23123,11 +23157,12 @@ def concat_segments_and_mux(
                 valid_segments.append(seg)
             else:
                 _append_log(job, f"Aviso de montagem: segmento {seg.name} inválido ou vazio, ignorado na concatenação.")
-        lines = []
-        for s in valid_segments:
-            rel = s.relative_to(work).as_posix().replace("'", "'\\''")
-            lines.append(f"file '{rel}'")
-        concat_list.write_text("\n".join(lines), encoding="utf-8")
+
+    lines = []
+    for s in valid_segments:
+        safe_p = s.resolve().as_posix().replace("'", "'\\''")
+        lines.append(f"file '{safe_p}'")
+    concat_list.write_text("\n".join(lines), encoding="utf-8")
 
     video_concat = work / "video_concat.mp4"
     assembly_key = ""

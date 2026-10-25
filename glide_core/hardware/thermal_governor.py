@@ -41,6 +41,17 @@ def gpu_free_vram_mb() -> float | None:
     return None if free < 0 else free
 
 
+def _current_free_vram() -> float | None:
+    import sys
+    app_mod = sys.modules.get("app")
+    if app_mod is not None and hasattr(app_mod, "gpu_free_vram_mb"):
+        try:
+            return app_mod.gpu_free_vram_mb()
+        except Exception:
+            pass
+    return gpu_free_vram_mb()
+
+
 def _log_target(target: Any, msg: str) -> None:
     """Despacha mensagem de log para callback ou atributo log do job."""
     if target is None:
@@ -234,12 +245,13 @@ class _NvencGate:
     """
 
     MIN_FREE_FOR_EXTRA_MB = 1200.0
-    MAX_ACTIVE_SESSIONS = 1
+    MAX_ACTIVE_SESSIONS = 2
 
-    def __init__(self, governor: HardwareThermalGovernor | None = None) -> None:
+    def __init__(self, governor: HardwareThermalGovernor | None = None, max_sessions: int | None = None) -> None:
         self._cond = threading.Condition()
         self._active = 0
         self._governor = governor or HARDWARE_THERMAL_GOVERNOR
+        self.max_active_sessions = max_sessions if max_sessions is not None else self.MAX_ACTIVE_SESSIONS
 
     @property
     def active(self) -> int:
@@ -273,10 +285,11 @@ class _NvencGate:
             while True:
                 if self._active == 0:
                     break
-                if self._active >= self.MAX_ACTIVE_SESSIONS:
+                limit = getattr(self, "max_active_sessions", self.MAX_ACTIVE_SESSIONS)
+                if self._active >= limit:
                     self._cond.wait(timeout=0.5)
                     continue
-                free = gpu_free_vram_mb()
+                free = _current_free_vram()
                 if free is not None and free >= self.MIN_FREE_FOR_EXTRA_MB:
                     break
                 if cancel_check and cancel_check():
