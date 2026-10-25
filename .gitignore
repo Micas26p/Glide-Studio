@@ -66,3 +66,5 @@ asr_cache/
 queue_backups/
 .glide_trash/
 automator_pool/
+DROPZONE/
+desktop_smoke_ok.json
