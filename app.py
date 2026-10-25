@@ -1699,6 +1699,14 @@ class SegmentPlan:
     speech_wpm: float = 0.0
     pacing_tempo: str = "balanced"
 
+    @property
+    def duration(self) -> float:
+        return self.target_duration
+
+    @property
+    def index(self) -> int:
+        return self.source_index
+
 
 @dataclass
 class SubtitleCue:
@@ -20928,8 +20936,11 @@ def stream_plan_frames_to_pipe(
     Devolve a contagem de frames efetivamente enviados.
     """
     frames_written = 0
-    target_frames = max(2, int(plan.frame_count) if plan.frame_count > 0 else int(round(max(0.1, plan.target_duration) * 30)))
+    target_dur = float(getattr(plan, "target_duration", getattr(plan, "raw_duration", 0.0)) or 0.0)
+    src_idx = int(getattr(plan, "source_index", getattr(plan, "sub_slice_index", 0)) or 0)
+    target_frames = max(2, int(getattr(plan, "frame_count", 0)) if getattr(plan, "frame_count", 0) > 0 else int(round(max(0.1, target_dur) * 30)))
     frame_size = w * h * 3 // 2
+    last_raw_chunk: bytes | None = None
 
     if plan.media_kind == "image" or is_image_path(plan.source):
         try:
@@ -20938,20 +20949,22 @@ def stream_plan_frames_to_pipe(
             img_source = ensure_compatible_image_source(plan.source, work)
             img = _load_image_bgr(img_source)
             if img is not None:
-                style_profile = job.options.get("_style_profile_effective") or reference_style_profile(job.options)
+                job_options = getattr(job, "options", None) or {}
+                style_profile = job_options.get("_style_profile_effective") or reference_style_profile(job_options)
                 spec = image_motion_spec(
                     w,
                     h,
-                    plan.target_duration,
-                    plan.image_motion or image_motion_for(img_source, plan.source_index),
+                    target_dur,
+                    plan.image_motion or image_motion_for(img_source, src_idx),
                     img_source,
                     style_profile,
-                    is_outro=plan.is_outro,
+                    is_outro=getattr(plan, "is_outro", False),
                     focal_point=getattr(plan, "focal_point", None),
                     safe_framing=getattr(plan, "safe_framing", None),
                     hflip=getattr(plan, "hflip", False),
                     clean_roi=getattr(plan, "clean_roi", None),
                 )
+                spec["frames"] = target_frames
                 bw = (int(np.ceil(w * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
                 bh = (int(np.ceil(h * IMAGE_MOTION_ZMAX)) + 3) // 4 * 4
                 base = _build_image_motion_base(spec, img, bw, bh)
@@ -20971,8 +20984,7 @@ def stream_plan_frames_to_pipe(
                 luma_flags = cv2.INTER_CUBIC | cv2.WARP_INVERSE_MAP
                 chroma_flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
 
-                total_f = int(spec.get("frames") or target_frames)
-                for frame_no in range(total_f):
+                for frame_no in range(target_frames):
                     if job.cancel_requested:
                         raise RenderCancelled("Render cancelado pelo usuario.")
                     zoom, fx, fy = image_motion_state(spec, frame_no)
@@ -20993,34 +21005,73 @@ def stream_plan_frames_to_pipe(
                     cv2.warpAffine(plane_y, m_luma, (w, h), dst=out_y, flags=luma_flags, borderMode=cv2.BORDER_REPLICATE)
                     cv2.warpAffine(plane_u, m_chroma, (w // 2, h // 2), dst=out_u, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
                     cv2.warpAffine(plane_v, m_chroma, (w // 2, h // 2), dst=out_v, flags=chroma_flags, borderMode=cv2.BORDER_REPLICATE)
-                    stdin_pipe.write(frame.data)
+                    frame_bytes = frame.tobytes() if hasattr(frame, "tobytes") else bytes(frame.data)
+                    stdin_pipe.write(frame_bytes)
+                    last_raw_chunk = frame_bytes
                     frames_written += 1
-                return frames_written
         except RenderCancelled:
             raise
         except Exception as exc:
             _append_log(job, f"Aviso no subpixel streaming de {plan.source.name} ({exc}); gerando frames neutros.")
 
-    if plan.media_kind == "video" and Path(str(plan.source)).exists():
+    elif Path(str(plan.source)).exists():
+        clip_proc = None
         try:
+            job_options = getattr(job, "options", None) or {}
+            try:
+                visual = effective_visual_options(job)
+            except Exception:
+                visual = job_options
+
+            tone = str(
+                (getattr(job, "audio_analysis", None) or {}).get("tone")
+                or (getattr(job, "emotion_summary", None) or {}).get("tone")
+                or (getattr(job, "audio_health_summary", None) or {}).get("tone")
+                or job_options.get("projectTone")
+                or job_options.get("tone")
+                or "explanatory"
+            )
+            filmic_grade = filmic_grade_filter_for(job_options, tone)
+            effective_zoom = str(getattr(plan, "zoom_direction", None) or visual.get("zoom") or job_options.get("zoom") or "in")
+            is_reversed = bool(getattr(plan, "is_reversed", False))
+            is_outro = bool(getattr(plan, "is_outro", False))
+            punch_in = bool(getattr(plan, "punch_in", False))
+            hflip = bool(getattr(plan, "hflip", False))
+            scale_boost = float(getattr(plan, "scale_boost", 1.0) or 1.0)
+            delogo_boxes = getattr(plan, "delogo_boxes", None) or get_media_delogo_boxes(plan.source, work)
+            quality_boost = bool(visual.get("quality_boost", True))
+            transitions = str(visual.get("transitions", "off"))
+            reused = bool(getattr(plan, "cycle", 0) > 0 and not turbo_enabled(job))
+
             src_w, src_h = probe_media_dimensions(plan.source)
-            delogo_boxes = get_media_delogo_boxes(plan.source)
             vf_chain = build_video_filter(
                 w=w,
                 h=h,
                 setpts_factor=1.0,
-                target_duration=plan.duration,
-                zoom=getattr(plan, "zoom_direction", "in") or "in",
-                idx=plan.index,
+                target_duration=target_dur,
+                zoom=effective_zoom,
+                idx=src_idx,
+                transitions=transitions,
+                reused=reused,
+                quality_boost=quality_boost,
+                intro_fade=0.0,
+                continuity_filter="",
+                is_reversed=is_reversed,
+                is_outro=is_outro,
+                filmic_grade=filmic_grade,
+                punch_in=punch_in,
+                hflip=hflip,
+                scale_boost=scale_boost,
                 source_w=src_w,
                 source_h=src_h,
                 delogo_boxes=delogo_boxes,
             )
             if not vf_chain:
                 vf_chain = f"scale={w}:{h}:force_original_aspect_ratio=decrease,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,fps=30"
+            source_offset = float(getattr(plan, "source_offset", 0.0) or 0.0)
             decode_cmd = [
                 FFMPEG, "-hide_banner", "-loglevel", "error",
-                *(["-ss", f"{plan.source_offset:.3f}"] if plan.source_offset > 0.0 else []),
+                *(["-ss", f"{source_offset:.3f}"] if source_offset > 0.0 else []),
                 "-i", str(plan.source),
                 "-vf", vf_chain,
                 "-f", "rawvideo", "-pix_fmt", "yuv420p",
@@ -21035,26 +21086,39 @@ def stream_plan_frames_to_pipe(
                 raw_chunk = clip_proc.stdout.read(frame_size)
                 if len(raw_chunk) == frame_size:
                     stdin_pipe.write(raw_chunk)
+                    last_raw_chunk = raw_chunk
                     frames_written += 1
                 else:
                     break
-            clip_proc.stdout.close()
-            clip_proc.wait()
         except RenderCancelled:
             raise
         except Exception as exc:
             _append_log(job, f"Aviso ao decodificar clipe {plan.source.name} ({exc}).")
+        finally:
+            if clip_proc is not None:
+                try:
+                    if clip_proc.poll() is None:
+                        _terminate_process(clip_proc)
+                    clip_proc.stdout.close()
+                    clip_proc.wait(timeout=2.0)
+                except Exception:
+                    pass
 
     if frames_written < target_frames:
-        import numpy as np
         missing = target_frames - frames_written
-        blank = np.zeros(frame_size, dtype=np.uint8)
-        blank[:w * h] = 40
-        blank[w * h:] = 128
-        blank_data = blank.data
-        for _ in range(missing):
-            stdin_pipe.write(blank_data)
-            frames_written += 1
+        if last_raw_chunk is not None:
+            for _ in range(missing):
+                stdin_pipe.write(last_raw_chunk)
+                frames_written += 1
+        else:
+            import numpy as np
+            blank = np.zeros(frame_size, dtype=np.uint8)
+            blank[:w * h] = 40
+            blank[w * h:] = 128
+            blank_data = blank.data
+            for _ in range(missing):
+                stdin_pipe.write(blank_data)
+                frames_written += 1
 
     return frames_written
 

@@ -1040,6 +1040,192 @@ class Regressions(unittest.TestCase):
         self.assertIn(res["action"], ("hard_reject", "soft_reject", "soft_suspect"))
         self.assertIn(res["category"], ("data_dominant", "presentation_slide", "ui_screenshot"))
 
+    def test_stream_plan_frames_to_pipe_video_no_attribute_error(self):
+        """Verifica que stream_plan_frames_to_pipe decodifica video sem AttributeError e SegmentPlan possui duration/index."""
+        job = app.Job(id="test_stream_job", options={"mode": "standard", "ratio": "16:9"})
+        plan = app.SegmentPlan(
+            source=Path("dummy_video.mp4"),
+            raw_duration=2.0,
+            target_duration=2.0,
+            source_index=1,
+            cycle=0,
+            media_kind="video",
+            frame_count=6,
+        )
+        # SegmentPlan possui properties duration e index como aliases robustos
+        self.assertEqual(plan.duration, 2.0)
+        self.assertEqual(plan.index, 1)
+
+        # Objeto duck-typed sem duration e sem index para garantir que getattr tambem funciona
+        class DuckPlan:
+            source = Path("dummy_video.mp4")
+            raw_duration = 2.0
+            target_duration = 2.0
+            source_index = 1
+            cycle = 0
+            media_kind = "video"
+            frame_count = 6
+
+        duck = DuckPlan()
+        self.assertFalse(hasattr(duck, "duration"))
+        self.assertFalse(hasattr(duck, "index"))
+
+        w, h = 64, 64
+        frame_size = w * h * 3 // 2
+        pipe = io.BytesIO()
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(app, "probe_media_dimensions", return_value=(64, 64)), \
+             patch.object(app, "get_media_delogo_boxes", return_value=[]):
+            mock_proc = unittest.mock.MagicMock()
+            fake_frame = b"\xaa" * frame_size
+            mock_proc.stdout.read.side_effect = [fake_frame] * 6 + [b""]
+            mock_proc.poll.return_value = 0
+            mock_proc.stdout.close = unittest.mock.MagicMock()
+            mock_proc.wait = unittest.mock.MagicMock()
+
+            with patch.object(app, "_popen_hidden", return_value=mock_proc):
+                written = app.stream_plan_frames_to_pipe(job, duck, w, h, pipe, Path("."))
+                self.assertEqual(written, 6)
+                self.assertEqual(pipe.getvalue(), fake_frame * 6)
+
+    def test_stream_plan_frames_to_pipe_repeats_last_chunk_on_short_decode(self):
+        """Verifica que quando FFmpeg entrega menos frames que target_frames, repete last_raw_chunk em vez de inserir tela escura."""
+        job = app.Job(id="test_stream_pad", options={"mode": "standard", "ratio": "16:9"})
+        plan = app.SegmentPlan(
+            source=Path("dummy_short.mp4"),
+            raw_duration=2.0,
+            target_duration=2.0,
+            source_index=0,
+            cycle=0,
+            media_kind="video",
+            frame_count=5,
+        )
+        w, h = 64, 64
+        frame_size = w * h * 3 // 2
+        pipe = io.BytesIO()
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(app, "probe_media_dimensions", return_value=(64, 64)), \
+             patch.object(app, "get_media_delogo_boxes", return_value=[]):
+            mock_proc = unittest.mock.MagicMock()
+            frame1 = b"\x11" * frame_size
+            frame2 = b"\x22" * frame_size
+            mock_proc.stdout.read.side_effect = [frame1, frame2, b""]
+            mock_proc.poll.return_value = 0
+            mock_proc.stdout.close = unittest.mock.MagicMock()
+            mock_proc.wait = unittest.mock.MagicMock()
+
+            with patch.object(app, "_popen_hidden", return_value=mock_proc):
+                written = app.stream_plan_frames_to_pipe(job, plan, w, h, pipe, Path("."))
+                self.assertEqual(written, 5)
+                expected = frame1 + frame2 + (frame2 * 3)
+                self.assertEqual(pipe.getvalue(), expected)
+
+    def test_stream_plan_frames_to_pipe_fallback_on_zero_frames(self):
+        """Verifica que quando a decodificacao falha completamente sem gerar nenhum frame, preenche com frames neutros de salvaguarda."""
+        job = app.Job(id="test_stream_fail", options={"mode": "standard", "ratio": "16:9"})
+        plan = app.SegmentPlan(
+            source=Path("dummy_fail.mp4"),
+            raw_duration=1.0,
+            target_duration=1.0,
+            source_index=0,
+            cycle=0,
+            media_kind="video",
+            frame_count=3,
+        )
+        w, h = 64, 64
+        frame_size = w * h * 3 // 2
+        pipe = io.BytesIO()
+
+        with patch.object(Path, "exists", return_value=True), \
+             patch.object(app, "probe_media_dimensions", side_effect=Exception("probe error")):
+            written = app.stream_plan_frames_to_pipe(job, plan, w, h, pipe, Path("."))
+            self.assertEqual(written, 3)
+            self.assertEqual(len(pipe.getvalue()), 3 * frame_size)
+            out_bytes = pipe.getvalue()
+            self.assertEqual(out_bytes[0], 40)
+            self.assertEqual(out_bytes[w * h], 128)
+
+    def test_stream_plan_frames_to_pipe_real_video_clip(self):
+        """Executa stream_plan_frames_to_pipe com um video MP4 sintetico real via FFmpeg para validar integracao completa."""
+        if not app.FFMPEG or not Path(app.FFMPEG).exists():
+            self.skipTest("FFmpeg nao disponivel")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_mp4 = Path(tmpdir) / "synth.mp4"
+            import subprocess
+            subprocess.run([
+                app.FFMPEG, "-y", "-f", "lavfi", "-i", "testsrc=duration=0.5:size=64x64:rate=30",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(test_mp4)
+            ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            job = app.Job(id="test_stream_real", options={"mode": "standard", "ratio": "16:9"})
+            plan = app.SegmentPlan(
+                source=test_mp4,
+                raw_duration=0.2,
+                target_duration=0.2,
+                source_index=0,
+                cycle=0,
+                media_kind="video",
+                frame_count=6,
+            )
+            pipe = io.BytesIO()
+            written = app.stream_plan_frames_to_pipe(job, plan, 64, 64, pipe, Path(tmpdir))
+            self.assertEqual(written, 6)
+            self.assertEqual(len(pipe.getvalue()), 6 * (64 * 64 * 3 // 2))
+
+    def test_stream_plan_frames_to_pipe_image_exact_frame_count(self):
+        """Garante que imagem gera exatamente target_frames quando frame_count eh quantizado diferente de round(dur*30)."""
+        import numpy as np
+        import cv2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            img_path = Path(tmpdir) / "test_img.jpg"
+            dummy_img = np.full((100, 100, 3), 180, dtype=np.uint8)
+            cv2.imwrite(str(img_path), dummy_img)
+
+            job = app.Job(id="test_img_job", options={"mode": "standard", "ratio": "16:9"})
+            # target_duration 0.2s = 6 frames, mas frame_count quantizado pede 9 frames
+            plan = app.SegmentPlan(
+                source=img_path,
+                raw_duration=0.2,
+                target_duration=0.2,
+                source_index=0,
+                cycle=0,
+                media_kind="image",
+                frame_count=9,
+            )
+            pipe = io.BytesIO()
+            w, h = 64, 64
+            written = app.stream_plan_frames_to_pipe(job, plan, w, h, pipe, Path(tmpdir))
+            self.assertEqual(written, 9)
+            self.assertEqual(len(pipe.getvalue()), 9 * (w * h * 3 // 2))
+
+    def test_stream_plan_frames_to_pipe_user_p1_media_if_present(self):
+        """Executa decodificacao real contra clipe original do Projeto 1 se existir em AppData."""
+        p1_clip = Path(r"C:\Users\Micael\AppData\Local\Programs\Glide Studio\project_media\p_mpa1ikuo_4qiv\002d9e42f5055bcad533_f5de9cdab1.mp4")
+        if not p1_clip.exists():
+            self.skipTest("Clipe original do Projeto 1 nao encontrado em AppData")
+        job = app.Job(id="test_user_p1_media", options={"mode": "standard", "ratio": "16:9", "quality_boost": True})
+        plan = app.SegmentPlan(
+            source=p1_clip,
+            raw_duration=1.0,
+            target_duration=1.0,
+            source_index=1,
+            cycle=0,
+            media_kind="video",
+            frame_count=30,
+        )
+        pipe = io.BytesIO()
+        w, h = 160, 90
+        written = app.stream_plan_frames_to_pipe(job, plan, w, h, pipe, Path("."))
+        self.assertEqual(written, 30)
+        data = pipe.getvalue()
+        self.assertEqual(len(data), 30 * (w * h * 3 // 2))
+        first_frame_y = data[:w * h]
+        avg_y = sum(first_frame_y) / len(first_frame_y)
+        # O video original contem cena real clara (avg Y > 60), comprovando que nao eh tela escura (Y=40)
+        self.assertGreater(avg_y, 60.0)
+
 
 if __name__ == '__main__':
     unittest.main()
