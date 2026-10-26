@@ -3860,6 +3860,8 @@ def _auto_assign_project_cta(project: dict[str, Any]) -> str:
         if sample:
             break
     language = detect_text_language(sample or str(project.get("name") or ""), default="pt")
+    if language == "ja":
+        language = "en"
     if language not in CTA_LANGUAGES or not cta_source_path(language).exists():
         language = "pt" if cta_source_path("pt").exists() else next(
             (key for key in CTA_LANGUAGES if cta_source_path(key).exists()), "")
@@ -13564,7 +13566,11 @@ _LANGUAGE_STOPWORDS: dict[str, frozenset[str]] = {
 
 def detect_text_language(text: str, default: str = "pt") -> str:
     """Deteção local O(n) por stopwords — sem rede, suficiente para escolher o CTA."""
-    words = re.findall(r"[^\W\d_]+", str(text or "").lower())[:4000]
+    s = str(text or "")
+    cjk_count = sum(1 for ch in s if '\u3040' <= ch <= '\u30ff' or '\u4e00' <= ch <= '\u9fff')
+    if cjk_count >= 3:
+        return "ja"
+    words = re.findall(r"[^\W\d_]+", s.lower())[:4000]
     if not words:
         return default
     scores = {lang: sum(1 for w in words if w in stop) for lang, stop in _LANGUAGE_STOPWORDS.items()}
@@ -14591,6 +14597,10 @@ def build_ass_file(
         return None
     style = subtitle_style_from_options(job.options)
     caption_style = caption_style_from_options(job.options)
+    has_cjk = any(any('\u3040' <= ch <= '\u30ff' or '\u4e00' <= ch <= '\u9fff' for ch in str(cue.text or "")) for cue in (cues + caption_cues))
+    if has_cjk:
+        style["font"] = "Yu Gothic"
+        caption_style["font"] = "Yu Gothic"
     cinematic = intro_mode(job.options) == "cinematic"
     offset = float(summary.get("cinematic_offset") or (intro_duration(job.options) if cinematic else 0.0))
     caption_summary = dict((job.caption_summary if isinstance(job.caption_summary, dict) else {}) or {})
@@ -14612,6 +14622,8 @@ def build_ass_file(
     x = w // 2
     y = h - margin_v
     intro_style = intro_subtitle_style_from_options(job.options) if cinematic else None
+    if intro_style and has_cjk:
+        intro_style["font"] = "Yu Gothic"
     intro_font_size = int((intro_style or {}).get("size", 76) * (h / 720)) if intro_style else font_size
     intro_font_size = max(40, min(170, intro_font_size))
     intro_y = int(h * ((intro_style or {}).get("position", 44) / 100)) if intro_style else h // 2
