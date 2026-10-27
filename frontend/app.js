@@ -364,6 +364,7 @@ const safeRenderBtn = $('#safeRenderBtn');
 const spaceManagerBtn = $('#spaceManagerBtn');
 const spaceManagerBox = $('#spaceManagerBox');
 const spaceSummary = $('#spaceSummary');
+const spaceCleanStatus = $('#spaceCleanStatus');
 
 const videoExt = ['mp4', 'mov', 'mkv', 'webm', 'avi', 'm4v', 'mts', 'm2ts'];
 const imageExt = ['jpg', 'jpeg', 'png', 'webp', 'bmp', 'tif', 'tiff', 'avif', 'heic', 'heif', 'jfif'];
@@ -8926,11 +8927,29 @@ async function refreshSpaceReport(){
   }
 }
 
-async function cleanSpace(action){
+async function cleanSpace(action, clickedBtn){
+  const cleanButtons = spaceManagerBox ? Array.from(spaceManagerBox.querySelectorAll('[data-space-clean]')) : [];
+  const targetBtn = clickedBtn || (spaceManagerBox ? spaceManagerBox.querySelector(`[data-space-clean="${action}"]`) : null);
+  const originalText = targetBtn ? targetBtn.textContent : '';
+
   if(state.renderActive || state.queueRendering){
-    dockSummary.textContent = 'Limpeza de espaco fica bloqueada durante render para proteger arquivos temporarios.';
+    const msg = 'A limpeza de espaço fica bloqueada durante render para proteger arquivos temporários.';
+    if(spaceCleanStatus){
+      spaceCleanStatus.textContent = msg;
+      spaceCleanStatus.style.color = '#f59e0b';
+    }
+    if(dockSummary) dockSummary.textContent = msg;
+    showToast('Limpeza bloqueada', msg, 'warning');
     return;
   }
+
+  cleanButtons.forEach(b => b.disabled = true);
+  if(targetBtn) targetBtn.textContent = 'Limpando...';
+  if(spaceCleanStatus){
+    spaceCleanStatus.textContent = 'Executando limpeza em segundo plano...';
+    spaceCleanStatus.style.color = 'var(--text)';
+  }
+
   try{
     const response = await fetch('/api/storage/clean', {
       method: 'POST',
@@ -8938,12 +8957,47 @@ async function cleanSpace(action){
       body: JSON.stringify({action}),
       cache: 'no-store',
     });
-    if(!response.ok) throw new Error(await response.text());
+    if(!response.ok){
+      const errText = await response.text();
+      throw new Error(errText);
+    }
     const payload = await response.json();
-    dockSummary.textContent = `Limpeza concluida: ${payload.summary?.space_recovered || '0 B'} liberado(s).`;
-    renderSpaceReport(payload.space);
+    const recovered = payload.summary?.space_recovered || '0 B';
+    const removedCount = Number(payload.summary?.removed || 0);
+    const bytes = Number(payload.summary?.bytes_recovered || 0);
+
+    if(payload.space){
+      renderSpaceReport(payload.space);
+    }
+
+    if(bytes > 0){
+      const successMsg = `Limpeza concluída: ${recovered} liberado(s) (${removedCount} item(ns) removido(s)).`;
+      if(spaceCleanStatus){
+        spaceCleanStatus.textContent = successMsg;
+        spaceCleanStatus.style.color = 'var(--accent, #28d5bf)';
+      }
+      if(dockSummary) dockSummary.textContent = successMsg;
+      showToast('Espaço liberado', `${recovered} recuperado(s) com sucesso.`, 'success');
+    }else{
+      const emptyMsg = `Nenhum item pendente para remoção nesta categoria (${recovered} liberados).`;
+      if(spaceCleanStatus){
+        spaceCleanStatus.textContent = emptyMsg;
+        spaceCleanStatus.style.color = 'var(--muted)';
+      }
+      if(dockSummary) dockSummary.textContent = emptyMsg;
+      showToast('Espaço verificado', 'A categoria selecionada já se encontra limpa.', 'info');
+    }
   }catch(error){
-    dockSummary.textContent = `Limpeza não executada: ${error.message || error}`;
+    const errorMsg = `Erro na limpeza: ${error.message || error}`;
+    if(spaceCleanStatus){
+      spaceCleanStatus.textContent = errorMsg;
+      spaceCleanStatus.style.color = '#ef4444';
+    }
+    if(dockSummary) dockSummary.textContent = errorMsg;
+    showToast('Erro na limpeza', error.message || String(error), 'error');
+  }finally{
+    cleanButtons.forEach(b => b.disabled = false);
+    if(targetBtn) targetBtn.textContent = originalText;
   }
 }
 
@@ -10065,7 +10119,7 @@ if(spaceManagerBtn) spaceManagerBtn.addEventListener('click', refreshSpaceReport
 if(spaceManagerBox){
   spaceManagerBox.addEventListener('click', event => {
     const btn = event.target.closest('[data-space-clean]');
-    if(btn) cleanSpace(btn.dataset.spaceClean);
+    if(btn) cleanSpace(btn.dataset.spaceClean, btn);
   });
 }
 if(pauseQueueBtn) pauseQueueBtn.addEventListener('click', requestQueuePause);

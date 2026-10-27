@@ -266,17 +266,31 @@ def _maintenance_safe_child(path: Path) -> Path | None:
         return None
     if resolved == root or root not in resolved.parents:
         return None
-    protected_roots = {
-        PROJECT_MEDIA_ROOT.resolve(),
+    protected_root_dirs = {
+        root,
         EXPORT_ROOT.resolve(),
         DROPZONE_ROOT.resolve(),
         DROPZONE_OUTPUT_ROOT.resolve(),
+        PROJECT_MEDIA_ROOT.resolve(),
+        UPLOAD_ROOT.resolve(),
+        CTA_CACHE_ROOT.resolve(),
+        RENDER_GRAPH_CACHE_ROOT.resolve(),
+    }
+    if resolved in protected_root_dirs:
+        return None
+    strictly_protected_trees = {
+        PROJECT_MEDIA_ROOT.resolve(),
         ASSETS.resolve(),
         FRONTEND.resolve(),
         MODEL_PACK_ROOT.parent.resolve(),
+        (root / ".git").resolve(),
     }
-    if any(resolved == item or item in resolved.parents for item in protected_roots):
+    if any(resolved == tree or tree in resolved.parents for tree in strictly_protected_trees):
         return None
+    if resolved.parent == root:
+        allowed_root_dir_names = set(SAFE_STARTUP_DIR_NAMES) | set(SAFE_AGED_DIR_POLICIES.keys()) | set(SAFE_OLD_PROFILE_DIR_NAMES)
+        if resolved.name not in allowed_root_dir_names and resolved.suffix.lower() not in {".log", ".tmp"}:
+            return None
     return resolved
 
 
@@ -19212,20 +19226,64 @@ def api_storage_clean(payload: dict[str, Any] | None = Body(None)):
             summary["errors"].append(f"{bucket}: {exc}")
 
     if action in {"temporaries", "clear_temporaries"}:
-        for path in (UPLOAD_ROOT, CTA_CACHE_ROOT / "tmp"):
-            remove_inside(path, path.name)
+        if UPLOAD_ROOT.exists():
+            with AUTOMATOR_SESSION_LOCK:
+                active_session_ids = set(AUTOMATOR_SESSIONS.keys())
+            for child in list(UPLOAD_ROOT.iterdir()):
+                try:
+                    if child.is_dir() and child.name == "automator_sessions":
+                        for session_dir in list(child.iterdir()):
+                            if session_dir.name not in active_session_ids:
+                                remove_inside(session_dir, f"session_{session_dir.name}")
+                    elif child.is_dir() and child.name == "_queue_autotest":
+                        remove_inside(child, child.name)
+                    elif child.is_file():
+                        remove_inside(child, child.name)
+                    elif child.is_dir():
+                        remove_inside(child, child.name)
+                except Exception as exc:
+                    summary["errors"].append(f"upload/{child.name}: {exc}")
+        cta_tmp = CTA_CACHE_ROOT / "tmp"
+        if cta_tmp.exists():
+            for child in list(cta_tmp.iterdir()):
+                remove_inside(child, f"cta_tmp/{child.name}")
+        for tmp_file in DATA_ROOT.glob("*.tmp"):
+            if tmp_file.is_file() and tmp_file.name not in {".glide_build_marker"}:
+                remove_inside(tmp_file, tmp_file.name)
+        for tmp_file in DATA_ROOT.glob(".*.tmp"):
+            if tmp_file.is_file() and tmp_file.name not in {".glide_build_marker"}:
+                remove_inside(tmp_file, tmp_file.name)
     elif action in {"old_cache", "clear_old_cache"}:
-        cleanup = RenderGraph(RENDER_GRAPH_CACHE_ROOT, INTELLIGENCE_DB, APP_VERSION, "storage-clean").cleanup(force=False)
-        summary["removed"] += int(cleanup.get("removed") or 0)
-        summary["bytes_recovered"] += int(cleanup.get("reclaimed_bytes") or 0)
+        try:
+            cleanup = RenderGraph(
+                db=INTELLIGENCE_DB,
+                cache_root=RENDER_GRAPH_CACHE_ROOT,
+                job_id="storage-clean",
+                project_id="",
+                max_bytes=0,
+            ).cleanup(force=True)
+            summary["removed"] += int(cleanup.get("removed") or 0)
+            summary["bytes_recovered"] += int(cleanup.get("reclaimed_bytes") or 0)
+        except Exception as exc:
+            summary["errors"].append(f"render_cache: {exc}")
+        legacy_renders = DATA_ROOT / "renders"
+        if legacy_renders.exists():
+            for child in list(legacy_renders.iterdir()):
+                remove_inside(child, f"renders/{child.name}")
     elif action in {"old_exports", "clear_old_exports"}:
-        cutoff = time.time() - 14 * 24 * 60 * 60
-        for child in EXPORT_ROOT.iterdir() if EXPORT_ROOT.exists() else []:
-            try:
-                if child.stat().st_mtime < cutoff and child.name.lower().startswith(("batch_", "render_")):
-                    remove_inside(child, child.name)
-            except Exception as exc:
-                summary["errors"].append(f"{child.name}: {exc}")
+        min_age_days = float(data.get("min_age_days") or 3.0)
+        cutoff = time.time() - (min_age_days * 24 * 60 * 60)
+        if EXPORT_ROOT.exists():
+            for child in list(EXPORT_ROOT.iterdir()):
+                try:
+                    if child.is_dir() and child.name.lower().startswith(("batch_", "render_")):
+                        if child.stat().st_mtime < cutoff:
+                            remove_inside(child, child.name)
+                    elif child.is_file() and child.suffix.lower() in {".mp4", ".mov", ".mkv", ".webm", ".avi", ".log"}:
+                        if child.name not in {"queue_preflight_plan.json", "space_report.json"} and child.stat().st_mtime < cutoff:
+                            remove_inside(child, child.name)
+                except Exception as exc:
+                    summary["errors"].append(f"{child.name}: {exc}")
     elif action in {"old_logs", "clear_old_logs"}:
         for path in _safe_old_log_files():
             try:

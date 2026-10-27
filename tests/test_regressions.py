@@ -1226,6 +1226,57 @@ class Regressions(unittest.TestCase):
         # O video original contem cena real clara (avg Y > 60), comprovando que nao eh tela escura (Y=40)
         self.assertGreater(avg_y, 60.0)
 
+    def test_storage_clean_and_safety_gate(self):
+        import shutil
+        # 1. Validar portoes de seguranca (dados vitais NUNCA podem ser apagados)
+        self.assertIsNone(app._maintenance_safe_child(app.EXPORT_ROOT))
+        self.assertIsNone(app._maintenance_safe_child(app.PROJECT_MEDIA_ROOT))
+        self.assertIsNone(app._maintenance_safe_child(app.PROJECT_MEDIA_ROOT / 'sub' / 'media.mp4'))
+        self.assertIsNone(app._maintenance_safe_child(Path('queue_projects.json')))
+        self.assertIsNone(app._maintenance_safe_child(Path('intelligence.db')))
+        self.assertIsNone(app._maintenance_safe_child(Path('glide_settings.json')))
+        self.assertIsNone(app._maintenance_safe_child(Path('app.py')))
+
+        # 2. Criar lote de teste antigo e lote novo em exports
+        test_old_batch = app.EXPORT_ROOT / 'batch_regression_old_test'
+        test_fresh_batch = app.EXPORT_ROOT / 'batch_regression_fresh_test'
+        old_jobs = dict(app.JOBS)
+        app.JOBS.clear()
+        try:
+            test_old_batch.mkdir(parents=True, exist_ok=True)
+            (test_old_batch / 'dummy.txt').write_text('old', encoding='utf-8')
+            old_time = time.time() - 10 * 86400
+            os.utime(test_old_batch, (old_time, old_time))
+            os.utime(test_old_batch / 'dummy.txt', (old_time, old_time))
+
+            test_fresh_batch.mkdir(parents=True, exist_ok=True)
+            (test_fresh_batch / 'dummy.txt').write_text('fresh', encoding='utf-8')
+
+            # Batch export eh filho permitido para manutencao
+            self.assertIsNotNone(app._maintenance_safe_child(test_old_batch))
+
+            # 3. Testar acoes de limpeza
+            res_cache = app.api_storage_clean({'action': 'old_cache'})
+            self.assertTrue(res_cache.get('ok'))
+
+            res_logs = app.api_storage_clean({'action': 'old_logs'})
+            self.assertTrue(res_logs.get('ok'))
+
+            res_temps = app.api_storage_clean({'action': 'temporaries'})
+            self.assertTrue(res_temps.get('ok'))
+
+            res_exports = app.api_storage_clean({'action': 'old_exports', 'min_age_days': 3.0})
+            self.assertTrue(res_exports.get('ok'))
+
+            # O lote antigo deve ter sido removido, e o novo preservado intacto
+            self.assertFalse(test_old_batch.exists())
+            self.assertTrue(test_fresh_batch.exists())
+        finally:
+            app.JOBS.clear()
+            app.JOBS.update(old_jobs)
+            shutil.rmtree(test_old_batch, ignore_errors=True)
+            shutil.rmtree(test_fresh_batch, ignore_errors=True)
+
 
 if __name__ == '__main__':
     unittest.main()
